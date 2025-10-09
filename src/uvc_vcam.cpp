@@ -93,7 +93,7 @@ uvc_vcam::uvc_vcam()
 	curr_alt_setting = -1; ///-1 表示当前没选择任何接口
 
 	curr_format_index = 1; //默认
-	curr_frame_index = 1; ///默认值
+	curr_frame_index = 2; ///默认值
 	////
 	iso_ep_addr = EP_ADDR;
 
