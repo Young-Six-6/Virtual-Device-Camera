@@ -532,23 +532,18 @@ struct uvc_color_matching_descriptor {
 
 /* 4.3.1.1. Video Probe and Commit Controls */
 struct uvc_streaming_control {
-	__u16 bmHint;
-	__u8  bFormatIndex;
-	__u8  bFrameIndex;
-	__u32 dwFrameInterval;
-	__u16 wKeyFrameRate;
-	__u16 wPFrameRate;
-	__u16 wCompQuality;
-	__u16 wCompWindowSize;
-	__u16 wDelay;
-	__u32 dwMaxVideoFrameSize;
-	__u32 dwMaxPayloadTransferSize; /// UVC 1.0版本只到此处， 长度 26字节
-	__u32 dwClockFrequency;
-	__u8  bmFramingInfo;
-	__u8  bPreferedVersion;
-	__u8  bMinVersion;
-	__u8  bMaxVersion;
-} __attribute__((__packed__));
+	__u16 bmHint;                  // 2字节
+	__u8  bFormatIndex;            // 1字节
+	__u8  bFrameIndex;             // 1字节
+	__u32 dwFrameInterval;         // 4字节
+	__u16 wKeyFrameRate;           // 2字节
+	__u16 wPFrameRate;             // 2字节
+	__u16 wCompQuality;            // 2字节
+	__u16 wCompWindowSize;         // 2字节
+	__u16 wDelay;                  // 2字节
+	__u32 dwMaxVideoFrameSize;     // 4字节
+	__u32 dwMaxPayloadTransferSize;// 4字节
+} __attribute__((__packed__)); // 总大小：2+1+1+4+2*5+4+4 = 26字节
 
 /* Uncompressed Payload - 3.1.1. Uncompressed Video Format Descriptor */
 struct uvc_format_uncompressed {

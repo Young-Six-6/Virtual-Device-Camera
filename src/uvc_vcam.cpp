@@ -492,18 +492,24 @@ void uvc_vcam::descriptor(usbtx_header_t* hdr)
 			this->curr_interface = hdr->descriptor.index;
 			this->curr_alt_setting = hdr->descriptor.value;
 		}
-		//////
-	}
-	else {
-		printf("unknow descriptor request type=%d, subtype=%d\n", hdr->descriptor.type, hdr->descriptor.subtype);
+		// 新增：处理 type=5（SET_FEATURE/GET_FEATURE）
+		else if (hdr->descriptor.type == 5) {
+			// 这类请求通常是系统查询设备状态，直接返回成功即可
+			hdr->result = 0;
+			printf("处理 descriptor type=5（FEATURE 请求），已返回成功\n");
+		}
+		else {
+			printf("unknow descriptor request type=%d, subtype=%d\n", hdr->descriptor.type, hdr->descriptor.subtype);
+		}
 	}
 	/////
 }
 void uvc_vcam::vendor_control(usbtx_header_t* hdr)
 {
-	printf("vender type=%d,subtype=%d, request=0x%X, index=0x%X, value=0x%X,LEN=%d\n", 
-		hdr->vendor.type, hdr->vendor.subtype, hdr->vendor.request, hdr->vendor.index, hdr->vendor.value, hdr->data_length );
-	////
+ //   printf("=== 【调试】uvc_streaming_control 大小 = %d 字节 ===\n", sizeof(uvc_streaming_control));
+    printf("vender type=%d,subtype=%d, request=0x%X, index=0x%X, value=0x%X,LEN=%d\n",
+        hdr->vendor.type, hdr->vendor.subtype, hdr->vendor.request, hdr->vendor.index, hdr->vendor.value, hdr->data_length);
+
 	switch (hdr->vendor.request)
 	{
 /*	case UVC_GET_INFO:
@@ -516,46 +522,86 @@ void uvc_vcam::vendor_control(usbtx_header_t* hdr)
 	case UVC_GET_DEF:
 		hdr->result = 0; memset(hdr->data, 0, hdr->data_length); ///
 		break;
-
 	case UVC_GET_CUR:
-		{
-			if ( LOBYTE(hdr->vendor.index) == 1 ) { /// 视频流接口
-				if (hdr->data_length < 26) { printf("UVC 1.0  GET_CUR must use 26 bytes \n"); break; }
-				////
-				uvc_streaming_control* sc = (uvc_streaming_control*)hdr->data; 
-				sc->bmHint = 0x01; /// supported dwFrameInterval
-				sc->bFormatIndex = curr_format_index;
-				sc->bFrameIndex = curr_frame_index;
-				sc->dwFrameInterval = 0x00051615; // (33 ms -> 30.00 fps) 
-				sc->wKeyFrameRate = 0;
-				sc->wPFrameRate = 0;
-				sc->wCompQuality = 0;
-				sc->wCompWindowSize = 0;
-				sc->wDelay = 0x0A; //// 停留 毫秒 ms ???
-				sc->dwMaxVideoFrameSize = frames[curr_frame_index - 1].width* frames[curr_frame_index - 1].height* (bitsPerPixel/8); ////
-				sc->dwMaxPayloadTransferSize = 1024; //// ???? 
-				//////
-				hdr->result = 0; ////
+	{
+		if (LOBYTE(hdr->vendor.index) == 1) { /// 视频流接口
+			// 本地定义26字节结构体（不依赖全局定义）
+#pragma pack(1)
+			struct uvc_streaming_control_min {
+				__u16 bmHint;
+				__u8  bFormatIndex;
+				__u8  bFrameIndex;
+				__u32 dwFrameInterval;
+				__u16 wKeyFrameRate;
+				__u16 wPFrameRate;
+				__u16 wCompQuality;
+				__u16 wCompWindowSize;
+				__u16 wDelay;
+				__u32 dwMaxVideoFrameSize;
+				__u32 dwMaxPayloadTransferSize;
+			};
+#pragma pack()
+
+			// 用本地结构体校验（26字节）
+			if (hdr->data_length < sizeof(uvc_streaming_control_min)) {
+				printf("UVC_GET_CUR: buffer too small! Need 26 bytes, got %d bytes\n", hdr->data_length);
+				hdr->result = -1;
+				break;
 			}
+
+			// 强制转换为本地26字节结构体
+			uvc_streaming_control_min* sc = (uvc_streaming_control_min*)hdr->data;
+			sc->bmHint = 0x01;
+			sc->bFormatIndex = curr_format_index;
+			sc->bFrameIndex = curr_frame_index;
+			sc->dwFrameInterval = 0x00051615;
+			sc->wKeyFrameRate = 0;
+			sc->wPFrameRate = 0;
+			sc->wCompQuality = 0;
+			sc->wCompWindowSize = 0;
+			sc->wDelay = 0x0A;
+			sc->dwMaxVideoFrameSize = frames[curr_frame_index - 1].width * frames[curr_frame_index - 1].height * (bitsPerPixel / 8);
+			sc->dwMaxPayloadTransferSize = 1024;
+			hdr->result = 0;
 		}
+	}
+	break;
 
 	case UVC_SET_CUR:
-		{
-			if (LOBYTE(hdr->vendor.index) == 1) { /// 视频流接口, 设置
-				if (hdr->data_length < 26) { printf("UVC 1.0  SET_CUR must use 26 bytes \n"); break; }
-				/////
-				uvc_streaming_control* sc = (uvc_streaming_control*)hdr->data;
-				if (sc->bFormatIndex < 1 || sc->bFormatIndex > format_count) break;
-				if (sc->bFrameIndex < 1 || sc->bFrameIndex > frame_count) break;
+	{
+		if (LOBYTE(hdr->vendor.index) == 1) { /// 视频流接口
+			// 同样用本地26字节结构体
+#pragma pack(1)
+			struct uvc_streaming_control_min {
+				__u16 bmHint;
+				__u8  bFormatIndex;
+				__u8  bFrameIndex;
+				__u32 dwFrameInterval;
+				__u16 wKeyFrameRate;
+				__u16 wPFrameRate;
+				__u16 wCompQuality;
+				__u16 wCompWindowSize;
+				__u16 wDelay;
+				__u32 dwMaxVideoFrameSize;
+				__u32 dwMaxPayloadTransferSize;
+			};
+#pragma pack()
 
-				curr_format_index = sc->bFormatIndex;
-				curr_frame_index = sc->bFrameIndex;
-
-				hdr->result = 0; /////
+			if (hdr->data_length < sizeof(uvc_streaming_control_min)) {
+				printf("UVC_SET_CUR: buffer too small! Need 26 bytes, got %d bytes\n", hdr->data_length);
+				hdr->result = -1;
+				break;
 			}
-		}
-		break;
 
+			uvc_streaming_control_min* sc = (uvc_streaming_control_min*)hdr->data;
+			if (sc->bFormatIndex < 1 || sc->bFormatIndex > format_count) break;
+			if (sc->bFrameIndex < 1 || sc->bFrameIndex > frame_count) break;
+			curr_format_index = sc->bFormatIndex;
+			curr_frame_index = sc->bFrameIndex;
+			hdr->result = 0;
+		}
+	}
+	break;
 	case UVC_GET_MIN:
 		{
 			if (LOBYTE(hdr->vendor.index) == 1) { /// 视频流接口
