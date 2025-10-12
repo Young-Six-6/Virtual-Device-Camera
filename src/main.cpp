@@ -11,6 +11,7 @@ extern "C" {
 #include <libavutil/imgutils.h>  // 必须包含这个头文件！
 }
 //// RGB -> YUV 从网络查询的算法
+//// RGB -> YUV 修复颜色颠倒（交换 R 和 B 通道）
 void rgb24_yuy2(void* rgb, void* yuy2, int width, int height)
 {
     int R1, G1, B1, R2, G2, B2, Y1, U1, Y2, V1;
@@ -21,18 +22,26 @@ void rgb24_yuy2(void* rgb, void* yuy2, int width, int height)
     {
         for (int j = 0; j < width / 2; ++j)
         {
-            B1 = *(pRGBData + i * width * 3 + j * 6);
-            G1 = *(pRGBData + i * width * 3 + j * 6 + 1);
-            R1 = *(pRGBData + i * width * 3 + j * 6 + 2);
-            B2 = *(pRGBData + i * width * 3 + j * 6 + 3);
-            G2 = *(pRGBData + i * width * 3 + j * 6 + 4);
-            R2 = *(pRGBData + i * width * 3 + j * 6 + 5);
+            // 核心修复：按 [R, G, B] 顺序读取（原代码是 [B, G, R]）
+            R1 = *(pRGBData + i * width * 3 + j * 6);        // 第1个像素的 R 通道
+            G1 = *(pRGBData + i * width * 3 + j * 6 + 1);    // 第1个像素的 G 通道
+            B1 = *(pRGBData + i * width * 3 + j * 6 + 2);    // 第1个像素的 B 通道
 
+            R2 = *(pRGBData + i * width * 3 + j * 6 + 3);    // 第2个像素的 R 通道
+            G2 = *(pRGBData + i * width * 3 + j * 6 + 4);    // 第2个像素的 G 通道
+            B2 = *(pRGBData + i * width * 3 + j * 6 + 5);    // 第2个像素的 B 通道
+
+            // 原有 YUV 计算逻辑不变（现在 R 和 B 已正确）
             Y1 = ((66 * R1 + 129 * G1 + 25 * B1 + 128) >> 8) + 16;
-            U1 = (((-38 * R1 - 74 * G1 + 112 * B1 + 128) >> 8) + ((-38 * R2 - 74 * G2 + 112 * B2 + 128) >> 8)) / 2 + 128;
+            // 取两个像素的 U 平均值（正确）
+            U1 = (((-38 * R1 - 74 * G1 + 112 * B1 + 128) >> 8) +
+                ((-38 * R2 - 74 * G2 + 112 * B2 + 128) >> 8)) / 2 + 128;
             Y2 = ((66 * R2 + 129 * G2 + 25 * B2 + 128) >> 8) + 16;
-            V1 = (((112 * R1 - 94 * G1 - 18 * B1 + 128) >> 8) + ((112 * R2 - 94 * G2 - 18 * B2 + 128) >> 8)) / 2 + 128;
+            // 取两个像素的 V 平均值（正确）
+            V1 = (((112 * R1 - 94 * G1 - 18 * B1 + 128) >> 8) +
+                ((112 * R2 - 94 * G2 - 18 * B2 + 128) >> 8)) / 2 + 128;
 
+            // 边界处理（确保值在 0-255 范围内）
             *(pYUVData + i * width * 2 + j * 4) = max(min(Y1, 255), 0);
             *(pYUVData + i * width * 2 + j * 4 + 1) = max(min(U1, 255), 0);
             *(pYUVData + i * width * 2 + j * 4 + 2) = max(min(Y2, 255), 0);
