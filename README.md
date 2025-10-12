@@ -3,7 +3,10 @@
 fork自jasonsalex/Virtual-Device-Camera，意图做些修改
 
 2025/10/10
-增加了mp4作为输入源（事情有意思起来了呢
+增加了mp4作为输入源
+
+2025/10/12
+增加了通过\\.\pipe\vcam_pipe传输画面，此后无错误将不再大修改，靠外部输入画面
 
 缺失dll自行补齐BtbN/FFmpeg-Builds
 
