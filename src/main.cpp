@@ -12,36 +12,51 @@ extern "C" {
 }
 //// RGB -> YUV 从网络查询的算法
 //// RGB -> YUV 修复颜色颠倒（交换 R 和 B 通道）
-void rgb24_yuy2(void* rgb, void* yuy2, int width, int height)
+void rgb24_yuy2(void* rgb, void* yuy2, int width, int height, int row_bytes)
 {
+    // 新增：检查输入参数合法性
+    if (width <= 0 || height <= 0 || row_bytes < width * 3) {
+        printf("【错误】无效参数：width=%d, height=%d, row_bytes=%d\n", width, height, row_bytes);
+        return;
+    }
+
     int R1, G1, B1, R2, G2, B2, Y1, U1, Y2, V1;
     unsigned char* pRGBData = (unsigned char*)rgb;
     unsigned char* pYUVData = (unsigned char*)yuy2;
 
     for (int i = 0; i < height; ++i)
     {
-        for (int j = 0; j < width / 2; ++j)
+        unsigned char* row_start = pRGBData + i * row_bytes;
+        // 新增：计算当前行最大可访问的字节数（防止j循环越界）
+        int max_j = width / 2;
+        if (width % 2 != 0) {
+            max_j = (width - 1) / 2; // 若宽度为奇数，丢弃最后一个像素
+            printf("【警告】宽度为奇数（%d），最后一个像素将被忽略\n", width);
+        }
+        for (int j = 0; j < max_j; ++j)
         {
-            // 核心修复：按 [R, G, B] 顺序读取（原代码是 [B, G, R]）
-            R1 = *(pRGBData + i * width * 3 + j * 6);        // 第1个像素的 R 通道
-            G1 = *(pRGBData + i * width * 3 + j * 6 + 1);    // 第1个像素的 G 通道
-            B1 = *(pRGBData + i * width * 3 + j * 6 + 2);    // 第1个像素的 B 通道
+            // 新增：检查当前像素偏移是否超过行字节数
+            if (j * 6 + 5 >= row_bytes) {
+                printf("【错误】行内像素越界：j=%d, 偏移=%d, 行字节数=%d\n", j, j * 6 + 5, row_bytes);
+                break;
+            }
 
-            R2 = *(pRGBData + i * width * 3 + j * 6 + 3);    // 第2个像素的 R 通道
-            G2 = *(pRGBData + i * width * 3 + j * 6 + 4);    // 第2个像素的 G 通道
-            B2 = *(pRGBData + i * width * 3 + j * 6 + 5);    // 第2个像素的 B 通道
+            R1 = *(row_start + j * 6);
+            G1 = *(row_start + j * 6 + 1);
+            B1 = *(row_start + j * 6 + 2);
+            R2 = *(row_start + j * 6 + 3);
+            G2 = *(row_start + j * 6 + 4);
+            B2 = *(row_start + j * 6 + 5);
 
-            // 原有 YUV 计算逻辑不变（现在 R 和 B 已正确）
+            // YUV计算（不变）
             Y1 = ((66 * R1 + 129 * G1 + 25 * B1 + 128) >> 8) + 16;
-            // 取两个像素的 U 平均值（正确）
             U1 = (((-38 * R1 - 74 * G1 + 112 * B1 + 128) >> 8) +
                 ((-38 * R2 - 74 * G2 + 112 * B2 + 128) >> 8)) / 2 + 128;
             Y2 = ((66 * R2 + 129 * G2 + 25 * B2 + 128) >> 8) + 16;
-            // 取两个像素的 V 平均值（正确）
             V1 = (((112 * R1 - 94 * G1 - 18 * B1 + 128) >> 8) +
                 ((112 * R2 - 94 * G2 - 18 * B2 + 128) >> 8)) / 2 + 128;
 
-            // 边界处理（确保值在 0-255 范围内）
+            // 边界处理（不变）
             *(pYUVData + i * width * 2 + j * 4) = max(min(Y1, 255), 0);
             *(pYUVData + i * width * 2 + j * 4 + 1) = max(min(U1, 255), 0);
             *(pYUVData + i * width * 2 + j * 4 + 2) = max(min(Y2, 255), 0);
@@ -215,8 +230,9 @@ int init_video_decoder(vcam_param* p)
 // 修改后的 create_dib 函数（仅保留 DIB 缓冲区创建逻辑）
 int create_dib(vcam_param* p, int w, int h)
 {
-    // 1. 先释放旧资源（避免内存泄漏）
-    if (p->hbmp) {
+    // 1. 先释放旧资源（保持之前修复的“解绑DIB”逻辑）
+    if (p->hdc && p->hbmp) {
+        SelectObject(p->hdc, NULL);
         DeleteObject(p->hbmp);
         p->hbmp = NULL;
     }
@@ -224,64 +240,62 @@ int create_dib(vcam_param* p, int w, int h)
         DeleteDC(p->hdc);
         p->hdc = NULL;
     }
-    // 重置 rgb_data（避免残留旧地址）
     p->rgb_data = NULL;
 
-    // 2. 验证输入分辨率（必须>0，且不超过合理范围）
-    if (w <= 0 || w > 4096 || h <= 0 || h > 2160) { // 限制最大 4K（4096x2160）
-        printf("【错误】create_dib：无效分辨率 %dx%d（超出支持范围）\n", w, h);
+    // 2. 分辨率验证（不变）
+    if (w <= 0 || w > 4096 || h <= 0 || h > 2160) {
+        printf("【错误】create_dib：无效分辨率 %dx%d\n", w, h);
         return -1;
     }
 
-    // 3. 创建兼容 DC（必须成功）
+    // 3. 关键修复：计算4字节对齐后的行字节数和总大小
+    int row_bytes = (w * 3 + 3) & ~3;  // 每行字节数按4对齐（例：1920×3=5760，5760是4的倍数，row_bytes=5760）
+    int total_size = row_bytes * h;    // 总大小 = 对齐后的行字节数 × 高度（而非 w×h×3）
+
+    // 4. 创建兼容DC（不变）
     p->hdc = CreateCompatibleDC(NULL);
     if (!p->hdc) {
         printf("【错误】create_dib：CreateCompatibleDC 失败！错误码：%d\n", GetLastError());
         return -1;
     }
 
-    // 4. 配置 DIB 信息（关键：显式设置 biSizeImage，避免系统计算错误）
+    // 5. 配置DIB信息（修改biSizeImage为对齐后的总大小）
     BITMAPINFOHEADER bi;
     memset(&bi, 0, sizeof(bi));
     bi.biSize = sizeof(BITMAPINFOHEADER);
-    bi.biWidth = w;                // 宽度（正数值，避免画面颠倒）
-    bi.biHeight = -h;              // 高度：负数值表示“从上到下”存储（与视频帧一致，避免翻转）
-    bi.biPlanes = 1;               // 必须为 1
-    bi.biBitCount = 24;            // RGB24（每个像素 3 字节）
-    bi.biCompression = BI_RGB;     // 无压缩
-    bi.biSizeImage = w * h * 3;    // 显式计算 DIB 大小（关键！确保分配足够内存）
-    bi.biClrUsed = 0;              // 无调色板
+    bi.biWidth = w;
+    bi.biHeight = -h;              // 负高度：从上到下存储
+    bi.biPlanes = 1;
+    bi.biBitCount = 24;
+    bi.biCompression = BI_RGB;
+    bi.biSizeImage = total_size;   // 关键：用对齐后的总大小，而非 w×h×3
+    bi.biClrUsed = 0;
     bi.biClrImportant = 0;
 
-    // 5. 创建 DIB 像素缓冲区（核心步骤，必须检查结果）
+    // 6. 创建DIB（不变，但此时分配的内存是对齐后的大小）
     p->hbmp = CreateDIBSection(
         p->hdc,
         (BITMAPINFO*)&bi,
         DIB_RGB_COLORS,
-        &p->rgb_data,  // 输出：合法的内存地址
+        &p->rgb_data,
         NULL,
         0
     );
     if (!p->hbmp || !p->rgb_data) {
-        // 打印详细错误，帮助定位问题
-        printf("【严重错误】create_dib：CreateDIBSection 失败！\n");
-        printf("  - 分辨率：%dx%d\n", w, h);
-        printf("  - 所需内存：%d 字节\n", w * h * 3);
-        printf("  - 错误码：%d\n", GetLastError());
-        // 清理失败的资源
+        printf("【严重错误】create_dib：CreateDIBSection 失败！错误码：%d\n", GetLastError());
         if (p->hdc) DeleteDC(p->hdc);
         p->hdc = NULL;
         return -1;
     }
 
-    // 6. 绑定 DIB 到 DC（必须执行，否则后续绘制无效）
+    // 7. 绑定DIB到DC（不变）
     SelectObject(p->hdc, p->hbmp);
 
-    // 7. 打印成功日志（验证内存分配）
-    printf("【成功】create_dib：创建 DIB 缓冲区\n");
+    // 8. 打印日志（新增对齐信息，方便调试）
+    printf("【成功】create_dib：创建对齐DIB缓冲区\n");
     printf("  - 分辨率：%dx%d\n", w, h);
-    printf("  - 内存地址：0x%p\n", p->rgb_data);
-    printf("  - 内存大小：%d 字节\n", w * h * 3);
+    printf("  - 每行字节数（对齐后）：%d\n", row_bytes);
+    printf("  - 总大小：%d 字节\n", total_size);
     return 0;
 }
 
@@ -312,7 +326,6 @@ int frame_callback(frame_t* frame)
             if (!p->pipe_buffer)
             {
                 int width, height;
-                WaitForSingleObject(p->hPipeMutex, INFINITE);
                 DWORD bytesRead;
                 // 读取宽度（4字节）
                 BOOL readOK = ReadFile(p->hPipe, &width, 4, &bytesRead, NULL);
@@ -366,30 +379,42 @@ int frame_callback(frame_t* frame)
                     p->pipe_buf_size, width, height);
             }
             // 读取像素数据（RGB24）
+            // 正确代码
             else
             {
                 DWORD bytesRead;
+                // 读取RGB数据前先获取互斥锁（与读取宽高时的锁保持一致）
+                WaitForSingleObject(p->hPipeMutex, INFINITE);
                 BOOL readOK = ReadFile(p->hPipe, p->pipe_buffer, p->pipe_buf_size, &bytesRead, NULL);
                 if (readOK && bytesRead == p->pipe_buf_size)
                 {
-                    // 数据有效：复制到 DIB 并转换为 YUY2
-                    if (ReadFile(p->hPipe, p->pipe_buffer, p->pipe_buf_size, &bytesRead, NULL) &&
-                        bytesRead == p->pipe_buf_size)
-                    {
-                        // 复制数据到DIB缓冲区（安全写入）
-                        memcpy(p->rgb_data, p->pipe_buffer, p->pipe_buf_size);
+                    // 验证DIB缓冲区大小是否足够（防止越界）
+                    int dib_total_size = ((p->width * 3 + 3) & ~3) * p->height; // DIB总大小（对齐后）
+                    if (p->pipe_buf_size > dib_total_size) {
+                        printf("【错误】RGB数据过大（%d字节），DIB缓冲区仅%d字节，可能越界！\n",
+                            p->pipe_buf_size, dib_total_size);
+                        ReleaseMutex(p->hPipeMutex); // 必须释放锁
+                        return -1;
                     }
-                    // 操作完成后解锁
-                    ReleaseMutex(p->hPipeMutex);
-                    rgb24_yuy2(p->rgb_data, frame->buffer, p->width, p->height);
+                    memcpy(p->rgb_data, p->pipe_buffer, p->pipe_buf_size);
+                    ReleaseMutex(p->hPipeMutex); // 配对释放
+                    int row_bytes = (p->width * 3 + 3) & ~3;
+                    int yuy2_required_size = p->width * p->height * 2; // YUY2每帧必需大小
+                    {
+                        int yuy2_required_size = p->width * p->height * 2;
+                        printf("【调试】YUY2缓冲区检查（管道数据）：分辨率%d×%d，必需大小%d字节\n",
+                            p->width, p->height, yuy2_required_size);
+                    }
+                    rgb24_yuy2(p->rgb_data, frame->buffer, p->width, p->height, row_bytes);
                     frame->width = p->width;
                     frame->height = p->height;
-                    frame->delay_msec = 33; // 约 30fps
+                    frame->delay_msec = 33;
                     return 0;
                 }
                 else
                 {
-                    // 读取失败（管道断开）
+                    // 读取失败时也要释放锁，否则会永久占用
+                    ReleaseMutex(p->hPipeMutex);
                     p->pipe_connected = false;
                     free(p->pipe_buffer);
                     p->pipe_buffer = nullptr;
@@ -415,7 +440,15 @@ int frame_callback(frame_t* frame)
             }
             // 确认内存合法后再执行 memset
             memset(p->rgb_data, 0, rgb_size);
-            rgb24_yuy2(p->rgb_data, frame->buffer, p->width, p->height);
+            int row_bytes = (p->width * 3 + 3) & ~3;  // 计算4字节对齐的行字节数
+            int yuy2_required_size = p->width * p->height * 2; // YUY2每帧必需大小
+            // 在管道模式读取RGB数据后，调用rgb24_yuy2前添加
+            {
+                int yuy2_required_size = p->width * p->height * 2;
+                printf("【调试】YUY2缓冲区检查（黑屏）：分辨率%d×%d，必需大小%d字节\n",
+                    p->width, p->height, yuy2_required_size);
+            }
+            rgb24_yuy2(p->rgb_data, frame->buffer, p->width, p->height, row_bytes);
         }
         else
         {
@@ -496,7 +529,8 @@ int frame_callback(frame_t* frame)
 
             // 2.4 复制到 DIB 并转换为 YUY2
             memcpy(p->rgb_data, p->rgb_frame->data[0], p->width * p->height * 3);
-            rgb24_yuy2(p->rgb_data, frame->buffer, frame->width, frame->height);
+            int row_bytes = (p->width * 3 + 3) & ~3;
+            rgb24_yuy2(p->rgb_data, frame->buffer, p->width, p->height, row_bytes);  // 补充参数
 
             // 2.5 设置帧率（从视频中获取）
             frame->delay_msec = (int)(1000 / av_q2d(p->fmt_ctx->streams[p->video_stream_idx]->r_frame_rate));
@@ -518,8 +552,13 @@ int main(int argc, char** argv)
     // 2. 初始化第一个虚拟摄像头参数（放在最前面，避免变量未定义）
     uvc_vcam_t uvc1;
     vcam_param p1;
-    p1.hPipeMutex = CreateMutex(NULL, FALSE, NULL); // 初始化为“未拥有”状态
-    memset(&p1, 0, sizeof(p1));  // 初始化所有成员为0
+    // 正确代码
+    memset(&p1, 0, sizeof(p1));  // 先清零所有成员
+    p1.hPipeMutex = CreateMutex(NULL, FALSE, NULL); // 再初始化互斥锁（此时不会被覆盖）
+    if (p1.hPipeMutex == NULL) {
+        printf("【错误】创建互斥锁失败，错误码：%d\n", GetLastError());
+        return 1; // 互斥锁创建失败必须退出，否则后续使用会崩溃
+    }
     p1.is_loop = true;            // MP4 默认循环播放
     p1.is_inited = false;
 
