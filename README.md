@@ -17,3 +17,5 @@ fork自jasonsalex/Virtual-Device-Camera，意图做些修改
 
 
 注意：警告不要用在欺诈性活动，后果自负！！！
+
+因为时间有限，本项目使用了ChatGpt，Deepseek等工具，特此声明
