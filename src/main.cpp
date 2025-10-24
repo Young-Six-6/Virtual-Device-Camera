@@ -8,15 +8,15 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
-#include <libavutil/imgutils.h>  // ±ØĞë°üº¬Õâ¸öÍ·ÎÄ¼ş£¡
+#include <libavutil/imgutils.h>  // å¿…é¡»åŒ…å«è¿™ä¸ªå¤´æ–‡ä»¶ï¼
 }
-//// RGB -> YUV ´ÓÍøÂç²éÑ¯µÄËã·¨
-//// RGB -> YUV ĞŞ¸´ÑÕÉ«µßµ¹£¨½»»» R ºÍ B Í¨µÀ£©
+//// RGB -> YUV ä»ç½‘ç»œæŸ¥è¯¢çš„ç®—æ³•
+//// RGB -> YUV ä¿®å¤é¢œè‰²é¢ å€’ï¼ˆäº¤æ¢ R å’Œ B é€šé“
 void rgb24_yuy2(void* rgb, void* yuy2, int width, int height, int row_bytes)
 {
-    // ĞÂÔö£º¼ì²éÊäÈë²ÎÊıºÏ·¨ĞÔ
+    // æ–°å¢ï¼šæ£€æŸ¥è¾“å…¥å‚æ•°åˆæ³•æ€§
     if (width <= 0 || height <= 0 || row_bytes < width * 3) {
-        printf("¡¾´íÎó¡¿ÎŞĞ§²ÎÊı£ºwidth=%d, height=%d, row_bytes=%d\n", width, height, row_bytes);
+        printf("ã€é”™è¯¯ã€‘æ— æ•ˆå‚æ•°ï¼šwidth=%d, height=%d, row_bytes=%d\n", width, height, row_bytes);
         return;
     }
 
@@ -27,17 +27,17 @@ void rgb24_yuy2(void* rgb, void* yuy2, int width, int height, int row_bytes)
     for (int i = 0; i < height; ++i)
     {
         unsigned char* row_start = pRGBData + i * row_bytes;
-        // ĞÂÔö£º¼ÆËãµ±Ç°ĞĞ×î´ó¿É·ÃÎÊµÄ×Ö½ÚÊı£¨·ÀÖ¹jÑ­»·Ô½½ç£©
+        // æ–°å¢ï¼šè®¡ç®—å½“å‰è¡Œæœ€å¤§å¯è®¿é—®çš„å­—èŠ‚æ•°ï¼ˆé˜²æ­¢jå¾ªç¯è¶Šç•Œï¼‰
         int max_j = width / 2;
         if (width % 2 != 0) {
-            max_j = (width - 1) / 2; // Èô¿í¶ÈÎªÆæÊı£¬¶ªÆú×îºóÒ»¸öÏñËØ
-            printf("¡¾¾¯¸æ¡¿¿í¶ÈÎªÆæÊı£¨%d£©£¬×îºóÒ»¸öÏñËØ½«±»ºöÂÔ\n", width);
+            max_j = (width - 1) / 2; // è‹¥å®½åº¦ä¸ºå¥‡æ•°ï¼Œä¸¢å¼ƒæœ€åä¸€ä¸ªåƒç´ 
+            printf("ã€è­¦å‘Šã€‘å®½åº¦ä¸ºå¥‡æ•°ï¼ˆ%dï¼‰ï¼Œæœ€åä¸€ä¸ªåƒç´ å°†è¢«å¿½ç•¥\n", width);
         }
         for (int j = 0; j < max_j; ++j)
         {
-            // ĞÂÔö£º¼ì²éµ±Ç°ÏñËØÆ«ÒÆÊÇ·ñ³¬¹ıĞĞ×Ö½ÚÊı
+            // æ–°å¢ï¼šæ£€æŸ¥å½“å‰åƒç´ åç§»æ˜¯å¦è¶…è¿‡è¡Œå­—èŠ‚æ•°
             if (j * 6 + 5 >= row_bytes) {
-                printf("¡¾´íÎó¡¿ĞĞÄÚÏñËØÔ½½ç£ºj=%d, Æ«ÒÆ=%d, ĞĞ×Ö½ÚÊı=%d\n", j, j * 6 + 5, row_bytes);
+                printf("ã€é”™è¯¯ã€‘è¡Œå†…åƒç´ è¶Šç•Œï¼šj=%d, åç§»=%d, è¡Œå­—èŠ‚æ•°=%d\n", j, j * 6 + 5, row_bytes);
                 break;
             }
 
@@ -48,7 +48,7 @@ void rgb24_yuy2(void* rgb, void* yuy2, int width, int height, int row_bytes)
             G2 = *(row_start + j * 6 + 4);
             B2 = *(row_start + j * 6 + 5);
 
-            // YUV¼ÆËã£¨²»±ä£©
+            // YUVè®¡ç®—ï¼ˆä¸å˜ï¼‰
             Y1 = ((66 * R1 + 129 * G1 + 25 * B1 + 128) >> 8) + 16;
             U1 = (((-38 * R1 - 74 * G1 + 112 * B1 + 128) >> 8) +
                 ((-38 * R2 - 74 * G2 + 112 * B2 + 128) >> 8)) / 2 + 128;
@@ -56,7 +56,7 @@ void rgb24_yuy2(void* rgb, void* yuy2, int width, int height, int row_bytes)
             V1 = (((112 * R1 - 94 * G1 - 18 * B1 + 128) >> 8) +
                 ((112 * R2 - 94 * G2 - 18 * B2 + 128) >> 8)) / 2 + 128;
 
-            // ±ß½ç´¦Àí£¨²»±ä£©
+            // è¾¹ç•Œå¤„ç†ï¼ˆä¸å˜ï¼‰
             *(pYUVData + i * width * 2 + j * 4) = max(min(Y1, 255), 0);
             *(pYUVData + i * width * 2 + j * 4 + 1) = max(min(U1, 255), 0);
             *(pYUVData + i * width * 2 + j * 4 + 2) = max(min(Y2, 255), 0);
@@ -67,7 +67,7 @@ void rgb24_yuy2(void* rgb, void* yuy2, int width, int height, int row_bytes)
 
 ////////////////////
 #include <string>
-// ÒıÈë FFmpeg Í·ÎÄ¼ş£¨±ØĞë·ÅÔÚ extern "C" ÖĞ£¬±ÜÃâ±àÒë´íÎó£©
+// å¼•å…¥ FFmpeg å¤´æ–‡ä»¶ï¼ˆå¿…é¡»æ”¾åœ¨ extern "C" ä¸­ï¼Œé¿å…ç¼–è¯‘é”™è¯¯ï¼‰
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
@@ -76,57 +76,57 @@ extern "C" {
 
 struct vcam_param
 {
-    // Ô­ÓĞ³ÉÔ±...
-    HBITMAP hbmp = NULL;               // ³õÊ¼»¯¾ä±úÎªNULL
-    HDC hdc = NULL;                    // ³õÊ¼»¯DCÎªNULL
-    void* rgb_data = NULL;             // ³õÊ¼»¯Êı¾İÖ¸ÕëÎªNULL
-    int width = 0;                     // ³õÊ¼»¯¿í¶ÈÎª0
-    int height = 0;                    // ³õÊ¼»¯¸ß¶ÈÎª0
-    std::string video_path = "";       // ³õÊ¼»¯Â·¾¶Îª¿Õ
-    AVFormatContext* fmt_ctx = NULL;   // ³õÊ¼»¯FFmpegÉÏÏÂÎÄÎªNULL
+    // åŸæœ‰æˆå‘˜...
+    HBITMAP hbmp = NULL;               // åˆå§‹åŒ–å¥æŸ„ä¸ºNULL
+    HDC hdc = NULL;                    // åˆå§‹åŒ–DCä¸ºNULL
+    void* rgb_data = NULL;             // åˆå§‹åŒ–æ•°æ®æŒ‡é’ˆä¸ºNULL
+    int width = 0;                     // åˆå§‹åŒ–å®½åº¦ä¸º0
+    int height = 0;                    // åˆå§‹åŒ–é«˜åº¦ä¸º0
+    std::string video_path = "";       // åˆå§‹åŒ–è·¯å¾„ä¸ºç©º
+    AVFormatContext* fmt_ctx = NULL;   // åˆå§‹åŒ–FFmpegä¸Šä¸‹æ–‡ä¸ºNULL
     AVCodecContext* codec_ctx = NULL;
     AVFrame* yuv_frame = NULL;
     AVFrame* rgb_frame = NULL;
     SwsContext* sws_ctx = NULL;
     AVPacket* pkt = NULL;
-    int video_stream_idx = -1;         // ³õÊ¼»¯Îª-1£¨ÎŞÁ÷£©
-    bool is_loop = false;              // Ä¬ÈÏÎª²»Ñ­»·
-    bool is_inited = false;            // Ä¬ÈÏÎªÎ´³õÊ¼»¯
-    // ¹ÜµÀÏà¹Ø³ÉÔ±
+    int video_stream_idx = -1;         // åˆå§‹åŒ–ä¸º-1ï¼ˆæ— æµï¼‰
+    bool is_loop = false;              // é»˜è®¤ä¸ºä¸å¾ªç¯
+    bool is_inited = false;            // é»˜è®¤ä¸ºæœªåˆå§‹åŒ–
+    // ç®¡é“ç›¸å…³æˆå‘˜
     HANDLE hPipe = INVALID_HANDLE_VALUE;
     bool is_pipe_mode = false;
     bool pipe_connected = false;
     char* pipe_buffer = NULL;
     int pipe_buf_size = 0;
     //
-    HANDLE hPipeMutex; // ĞÂÔö£º¹ÜµÀÊı¾İ»¥³âËø
+    HANDLE hPipeMutex; // æ–°å¢ï¼šç®¡é“æ•°æ®äº’æ–¥é”
 
 };
 
-// ĞÂÔö£º³õÊ¼»¯ MP4 ½âÂëÆ÷£¨¹Ø¼üº¯Êı£©
+// æ–°å¢ï¼šåˆå§‹åŒ– MP4 è§£ç å™¨ï¼ˆå…³é”®å‡½æ•°ï¼‰
 int init_video_decoder(vcam_param* p)
 {
-    if (p->is_inited) return 0; // ÒÑ³õÊ¼»¯ÔòÖ±½Ó·µ»Ø
+    if (p->is_inited) return 0; // å·²åˆå§‹åŒ–åˆ™ç›´æ¥è¿”å›
 
-    // ²½Öè1£º×¢²á FFmpeg ×é¼ş£¨¾É°æ±¾±ØĞè£¬¼æÈİÓÃ£©
+    // æ­¥éª¤1ï¼šæ³¨å†Œ FFmpeg ç»„ä»¶ï¼ˆæ—§ç‰ˆæœ¬å¿…éœ€ï¼Œå…¼å®¹ç”¨ï¼‰
     avformat_network_init();
 
-    // ²½Öè2£º´ò¿ª MP4 ÎÄ¼ş
+    // æ­¥éª¤2ï¼šæ‰“å¼€ MP4 æ–‡ä»¶
     if (avformat_open_input(&p->fmt_ctx, p->video_path.c_str(), NULL, NULL) != 0)
     {
-        printf("´íÎó£ºÎŞ·¨´ò¿ª MP4 ÎÄ¼ş %s\n", p->video_path.c_str());
+        printf("é”™è¯¯ï¼šæ— æ³•æ‰“å¼€ MP4 æ–‡ä»¶ %s\n", p->video_path.c_str());
         return -1;
     }
 
-    // ²½Öè3£º»ñÈ¡ÊÓÆµÁ÷ĞÅÏ¢£¨Èç·Ö±æÂÊ¡¢±àÂë¸ñÊ½£©
+    // æ­¥éª¤3ï¼šè·å–è§†é¢‘æµä¿¡æ¯ï¼ˆå¦‚åˆ†è¾¨ç‡ã€ç¼–ç æ ¼å¼ï¼‰
     if (avformat_find_stream_info(p->fmt_ctx, NULL) < 0)
     {
-        printf("´íÎó£ºÎŞ·¨»ñÈ¡ÊÓÆµÁ÷ĞÅÏ¢\n");
-        avformat_close_input(&p->fmt_ctx); // Ê§°ÜÊ±ÊÍ·Å×ÊÔ´
+        printf("é”™è¯¯ï¼šæ— æ³•è·å–è§†é¢‘æµä¿¡æ¯\n");
+        avformat_close_input(&p->fmt_ctx); // å¤±è´¥æ—¶é‡Šæ”¾èµ„æº
         return -1;
     }
 
-    // ²½Öè4£º²éÕÒÊÓÆµÁ÷£¨Ìø¹ıÒôÆµÁ÷£©
+    // æ­¥éª¤4ï¼šæŸ¥æ‰¾è§†é¢‘æµï¼ˆè·³è¿‡éŸ³é¢‘æµï¼‰
     p->video_stream_idx = -1;
     for (int i = 0; i < p->fmt_ctx->nb_streams; i++)
     {
@@ -138,60 +138,60 @@ int init_video_decoder(vcam_param* p)
     }
     if (p->video_stream_idx == -1)
     {
-        printf("´íÎó£ºMP4 ÎÄ¼şÖĞÃ»ÓĞÊÓÆµÁ÷\n");
+        printf("é”™è¯¯ï¼šMP4 æ–‡ä»¶ä¸­æ²¡æœ‰è§†é¢‘æµ\n");
         avformat_close_input(&p->fmt_ctx);
         return -1;
     }
 
-    // ²½Öè5£º³õÊ¼»¯½âÂëÆ÷
+    // æ­¥éª¤5ï¼šåˆå§‹åŒ–è§£ç å™¨
     AVCodecParameters* codec_par = p->fmt_ctx->streams[p->video_stream_idx]->codecpar;
-    const AVCodec* codec = avcodec_find_decoder(codec_par->codec_id); // ¸ù¾İ±àÂë¸ñÊ½ÕÒ½âÂëÆ÷
+    const AVCodec* codec = avcodec_find_decoder(codec_par->codec_id); // æ ¹æ®ç¼–ç æ ¼å¼æ‰¾è§£ç å™¨
     if (!codec)
     {
-        printf("´íÎó£º²»Ö§³ÖµÄ±àÂë¸ñÊ½£¨ID£º%d£©\n", codec_par->codec_id);
+        printf("é”™è¯¯ï¼šä¸æ”¯æŒçš„ç¼–ç æ ¼å¼ï¼ˆIDï¼š%dï¼‰\n", codec_par->codec_id);
         avformat_close_input(&p->fmt_ctx);
         return -1;
     }
 
-    // ·ÖÅä½âÂëÆ÷ÉÏÏÂÎÄ²¢¹ØÁª²ÎÊı
+    // åˆ†é…è§£ç å™¨ä¸Šä¸‹æ–‡å¹¶å…³è”å‚æ•°
     p->codec_ctx = avcodec_alloc_context3(codec);
     if (avcodec_parameters_to_context(p->codec_ctx, codec_par) < 0)
     {
-        printf("´íÎó£º½âÂëÆ÷²ÎÊıÅäÖÃÊ§°Ü\n");
+        printf("é”™è¯¯ï¼šè§£ç å™¨å‚æ•°é…ç½®å¤±è´¥\n");
         avcodec_free_context(&p->codec_ctx);
         avformat_close_input(&p->fmt_ctx);
         return -1;
     }
 
-    // ´ò¿ª½âÂëÆ÷
+    // æ‰“å¼€è§£ç å™¨
     if (avcodec_open2(p->codec_ctx, codec, NULL) < 0)
     {
-        printf("´íÎó£º½âÂëÆ÷´ò¿ªÊ§°Ü\n");
+        printf("é”™è¯¯ï¼šè§£ç å™¨æ‰“å¼€å¤±è´¥\n");
         avcodec_free_context(&p->codec_ctx);
         avformat_close_input(&p->fmt_ctx);
         return -1;
     }
 
-    // ²½Öè6£º³õÊ¼»¯Ö¡»º´æ£¨´æ´¢½âÂëºóµÄÊı¾İ£©
-    p->yuv_frame = av_frame_alloc();  // Ô­Ê¼ YUV Ö¡
-    p->rgb_frame = av_frame_alloc();  // ×ª»»ºóµÄ RGB Ö¡
-    p->pkt = av_packet_alloc();       // ´ı½âÂëµÄÊı¾İ°ü
+    // æ­¥éª¤6ï¼šåˆå§‹åŒ–å¸§ç¼“å­˜ï¼ˆå­˜å‚¨è§£ç åçš„æ•°æ®ï¼‰
+    p->yuv_frame = av_frame_alloc();  // åŸå§‹ YUV å¸§
+    p->rgb_frame = av_frame_alloc();  // è½¬æ¢åçš„ RGB å¸§
+    p->pkt = av_packet_alloc();       // å¾…è§£ç çš„æ•°æ®åŒ…
 
-    // ²½Öè7£º´´½¨¸ñÊ½×ª»»ÉÏÏÂÎÄ£¨YUV¡úRGB24£¬ÓëÔ­ÏîÄ¿¼æÈİ£©
+    // æ­¥éª¤7ï¼šåˆ›å»ºæ ¼å¼è½¬æ¢ä¸Šä¸‹æ–‡ï¼ˆYUVâ†’RGB24ï¼Œä¸åŸé¡¹ç›®å…¼å®¹ï¼‰
     p->sws_ctx = sws_getContext(
-        p->codec_ctx->width,        // ÊäÈë¿í¶È£¨ÊÓÆµÔ­Ê¼¿í¶È£©
-        p->codec_ctx->height,       // ÊäÈë¸ß¶È£¨ÊÓÆµÔ­Ê¼¸ß¶È£©
-        p->codec_ctx->pix_fmt,      // ÊäÈë¸ñÊ½£¨ÊÓÆµµÄ YUV ¸ñÊ½£©
-        p->codec_ctx->width,        // Êä³ö¿í¶È£¨ÓëÊäÈëÒ»ÖÂ£©
-        p->codec_ctx->height,       // Êä³ö¸ß¶È£¨ÓëÊäÈëÒ»ÖÂ£©
-        AV_PIX_FMT_RGB24,           // Êä³ö¸ñÊ½£¨24Î» RGB£¬Ô­ÏîÄ¿ĞèÒª£©
-        SWS_BILINEAR,               // Ëõ·ÅËã·¨£¨Æ½»¬´¦Àí£©
+        p->codec_ctx->width,        // è¾“å…¥å®½åº¦ï¼ˆè§†é¢‘åŸå§‹å®½åº¦ï¼‰
+        p->codec_ctx->height,       // è¾“å…¥é«˜åº¦ï¼ˆè§†é¢‘åŸå§‹é«˜åº¦ï¼‰
+        p->codec_ctx->pix_fmt,      // è¾“å…¥æ ¼å¼ï¼ˆè§†é¢‘çš„ YUV æ ¼å¼ï¼‰
+        p->codec_ctx->width,        // è¾“å‡ºå®½åº¦ï¼ˆä¸è¾“å…¥ä¸€è‡´ï¼‰
+        p->codec_ctx->height,       // è¾“å‡ºé«˜åº¦ï¼ˆä¸è¾“å…¥ä¸€è‡´ï¼‰
+        AV_PIX_FMT_RGB24,           // è¾“å‡ºæ ¼å¼ï¼ˆ24ä½ RGBï¼ŒåŸé¡¹ç›®éœ€è¦ï¼‰
+        SWS_BILINEAR,               // ç¼©æ”¾ç®—æ³•ï¼ˆå¹³æ»‘å¤„ç†ï¼‰
         NULL, NULL, NULL
     );
     if (!p->sws_ctx)
     {
-        printf("´íÎó£º¸ñÊ½×ª»»ÉÏÏÂÎÄ´´½¨Ê§°Ü\n");
-        // ÊÍ·ÅÒÑ·ÖÅäµÄ×ÊÔ´£¨±ÜÃâÄÚ´æĞ¹Â©£©
+        printf("é”™è¯¯ï¼šæ ¼å¼è½¬æ¢ä¸Šä¸‹æ–‡åˆ›å»ºå¤±è´¥\n");
+        // é‡Šæ”¾å·²åˆ†é…çš„èµ„æºï¼ˆé¿å…å†…å­˜æ³„æ¼ï¼‰
         av_packet_free(&p->pkt);
         av_frame_free(&p->rgb_frame);
         av_frame_free(&p->yuv_frame);
@@ -200,12 +200,12 @@ int init_video_decoder(vcam_param* p)
         return -1;
     }
 
-    // ²½Öè8£ºÎª RGB Ö¡·ÖÅäÄÚ´æ£¨Óë DIB »º³åÇø¸ñÊ½¶ÔÆë£©
+    // æ­¥éª¤8ï¼šä¸º RGB å¸§åˆ†é…å†…å­˜ï¼ˆä¸ DIB ç¼“å†²åŒºæ ¼å¼å¯¹é½ï¼‰
     int rgb_buf_size = av_image_get_buffer_size(
         AV_PIX_FMT_RGB24,
         p->codec_ctx->width,
         p->codec_ctx->height,
-        1  // ÎŞ×Ö½Ú¶ÔÆë£¨¼æÈİ DIB£©
+        1  // æ— å­—èŠ‚å¯¹é½ï¼ˆå…¼å®¹ DIBï¼‰
     );
     uint8_t* rgb_buf = (uint8_t*)av_malloc(rgb_buf_size);
     av_image_fill_arrays(
@@ -218,19 +218,19 @@ int init_video_decoder(vcam_param* p)
         1
     );
 
-    // ²½Öè9£º¼ÇÂ¼ÊÓÆµ·Ö±æÂÊ£¨ÓÃÓÚĞéÄâÉãÏñÍ·Êä³ö£©
+    // æ­¥éª¤9ï¼šè®°å½•è§†é¢‘åˆ†è¾¨ç‡ï¼ˆç”¨äºè™šæ‹Ÿæ‘„åƒå¤´è¾“å‡ºï¼‰
     p->width = p->codec_ctx->width;
     p->height = p->codec_ctx->height;
-    p->is_inited = true;  // ±ê¼Ç³õÊ¼»¯Íê³É
+    p->is_inited = true;  // æ ‡è®°åˆå§‹åŒ–å®Œæˆ
 
-    printf("MP4 ³õÊ¼»¯³É¹¦£º%dx%d\n", p->width, p->height);
+    printf("MP4 åˆå§‹åŒ–æˆåŠŸï¼š%dx%d\n", p->width, p->height);
     return 0;
 }
 
-// ĞŞ¸ÄºóµÄ create_dib º¯Êı£¨½ö±£Áô DIB »º³åÇø´´½¨Âß¼­£©
+// ä¿®æ”¹åçš„ create_dib å‡½æ•°ï¼ˆä»…ä¿ç•™ DIB ç¼“å†²åŒºåˆ›å»ºé€»è¾‘ï¼‰
 int create_dib(vcam_param* p, int w, int h)
 {
-    // 1. ÏÈÊÍ·Å¾É×ÊÔ´£¨±£³ÖÖ®Ç°ĞŞ¸´µÄ¡°½â°óDIB¡±Âß¼­£©
+    // 1. å…ˆé‡Šæ”¾æ—§èµ„æºï¼ˆä¿æŒä¹‹å‰ä¿®å¤çš„â€œè§£ç»‘DIBâ€é€»è¾‘ï¼‰
     if (p->hdc && p->hbmp) {
         SelectObject(p->hdc, NULL);
         DeleteObject(p->hbmp);
@@ -242,37 +242,37 @@ int create_dib(vcam_param* p, int w, int h)
     }
     p->rgb_data = NULL;
 
-    // 2. ·Ö±æÂÊÑéÖ¤£¨²»±ä£©
+    // 2. åˆ†è¾¨ç‡éªŒè¯ï¼ˆä¸å˜ï¼‰
     if (w <= 0 || w > 4096 || h <= 0 || h > 2160) {
-        printf("¡¾´íÎó¡¿create_dib£ºÎŞĞ§·Ö±æÂÊ %dx%d\n", w, h);
+        printf("ã€é”™è¯¯ã€‘create_dibï¼šæ— æ•ˆåˆ†è¾¨ç‡ %dx%d\n", w, h);
         return -1;
     }
 
-    // 3. ¹Ø¼üĞŞ¸´£º¼ÆËã4×Ö½Ú¶ÔÆëºóµÄĞĞ×Ö½ÚÊıºÍ×Ü´óĞ¡
-    int row_bytes = (w * 3 + 3) & ~3;  // Ã¿ĞĞ×Ö½ÚÊı°´4¶ÔÆë£¨Àı£º1920¡Á3=5760£¬5760ÊÇ4µÄ±¶Êı£¬row_bytes=5760£©
-    int total_size = row_bytes * h;    // ×Ü´óĞ¡ = ¶ÔÆëºóµÄĞĞ×Ö½ÚÊı ¡Á ¸ß¶È£¨¶ø·Ç w¡Áh¡Á3£©
+    // 3. å…³é”®ä¿®å¤ï¼šè®¡ç®—4å­—èŠ‚å¯¹é½åçš„è¡Œå­—èŠ‚æ•°å’Œæ€»å¤§å°
+    int row_bytes = (w * 3 + 3) & ~3;  // æ¯è¡Œå­—èŠ‚æ•°æŒ‰4å¯¹é½ï¼ˆä¾‹ï¼š1920Ã—3=5760ï¼Œ5760æ˜¯4çš„å€æ•°ï¼Œrow_bytes=5760ï¼‰
+    int total_size = row_bytes * h;    // æ€»å¤§å° = å¯¹é½åçš„è¡Œå­—èŠ‚æ•° Ã— é«˜åº¦ï¼ˆè€Œé wÃ—hÃ—3ï¼‰
 
-    // 4. ´´½¨¼æÈİDC£¨²»±ä£©
+    // 4. åˆ›å»ºå…¼å®¹DCï¼ˆä¸å˜ï¼‰
     p->hdc = CreateCompatibleDC(NULL);
     if (!p->hdc) {
-        printf("¡¾´íÎó¡¿create_dib£ºCreateCompatibleDC Ê§°Ü£¡´íÎóÂë£º%d\n", GetLastError());
+        printf("ã€é”™è¯¯ã€‘create_dibï¼šCreateCompatibleDC å¤±è´¥ï¼é”™è¯¯ç ï¼š%d\n", GetLastError());
         return -1;
     }
 
-    // 5. ÅäÖÃDIBĞÅÏ¢£¨ĞŞ¸ÄbiSizeImageÎª¶ÔÆëºóµÄ×Ü´óĞ¡£©
+    // 5. é…ç½®DIBä¿¡æ¯ï¼ˆä¿®æ”¹biSizeImageä¸ºå¯¹é½åçš„æ€»å¤§å°ï¼‰
     BITMAPINFOHEADER bi;
     memset(&bi, 0, sizeof(bi));
     bi.biSize = sizeof(BITMAPINFOHEADER);
     bi.biWidth = w;
-    bi.biHeight = -h;              // ¸º¸ß¶È£º´ÓÉÏµ½ÏÂ´æ´¢
+    bi.biHeight = -h;              // è´Ÿé«˜åº¦ï¼šä»ä¸Šåˆ°ä¸‹å­˜å‚¨
     bi.biPlanes = 1;
     bi.biBitCount = 24;
     bi.biCompression = BI_RGB;
-    bi.biSizeImage = total_size;   // ¹Ø¼ü£ºÓÃ¶ÔÆëºóµÄ×Ü´óĞ¡£¬¶ø·Ç w¡Áh¡Á3
+    bi.biSizeImage = total_size;   // å…³é”®ï¼šç”¨å¯¹é½åçš„æ€»å¤§å°ï¼Œè€Œé wÃ—hÃ—3
     bi.biClrUsed = 0;
     bi.biClrImportant = 0;
 
-    // 6. ´´½¨DIB£¨²»±ä£¬µ«´ËÊ±·ÖÅäµÄÄÚ´æÊÇ¶ÔÆëºóµÄ´óĞ¡£©
+    // 6. åˆ›å»ºDIBï¼ˆä¸å˜ï¼Œä½†æ­¤æ—¶åˆ†é…çš„å†…å­˜æ˜¯å¯¹é½åçš„å¤§å°ï¼‰
     p->hbmp = CreateDIBSection(
         p->hdc,
         (BITMAPINFO*)&bi,
@@ -282,127 +282,127 @@ int create_dib(vcam_param* p, int w, int h)
         0
     );
     if (!p->hbmp || !p->rgb_data) {
-        printf("¡¾ÑÏÖØ´íÎó¡¿create_dib£ºCreateDIBSection Ê§°Ü£¡´íÎóÂë£º%d\n", GetLastError());
+        printf("ã€ä¸¥é‡é”™è¯¯ã€‘create_dibï¼šCreateDIBSection å¤±è´¥ï¼é”™è¯¯ç ï¼š%d\n", GetLastError());
         if (p->hdc) DeleteDC(p->hdc);
         p->hdc = NULL;
         return -1;
     }
 
-    // 7. °ó¶¨DIBµ½DC£¨²»±ä£©
+    // 7. ç»‘å®šDIBåˆ°DCï¼ˆä¸å˜ï¼‰
     SelectObject(p->hdc, p->hbmp);
 
-    // 8. ´òÓ¡ÈÕÖ¾£¨ĞÂÔö¶ÔÆëĞÅÏ¢£¬·½±ãµ÷ÊÔ£©
-    printf("¡¾³É¹¦¡¿create_dib£º´´½¨¶ÔÆëDIB»º³åÇø\n");
-    printf("  - ·Ö±æÂÊ£º%dx%d\n", w, h);
-    printf("  - Ã¿ĞĞ×Ö½ÚÊı£¨¶ÔÆëºó£©£º%d\n", row_bytes);
-    printf("  - ×Ü´óĞ¡£º%d ×Ö½Ú\n", total_size);
+    // 8. æ‰“å°æ—¥å¿—ï¼ˆæ–°å¢å¯¹é½ä¿¡æ¯ï¼Œæ–¹ä¾¿è°ƒè¯•ï¼‰
+    printf("ã€æˆåŠŸã€‘create_dibï¼šåˆ›å»ºå¯¹é½DIBç¼“å†²åŒº\n");
+    printf("  - åˆ†è¾¨ç‡ï¼š%dx%d\n", w, h);
+    printf("  - æ¯è¡Œå­—èŠ‚æ•°ï¼ˆå¯¹é½åï¼‰ï¼š%d\n", row_bytes);
+    printf("  - æ€»å¤§å°ï¼š%d å­—èŠ‚\n", total_size);
     return 0;
 }
 
 
-// ĞŞ¸ÄºóµÄÖ¡»Øµ÷º¯Êı£¨ºËĞÄÂß¼­£©
+// ä¿®æ”¹åçš„å¸§å›è°ƒå‡½æ•°ï¼ˆæ ¸å¿ƒé€»è¾‘ï¼‰
 int frame_callback(frame_t* frame)
 {
     vcam_param* p = (vcam_param*)frame->param;
 
     // --------------------------
-    // 1. ¹ÜµÀÄ£Ê½´¦Àí£¨ÎŞ²ÎÊıÊ±£©
+    // 1. ç®¡é“æ¨¡å¼å¤„ç†ï¼ˆæ— å‚æ•°æ—¶ï¼‰
     // --------------------------
     if (p->is_pipe_mode)
     {
-        // 1.1 ¹ÜµÀÎ´³õÊ¼»¯£º³¢ÊÔ´´½¨ DIB »º³åÇø£¨Ä¬ÈÏºÚÆÁÓÃ£©
+        // 1.1 ç®¡é“æœªåˆå§‹åŒ–ï¼šå°è¯•åˆ›å»º DIB ç¼“å†²åŒºï¼ˆé»˜è®¤é»‘å±ç”¨ï¼‰
         if (p->width == 0 || p->height == 0)
         {
-            // ³õÊ¼»¯ÎªºÚÆÁ£¨¿É×Ô¶¨ÒåÄ¬ÈÏ·Ö±æÂÊ£©
+            // åˆå§‹åŒ–ä¸ºé»‘å±ï¼ˆå¯è‡ªå®šä¹‰é»˜è®¤åˆ†è¾¨ç‡ï¼‰
             create_dib(p, 1920, 1080);
             frame->width = 1920;
             frame->height = 1080;
         }
 
-        // 1.2 ¹ÜµÀÒÑÁ¬½Ó£º¶ÁÈ¡Êı¾İ²¢ÏÔÊ¾
+        // 1.2 ç®¡é“å·²è¿æ¥ï¼šè¯»å–æ•°æ®å¹¶æ˜¾ç¤º
         if (p->pipe_connected && p->hPipe != INVALID_HANDLE_VALUE)
         {
-            // µÚÒ»´ÎÁ¬½Ó£ºÏÈ¶ÁÈ¡¿í¸ß£¨Ğ­Òé£º4×Ö½Ú¿í + 4×Ö½Ú¸ß£©
+            // ç¬¬ä¸€æ¬¡è¿æ¥ï¼šå…ˆè¯»å–å®½é«˜ï¼ˆåè®®ï¼š4å­—èŠ‚å®½ + 4å­—èŠ‚é«˜ï¼‰
             if (!p->pipe_buffer)
             {
                 int width, height;
                 DWORD bytesRead;
-                // ¶ÁÈ¡¿í¶È£¨4×Ö½Ú£©
+                // è¯»å–å®½åº¦ï¼ˆ4å­—èŠ‚ï¼‰
                 BOOL readOK = ReadFile(p->hPipe, &width, 4, &bytesRead, NULL);
                 if (!readOK || bytesRead != 4)
                 {
-                    // ¶ÁÈ¡Ê§°Ü£¨¿ÉÄÜ¶Ï¿ªÁ¬½Ó£©
+                    // è¯»å–å¤±è´¥ï¼ˆå¯èƒ½æ–­å¼€è¿æ¥ï¼‰
                     p->pipe_connected = false;
-                    printf("¹ÜµÀ¶ÁÈ¡¿í¸ßÊ§°Ü£¬ÖØĞÂµÈ´ıÁ¬½Ó...\n");
+                    printf("ç®¡é“è¯»å–å®½é«˜å¤±è´¥ï¼Œé‡æ–°ç­‰å¾…è¿æ¥...\n");
                     return 0;
                 }
-                // ¶ÁÈ¡¸ß¶È£¨4×Ö½Ú£©
+                // è¯»å–é«˜åº¦ï¼ˆ4å­—èŠ‚ï¼‰
                 readOK = ReadFile(p->hPipe, &height, 4, &bytesRead, NULL);
                 if (!readOK || bytesRead != 4)
                 {
                     p->pipe_connected = false;
-                    printf("¹ÜµÀ¶ÁÈ¡¿í¸ßÊ§°Ü£¬ÖØĞÂµÈ´ıÁ¬½Ó...\n");
+                    printf("ç®¡é“è¯»å–å®½é«˜å¤±è´¥ï¼Œé‡æ–°ç­‰å¾…è¿æ¥...\n");
                     return 0;
                 }
                 if (width != p->width || height != p->height)
                 {
-                    create_dib(p, width, height); // Í¬²½Îª¹ÜµÀ·Ö±æÂÊ
+                    create_dib(p, width, height); // åŒæ­¥ä¸ºç®¡é“åˆ†è¾¨ç‡
                     p->width = width;
                     p->height = height;
-                    printf("¡¾Í¬²½¡¿DIB·Ö±æÂÊ¸üĞÂÎª£º%dx%d\n", width, height);
+                    printf("ã€åŒæ­¥ã€‘DIBåˆ†è¾¨ç‡æ›´æ–°ä¸ºï¼š%dx%d\n", width, height);
                 }
-                // ÑéÖ¤·Ö±æÂÊºÏÀíĞÔ£¨±ÜÃâ¹ı´óµ¼ÖÂÄÚ´æÒç³ö£©
+                // éªŒè¯åˆ†è¾¨ç‡åˆç†æ€§ï¼ˆé¿å…è¿‡å¤§å¯¼è‡´å†…å­˜æº¢å‡ºï¼‰
                 if (width <= 0 || width > 4096 || height <= 0 || height > 2160)
                 {
-                    printf("ÎŞĞ§·Ö±æÂÊ£º%dx%d£¬ºöÂÔ\n", width, height);
+                    printf("æ— æ•ˆåˆ†è¾¨ç‡ï¼š%dx%dï¼Œå¿½ç•¥\n", width, height);
                     return 0;
                 }
-                // ³õÊ¼»¯¹ÜµÀ»º´æºÍ DIB »º³åÇø
+                // åˆå§‹åŒ–ç®¡é“ç¼“å­˜å’Œ DIB ç¼“å†²åŒº
                 p->width = width;
                 p->height = height;
-                // ¶¯Ì¬¼ÆËã1080PËùĞè»º´æ´óĞ¡£¨1920*1080*3=6220800£©
+                // åŠ¨æ€è®¡ç®—1080Pæ‰€éœ€ç¼“å­˜å¤§å°ï¼ˆ1920*1080*3=6220800ï¼‰
                 p->pipe_buf_size = width * height * 3;
-                // ÏÈÊÍ·Å¾É»º´æ£¬±ÜÃâÄÚ´æĞ¹Â©
+                // å…ˆé‡Šæ”¾æ—§ç¼“å­˜ï¼Œé¿å…å†…å­˜æ³„æ¼
                 if (p->pipe_buffer) {
                     free(p->pipe_buffer);
                     p->pipe_buffer = NULL;
                 }
-                // ·ÖÅä»º´æ²¢¼ì²é½á¹û
+                // åˆ†é…ç¼“å­˜å¹¶æ£€æŸ¥ç»“æœ
                 p->pipe_buffer = (char*)malloc(p->pipe_buf_size);
                 if (!p->pipe_buffer) {
-                    printf("¡¾´íÎó¡¿·ÖÅä¹ÜµÀ»º´æÊ§°Ü£¡ĞèÒª %d ×Ö½Ú£¨%dx%d RGB24£©\n",
+                    printf("ã€é”™è¯¯ã€‘åˆ†é…ç®¡é“ç¼“å­˜å¤±è´¥ï¼éœ€è¦ %d å­—èŠ‚ï¼ˆ%dx%d RGB24ï¼‰\n",
                         p->pipe_buf_size, width, height);
-                    p->pipe_buf_size = 0; // ±ê¼ÇÎŞĞ§£¬±ÜÃâºóĞøĞ´Èë
+                    p->pipe_buf_size = 0; // æ ‡è®°æ— æ•ˆï¼Œé¿å…åç»­å†™å…¥
                     return -1;
                 }
-                printf("¡¾³É¹¦¡¿·ÖÅä¹ÜµÀ»º´æ£º%d ×Ö½Ú£¨%dx%d RGB24£©\n",
+                printf("ã€æˆåŠŸã€‘åˆ†é…ç®¡é“ç¼“å­˜ï¼š%d å­—èŠ‚ï¼ˆ%dx%d RGB24ï¼‰\n",
                     p->pipe_buf_size, width, height);
             }
-            // ¶ÁÈ¡ÏñËØÊı¾İ£¨RGB24£©
-            // ÕıÈ·´úÂë
+            // è¯»å–åƒç´ æ•°æ®ï¼ˆRGB24ï¼‰
+            // æ­£ç¡®ä»£ç 
             else
             {
                 DWORD bytesRead;
-                // ¶ÁÈ¡RGBÊı¾İÇ°ÏÈ»ñÈ¡»¥³âËø£¨Óë¶ÁÈ¡¿í¸ßÊ±µÄËø±£³ÖÒ»ÖÂ£©
+                // è¯»å–RGBæ•°æ®å‰å…ˆè·å–äº’æ–¥é”ï¼ˆä¸è¯»å–å®½é«˜æ—¶çš„é”ä¿æŒä¸€è‡´ï¼‰
                 WaitForSingleObject(p->hPipeMutex, INFINITE);
                 BOOL readOK = ReadFile(p->hPipe, p->pipe_buffer, p->pipe_buf_size, &bytesRead, NULL);
                 if (readOK && bytesRead == p->pipe_buf_size)
                 {
-                    // ÑéÖ¤DIB»º³åÇø´óĞ¡ÊÇ·ñ×ã¹»£¨·ÀÖ¹Ô½½ç£©
-                    int dib_total_size = ((p->width * 3 + 3) & ~3) * p->height; // DIB×Ü´óĞ¡£¨¶ÔÆëºó£©
+                    // éªŒè¯DIBç¼“å†²åŒºå¤§å°æ˜¯å¦è¶³å¤Ÿï¼ˆé˜²æ­¢è¶Šç•Œï¼‰
+                    int dib_total_size = ((p->width * 3 + 3) & ~3) * p->height; // DIBæ€»å¤§å°ï¼ˆå¯¹é½åï¼‰
                     if (p->pipe_buf_size > dib_total_size) {
-                        printf("¡¾´íÎó¡¿RGBÊı¾İ¹ı´ó£¨%d×Ö½Ú£©£¬DIB»º³åÇø½ö%d×Ö½Ú£¬¿ÉÄÜÔ½½ç£¡\n",
+                        printf("ã€é”™è¯¯ã€‘RGBæ•°æ®è¿‡å¤§ï¼ˆ%då­—èŠ‚ï¼‰ï¼ŒDIBç¼“å†²åŒºä»…%då­—èŠ‚ï¼Œå¯èƒ½è¶Šç•Œï¼\n",
                             p->pipe_buf_size, dib_total_size);
-                        ReleaseMutex(p->hPipeMutex); // ±ØĞëÊÍ·ÅËø
+                        ReleaseMutex(p->hPipeMutex); // å¿…é¡»é‡Šæ”¾é”
                         return -1;
                     }
                     memcpy(p->rgb_data, p->pipe_buffer, p->pipe_buf_size);
-                    ReleaseMutex(p->hPipeMutex); // Åä¶ÔÊÍ·Å
+                    ReleaseMutex(p->hPipeMutex); // é…å¯¹é‡Šæ”¾
                     int row_bytes = (p->width * 3 + 3) & ~3;
-                    int yuy2_required_size = p->width * p->height * 2; // YUY2Ã¿Ö¡±ØĞè´óĞ¡
+                    int yuy2_required_size = p->width * p->height * 2; // YUY2æ¯å¸§å¿…éœ€å¤§å°
                     {
                         int yuy2_required_size = p->width * p->height * 2;
-                        printf("¡¾µ÷ÊÔ¡¿YUY2»º³åÇø¼ì²é£¨¹ÜµÀÊı¾İ£©£º·Ö±æÂÊ%d¡Á%d£¬±ØĞè´óĞ¡%d×Ö½Ú\n",
+                        printf("ã€è°ƒè¯•ã€‘YUY2ç¼“å†²åŒºæ£€æŸ¥ï¼ˆç®¡é“æ•°æ®ï¼‰ï¼šåˆ†è¾¨ç‡%dÃ—%dï¼Œå¿…éœ€å¤§å°%då­—èŠ‚\n",
                             p->width, p->height, yuy2_required_size);
                     }
                     rgb24_yuy2(p->rgb_data, frame->buffer, p->width, p->height, row_bytes);
@@ -413,81 +413,81 @@ int frame_callback(frame_t* frame)
                 }
                 else
                 {
-                    // ¶ÁÈ¡Ê§°ÜÊ±Ò²ÒªÊÍ·ÅËø£¬·ñÔò»áÓÀ¾ÃÕ¼ÓÃ
+                    // è¯»å–å¤±è´¥æ—¶ä¹Ÿè¦é‡Šæ”¾é”ï¼Œå¦åˆ™ä¼šæ°¸ä¹…å ç”¨
                     ReleaseMutex(p->hPipeMutex);
                     p->pipe_connected = false;
                     free(p->pipe_buffer);
                     p->pipe_buffer = nullptr;
                     p->pipe_buf_size = 0;
-                    printf("¹ÜµÀ¶Ï¿ª£¬ÖØĞÂµÈ´ıÁ¬½Ó...\n");
+                    printf("ç®¡é“æ–­å¼€ï¼Œé‡æ–°ç­‰å¾…è¿æ¥...\n");
                 }
             }
         }
-        // 1.3 ¹ÜµÀÎ´Á¬½Ó»òÎŞÊı¾İ£ºÏÔÊ¾ºÚÆÁ
+        // 1.3 ç®¡é“æœªè¿æ¥æˆ–æ— æ•°æ®ï¼šæ˜¾ç¤ºé»‘å±
         if (p->rgb_data)
         {
-            // ĞÂÔö£ºÏÈÑéÖ¤ width ºÍ height ÊÇ·ñÓĞĞ§£¨±ÜÃâ¼ÆËã³ö¸ºÊı/0´óĞ¡£©
+            // æ–°å¢ï¼šå…ˆéªŒè¯ width å’Œ height æ˜¯å¦æœ‰æ•ˆï¼ˆé¿å…è®¡ç®—å‡ºè´Ÿæ•°/0å¤§å°ï¼‰
             if (p->width <= 0 || p->height <= 0) {
-                printf("¡¾´íÎó¡¿ÎŞĞ§·Ö±æÂÊ£º%dx%d£¨width/height ±ØĞë>0£©\n", p->width, p->height);
-                return -1; // ÖÕÖ¹²Ù×÷£¬±ÜÃâºóĞø´íÎó
+                printf("ã€é”™è¯¯ã€‘æ— æ•ˆåˆ†è¾¨ç‡ï¼š%dx%dï¼ˆwidth/height å¿…é¡»>0ï¼‰\n", p->width, p->height);
+                return -1; // ç»ˆæ­¢æ“ä½œï¼Œé¿å…åç»­é”™è¯¯
             }
-            // ¼ÆËã RGB24 ×Ü×Ö½ÚÊı£¨1920x1080 Ó¦Îª 6220800£©
+            // è®¡ç®— RGB24 æ€»å­—èŠ‚æ•°ï¼ˆ1920x1080 åº”ä¸º 6220800ï¼‰
             int rgb_size = p->width * p->height * 3;
-            // ĞÂÔö£º¼ì²é rgb_size ÊÇ·ñºÏÀí£¨±ÜÃâÒç³ö»ò¹ıĞ¡£©
-            if (rgb_size <= 0 || rgb_size > 1024 * 1024 * 30) { // ÏŞÖÆ×î´ó 30MB£¨×ã¹»Ö§³Ö4K£©
-                printf("¡¾´íÎó¡¿ÎŞĞ§ RGB Êı¾İ´óĞ¡£º%d ×Ö½Ú£¨%dx%d£©\n", rgb_size, p->width, p->height);
+            // æ–°å¢ï¼šæ£€æŸ¥ rgb_size æ˜¯å¦åˆç†ï¼ˆé¿å…æº¢å‡ºæˆ–è¿‡å°ï¼‰
+            if (rgb_size <= 0 || rgb_size > 1024 * 1024 * 30) { // é™åˆ¶æœ€å¤§ 30MBï¼ˆè¶³å¤Ÿæ”¯æŒ4Kï¼‰
+                printf("ã€é”™è¯¯ã€‘æ— æ•ˆ RGB æ•°æ®å¤§å°ï¼š%d å­—èŠ‚ï¼ˆ%dx%dï¼‰\n", rgb_size, p->width, p->height);
                 return -1;
             }
-            // È·ÈÏÄÚ´æºÏ·¨ºóÔÙÖ´ĞĞ memset
+            // ç¡®è®¤å†…å­˜åˆæ³•åå†æ‰§è¡Œ memset
             memset(p->rgb_data, 0, rgb_size);
-            int row_bytes = (p->width * 3 + 3) & ~3;  // ¼ÆËã4×Ö½Ú¶ÔÆëµÄĞĞ×Ö½ÚÊı
-            int yuy2_required_size = p->width * p->height * 2; // YUY2Ã¿Ö¡±ØĞè´óĞ¡
-            // ÔÚ¹ÜµÀÄ£Ê½¶ÁÈ¡RGBÊı¾İºó£¬µ÷ÓÃrgb24_yuy2Ç°Ìí¼Ó
+            int row_bytes = (p->width * 3 + 3) & ~3;  // è®¡ç®—4å­—èŠ‚å¯¹é½çš„è¡Œå­—èŠ‚æ•°
+            int yuy2_required_size = p->width * p->height * 2; // YUY2æ¯å¸§å¿…éœ€å¤§å°
+            // åœ¨ç®¡é“æ¨¡å¼è¯»å–RGBæ•°æ®åï¼Œè°ƒç”¨rgb24_yuy2å‰æ·»åŠ 
             {
                 int yuy2_required_size = p->width * p->height * 2;
-                printf("¡¾µ÷ÊÔ¡¿YUY2»º³åÇø¼ì²é£¨ºÚÆÁ£©£º·Ö±æÂÊ%d¡Á%d£¬±ØĞè´óĞ¡%d×Ö½Ú\n",
+                printf("ã€è°ƒè¯•ã€‘YUY2ç¼“å†²åŒºæ£€æŸ¥ï¼ˆé»‘å±ï¼‰ï¼šåˆ†è¾¨ç‡%dÃ—%dï¼Œå¿…éœ€å¤§å°%då­—èŠ‚\n",
                     p->width, p->height, yuy2_required_size);
             }
             rgb24_yuy2(p->rgb_data, frame->buffer, p->width, p->height, row_bytes);
         }
         else
         {
-            // ĞÂÔö£º´òÓ¡´íÎó£¬Ã÷È· rgb_data Î´·ÖÅä
-            printf("¡¾ÑÏÖØ´íÎó¡¿p->rgb_data Î´·ÖÅä£¡ÎŞ·¨Ö´ĞĞ memset\n");
+            // æ–°å¢ï¼šæ‰“å°é”™è¯¯ï¼Œæ˜ç¡® rgb_data æœªåˆ†é…
+            printf("ã€ä¸¥é‡é”™è¯¯ã€‘p->rgb_data æœªåˆ†é…ï¼æ— æ³•æ‰§è¡Œ memset\n");
             return -1;
         }
     }
 
     // --------------------------
-    // 2. MP4 Ä£Ê½´¦Àí£¨ÓĞ²ÎÊıÊ±£©
+    // 2. MP4 æ¨¡å¼å¤„ç†ï¼ˆæœ‰å‚æ•°æ—¶ï¼‰
     // --------------------------
     else
     {
-        // 2.1 Ê×´Îµ÷ÓÃ£º³õÊ¼»¯½âÂëÆ÷
+        // 2.1 é¦–æ¬¡è°ƒç”¨ï¼šåˆå§‹åŒ–è§£ç å™¨
         if (!p->is_inited)
         {
             if (init_video_decoder(p) != 0)
             {
-                printf("MP4 ½âÂëÆ÷³õÊ¼»¯Ê§°Ü\n");
+                printf("MP4 è§£ç å™¨åˆå§‹åŒ–å¤±è´¥\n");
                 return -1;
             }
-            // Í¬²½ÊÓÆµ·Ö±æÂÊµ½ĞéÄâÉãÏñÍ·
+            // åŒæ­¥è§†é¢‘åˆ†è¾¨ç‡åˆ°è™šæ‹Ÿæ‘„åƒå¤´
             frame->width = p->width;
             frame->height = p->height;
-            create_dib(p, p->width, p->height); // ´´½¨ DIB »º³åÇø
+            create_dib(p, p->width, p->height); // åˆ›å»º DIB ç¼“å†²åŒº
         }
 
-        // 2.2 ¶ÁÈ¡²¢½âÂëÒ»Ö¡ MP4
+        // 2.2 è¯»å–å¹¶è§£ç ä¸€å¸§ MP4
         int ret = 0;
         while (av_read_frame(p->fmt_ctx, p->pkt) >= 0)
         {
             if (p->pkt->stream_index != p->video_stream_idx)
             {
-                av_packet_unref(p->pkt); // Ìø¹ıÒôÆµ°ü
+                av_packet_unref(p->pkt); // è·³è¿‡éŸ³é¢‘åŒ…
                 continue;
             }
 
-            // ·¢ËÍÊı¾İ°üµ½½âÂëÆ÷
+            // å‘é€æ•°æ®åŒ…åˆ°è§£ç å™¨
             ret = avcodec_send_packet(p->codec_ctx, p->pkt);
             if (ret < 0)
             {
@@ -495,7 +495,7 @@ int frame_callback(frame_t* frame)
                 break;
             }
 
-            // ½ÓÊÕ½âÂëºóµÄ YUV Ö¡
+            // æ¥æ”¶è§£ç åçš„ YUV å¸§
             ret = avcodec_receive_frame(p->codec_ctx, p->yuv_frame);
             if (ret == AVERROR(EAGAIN))
             {
@@ -504,7 +504,7 @@ int frame_callback(frame_t* frame)
             }
             else if (ret == AVERROR_EOF)
             {
-                // Ñ­»·²¥·Å£ºÖØÖÃµ½ÊÓÆµ¿ªÍ·
+                // å¾ªç¯æ’­æ”¾ï¼šé‡ç½®åˆ°è§†é¢‘å¼€å¤´
                 av_seek_frame(p->fmt_ctx, p->video_stream_idx, 0, AVSEEK_FLAG_BACKWARD);
                 avcodec_flush_buffers(p->codec_ctx);
                 av_packet_unref(p->pkt);
@@ -516,7 +516,7 @@ int frame_callback(frame_t* frame)
                 break;
             }
 
-            // 2.3 ×ª»» YUV¡úRGB
+            // 2.3 è½¬æ¢ YUVâ†’RGB
             sws_scale(
                 p->sws_ctx,
                 (const uint8_t* const*)p->yuv_frame->data,
@@ -527,59 +527,59 @@ int frame_callback(frame_t* frame)
                 p->rgb_frame->linesize
             );
 
-            // 2.4 ¸´ÖÆµ½ DIB ²¢×ª»»Îª YUY2
+            // 2.4 å¤åˆ¶åˆ° DIB å¹¶è½¬æ¢ä¸º YUY2
             memcpy(p->rgb_data, p->rgb_frame->data[0], p->width * p->height * 3);
             int row_bytes = (p->width * 3 + 3) & ~3;
-            rgb24_yuy2(p->rgb_data, frame->buffer, p->width, p->height, row_bytes);  // ²¹³ä²ÎÊı
+            rgb24_yuy2(p->rgb_data, frame->buffer, p->width, p->height, row_bytes);  // è¡¥å……å‚æ•°
 
-            // 2.5 ÉèÖÃÖ¡ÂÊ£¨´ÓÊÓÆµÖĞ»ñÈ¡£©
+            // 2.5 è®¾ç½®å¸§ç‡ï¼ˆä»è§†é¢‘ä¸­è·å–ï¼‰
             frame->delay_msec = (int)(1000 / av_q2d(p->fmt_ctx->streams[p->video_stream_idx]->r_frame_rate));
             av_packet_unref(p->pkt);
-            break; // ´¦ÀíÍêÒ»Ö¡ºóÍË³öÑ­»·
+            break; // å¤„ç†å®Œä¸€å¸§åé€€å‡ºå¾ªç¯
         }
 
         return 0;
     }
 }
 
-// ĞŞ¸ÄºóµÄ main º¯Êı
-// 1. ÏÈÉùÃ÷Ïß³Ìº¯Êı£¨Ìæ»» Lambda£¬¼æÈİËùÓĞ±àÒëÆ÷£©
+// ä¿®æ”¹åçš„ main å‡½æ•°
+// 1. å…ˆå£°æ˜çº¿ç¨‹å‡½æ•°ï¼ˆæ›¿æ¢ Lambdaï¼Œå…¼å®¹æ‰€æœ‰ç¼–è¯‘å™¨ï¼‰
 DWORD WINAPI PipeConnectThread(LPVOID param);
 
 int main(int argc, char** argv)
 {
 
-    // 2. ³õÊ¼»¯µÚÒ»¸öĞéÄâÉãÏñÍ·²ÎÊı£¨·ÅÔÚ×îÇ°Ãæ£¬±ÜÃâ±äÁ¿Î´¶¨Òå£©
+    // 2. åˆå§‹åŒ–ç¬¬ä¸€ä¸ªè™šæ‹Ÿæ‘„åƒå¤´å‚æ•°ï¼ˆæ”¾åœ¨æœ€å‰é¢ï¼Œé¿å…å˜é‡æœªå®šä¹‰ï¼‰
     uvc_vcam_t uvc1;
     vcam_param p1;
-    // ÕıÈ·´úÂë
-    memset(&p1, 0, sizeof(p1));  // ÏÈÇåÁãËùÓĞ³ÉÔ±
-    p1.hPipeMutex = CreateMutex(NULL, FALSE, NULL); // ÔÙ³õÊ¼»¯»¥³âËø£¨´ËÊ±²»»á±»¸²¸Ç£©
+    // æ­£ç¡®ä»£ç 
+    memset(&p1, 0, sizeof(p1));  // å…ˆæ¸…é›¶æ‰€æœ‰æˆå‘˜
+    p1.hPipeMutex = CreateMutex(NULL, FALSE, NULL); // å†åˆå§‹åŒ–äº’æ–¥é”ï¼ˆæ­¤æ—¶ä¸ä¼šè¢«è¦†ç›–ï¼‰
     if (p1.hPipeMutex == NULL) {
-        printf("¡¾´íÎó¡¿´´½¨»¥³âËøÊ§°Ü£¬´íÎóÂë£º%d\n", GetLastError());
-        return 1; // »¥³âËø´´½¨Ê§°Ü±ØĞëÍË³ö£¬·ñÔòºóĞøÊ¹ÓÃ»á±ÀÀ£
+        printf("ã€é”™è¯¯ã€‘åˆ›å»ºäº’æ–¥é”å¤±è´¥ï¼Œé”™è¯¯ç ï¼š%d\n", GetLastError());
+        return 1; // äº’æ–¥é”åˆ›å»ºå¤±è´¥å¿…é¡»é€€å‡ºï¼Œå¦åˆ™åç»­ä½¿ç”¨ä¼šå´©æºƒ
     }
-    p1.is_loop = true;            // MP4 Ä¬ÈÏÑ­»·²¥·Å
+    p1.is_loop = true;            // MP4 é»˜è®¤å¾ªç¯æ’­æ”¾
     p1.is_inited = false;
 
-    // 3. ³õÊ¼»¯µÚ¶ş¸öĞéÄâÉãÏñÍ·²ÎÊı£¨ÌáÇ°¶¨Òå£¬±ÜÃâ×÷ÓÃÓòÎÊÌâ£©
+    // 3. åˆå§‹åŒ–ç¬¬äºŒä¸ªè™šæ‹Ÿæ‘„åƒå¤´å‚æ•°ï¼ˆæå‰å®šä¹‰ï¼Œé¿å…ä½œç”¨åŸŸé—®é¢˜ï¼‰
     uvc_vcam_t uvc2;
     vcam_param p2;
     memset(&p2, 0, sizeof(p2));
     p2.is_loop = true;
     p2.is_inited = false;
-    void* vcam2 = NULL;  // ÌáÇ°¶¨ÒåµÚ¶ş¸öÉãÏñÍ·¾ä±ú
+    void* vcam2 = NULL;  // æå‰å®šä¹‰ç¬¬äºŒä¸ªæ‘„åƒå¤´å¥æŸ„
 
-    // 4. ´¦ÀíÃüÁîĞĞ²ÎÊı
+    // 4. å¤„ç†å‘½ä»¤è¡Œå‚æ•°
     bool has_mp4_param = false;
     if (argc >= 2)
     {
-        // ÓĞ²ÎÊı£ºÊ¹ÓÃ MP4 Ä£Ê½
+        // æœ‰å‚æ•°ï¼šä½¿ç”¨ MP4 æ¨¡å¼
         p1.video_path = argv[1];
         has_mp4_param = true;
-        printf("µÚÒ»¸öÉãÏñÍ·£ºÊ¹ÓÃ MP4 ÎÄ¼ş -> %s\n", argv[1]);
+        printf("ç¬¬ä¸€ä¸ªæ‘„åƒå¤´ï¼šä½¿ç”¨ MP4 æ–‡ä»¶ -> %s\n", argv[1]);
 
-        // ³õÊ¼»¯µÚ¶ş¸öÉãÏñÍ·£¨Èç¹ûÓĞµÚ¶ş¸ö²ÎÊı£©
+        // åˆå§‹åŒ–ç¬¬äºŒä¸ªæ‘„åƒå¤´ï¼ˆå¦‚æœæœ‰ç¬¬äºŒä¸ªå‚æ•°ï¼‰
         if (argc >= 3)
         {
             p2.video_path = argv[2];
@@ -593,23 +593,23 @@ int main(int argc, char** argv)
             vcam2 = vcam_create(&uvc2);
             if (vcam2)
             {
-                printf("µÚ¶ş¸öÉãÏñÍ·£ºÊ¹ÓÃ MP4 ÎÄ¼ş -> %s\n", argv[2]);
+                printf("ç¬¬äºŒä¸ªæ‘„åƒå¤´ï¼šä½¿ç”¨ MP4 æ–‡ä»¶ -> %s\n", argv[2]);
             }
             else
             {
-                printf("¾¯¸æ£º´´½¨µÚ¶ş¸öĞéÄâÉãÏñÍ·Ê§°Ü\n");
+                printf("è­¦å‘Šï¼šåˆ›å»ºç¬¬äºŒä¸ªè™šæ‹Ÿæ‘„åƒå¤´å¤±è´¥\n");
             }
         }
     }
     else
     {
-        // ÎŞ²ÎÊı£º½øÈë¹ÜµÀÄ£Ê½£¨Ö»¸øµÚÒ»¸öÉãÏñÍ·ÓÃ£©
+        // æ— å‚æ•°ï¼šè¿›å…¥ç®¡é“æ¨¡å¼ï¼ˆåªç»™ç¬¬ä¸€ä¸ªæ‘„åƒå¤´ç”¨ï¼‰
         p1.is_pipe_mode = true;
-        printf("ÓÃ·¨£º%s <MP4ÎÄ¼şÂ·¾¶1> [MP4ÎÄ¼şÂ·¾¶2]£¨Ê¹ÓÃMP4ÊäÈë£©\n", argv[0]);
-        printf("µ±Ç°ÎŞ²ÎÊı£¬µÚÒ»¸öÉãÏñÍ·µÈ´ı¹ÜµÀÊäÈë£¨¹ÜµÀÃû£º\\\\.\\pipe\\vcam_pipe£©\n");
+        printf("ç”¨æ³•ï¼š%s <MP4æ–‡ä»¶è·¯å¾„1> [MP4æ–‡ä»¶è·¯å¾„2]ï¼ˆä½¿ç”¨MP4è¾“å…¥ï¼‰\n", argv[0]);
+        printf("å½“å‰æ— å‚æ•°ï¼Œç¬¬ä¸€ä¸ªæ‘„åƒå¤´ç­‰å¾…ç®¡é“è¾“å…¥ï¼ˆç®¡é“åï¼š\\\\.\\pipe\\vcam_pipeï¼‰\n");
     }
 
-    // 5. ³õÊ¼»¯µÚÒ»¸öĞéÄâÉãÏñÍ·£¨ÎŞÂÛ MP4 »¹ÊÇ¹ÜµÀÄ£Ê½£©
+    // 5. åˆå§‹åŒ–ç¬¬ä¸€ä¸ªè™šæ‹Ÿæ‘„åƒå¤´ï¼ˆæ— è®º MP4 è¿˜æ˜¯ç®¡é“æ¨¡å¼ï¼‰
     uvc1.pid = 0xcc10;
     uvc1.vid = 0xbb10;
     uvc1.manu_fact = "Fanxiushu";
@@ -620,44 +620,44 @@ int main(int argc, char** argv)
     void* vcam1 = vcam_create(&uvc1);
     if (!vcam1)
     {
-        printf("´íÎó£º´´½¨µÚÒ»¸öĞéÄâÉãÏñÍ·Ê§°Ü£¬³ÌĞòÍË³ö\n");
+        printf("é”™è¯¯ï¼šåˆ›å»ºç¬¬ä¸€ä¸ªè™šæ‹Ÿæ‘„åƒå¤´å¤±è´¥ï¼Œç¨‹åºé€€å‡º\n");
         return 1;
     }
 
-    // 6. ¹ÜµÀÄ£Ê½£ºÆô¶¯Ïß³ÌµÈ´ıÁ¬½Ó£¨ÓÃ´«Í³º¯Êı£¬²»ÒÀÀµ Lambda£©
+    // 6. ç®¡é“æ¨¡å¼ï¼šå¯åŠ¨çº¿ç¨‹ç­‰å¾…è¿æ¥ï¼ˆç”¨ä¼ ç»Ÿå‡½æ•°ï¼Œä¸ä¾èµ– Lambdaï¼‰
     HANDLE hPipeThread = NULL;
     if (p1.is_pipe_mode)
     {
-        // ´´½¨ÃüÃû¹ÜµÀ
+        // åˆ›å»ºå‘½åç®¡é“
         p1.hPipe = CreateNamedPipeA(
             "\\\\.\\pipe\\vcam_pipe",
             PIPE_ACCESS_INBOUND,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            1,          // ×î´óÊµÀıÊı
-            0,          // Êä³ö»º³åÇø£¨²»ÓÃ£©
-            1024 * 1024,// ÊäÈë»º³åÇø£¨1MB£©
-            5000,       // ³¬Ê±Ê±¼ä
+            1,          // æœ€å¤§å®ä¾‹æ•°
+            0,          // è¾“å‡ºç¼“å†²åŒºï¼ˆä¸ç”¨ï¼‰
+            1024 * 1024,// è¾“å…¥ç¼“å†²åŒºï¼ˆ1MBï¼‰
+            5000,       // è¶…æ—¶æ—¶é—´
             NULL
         );
         if (p1.hPipe == INVALID_HANDLE_VALUE)
         {
-            printf("´íÎó£º´´½¨¹ÜµÀÊ§°Ü£¬´íÎóÂë£º%d\n", GetLastError());
-            // ¹ÜµÀ´´½¨Ê§°ÜÈÔ±£ÁôÉãÏñÍ·£¨ÏÔÊ¾ºÚÆÁ£©
+            printf("é”™è¯¯ï¼šåˆ›å»ºç®¡é“å¤±è´¥ï¼Œé”™è¯¯ç ï¼š%d\n", GetLastError());
+            // ç®¡é“åˆ›å»ºå¤±è´¥ä»ä¿ç•™æ‘„åƒå¤´ï¼ˆæ˜¾ç¤ºé»‘å±ï¼‰
         }
         else
         {
-            // Æô¶¯Ïß³ÌµÈ´ı¿Í»§¶ËÁ¬½Ó£¨´«µİ p1 Ö¸Õë£©
+            // å¯åŠ¨çº¿ç¨‹ç­‰å¾…å®¢æˆ·ç«¯è¿æ¥ï¼ˆä¼ é€’ p1 æŒ‡é’ˆï¼‰
             hPipeThread = CreateThread(
-                NULL,           // Ä¬ÈÏ°²È«ÊôĞÔ
-                0,              // Ä¬ÈÏÕ»´óĞ¡
-                PipeConnectThread,  // ´«Í³Ïß³Ìº¯Êı
-                &p1,            // ´«µİ²ÎÊı£¨p1 µØÖ·£©
-                0,              // Á¢¼´ÔËĞĞ
-                NULL            // ²»»ñÈ¡Ïß³ÌID
+                NULL,           // é»˜è®¤å®‰å…¨å±æ€§
+                0,              // é»˜è®¤æ ˆå¤§å°
+                PipeConnectThread,  // ä¼ ç»Ÿçº¿ç¨‹å‡½æ•°
+                &p1,            // ä¼ é€’å‚æ•°ï¼ˆp1 åœ°å€ï¼‰
+                0,              // ç«‹å³è¿è¡Œ
+                NULL            // ä¸è·å–çº¿ç¨‹ID
             );
             if (hPipeThread == NULL)
             {
-                printf("´íÎó£ºÆô¶¯¹ÜµÀÏß³ÌÊ§°Ü£¬´íÎóÂë£º%d\n", GetLastError());
+                printf("é”™è¯¯ï¼šå¯åŠ¨ç®¡é“çº¿ç¨‹å¤±è´¥ï¼Œé”™è¯¯ç ï¼š%d\n", GetLastError());
                 DisconnectNamedPipe(p1.hPipe);
                 CloseHandle(p1.hPipe);
                 p1.hPipe = INVALID_HANDLE_VALUE;
@@ -665,19 +665,19 @@ int main(int argc, char** argv)
         }
     }
 
-    // 7. Ö÷Ñ­»·£ºµÈ´ıÍË³ö£¨Í³Ò»ÓÃ getchar£¬¼òµ¥¼æÈİ£©
-    printf("\n°´ÈÎÒâ¼üÍË³ö³ÌĞò...\n");
-    (void)getchar();  // ÏÔÊ½ºöÂÔ·µ»ØÖµ£¬±ÜÃâ¾¯¸æ
+    // 7. ä¸»å¾ªç¯ï¼šç­‰å¾…é€€å‡ºï¼ˆç»Ÿä¸€ç”¨ getcharï¼Œç®€å•å…¼å®¹ï¼‰
+    printf("\næŒ‰ä»»æ„é”®é€€å‡ºç¨‹åº...\n");
+    (void)getchar();  // æ˜¾å¼å¿½ç•¥è¿”å›å€¼ï¼Œé¿å…è­¦å‘Š
 
-    // 8. ×ÊÔ´ÊÍ·Å£º°´¡°´´½¨ÄæĞò¡±ÊÍ·Å£¬±ÜÃâÒÀÀµÎÊÌâ
-    // 8.1 ÊÍ·ÅÏß³Ì¾ä±ú£¨Èç¹û´æÔÚ£©
+    // 8. èµ„æºé‡Šæ”¾ï¼šæŒ‰â€œåˆ›å»ºé€†åºâ€é‡Šæ”¾ï¼Œé¿å…ä¾èµ–é—®é¢˜
+    // 8.1 é‡Šæ”¾çº¿ç¨‹å¥æŸ„ï¼ˆå¦‚æœå­˜åœ¨ï¼‰
     if (hPipeThread != NULL)
     {
-        WaitForSingleObject(hPipeThread, 1000);  // µÈ´ıÏß³Ì½áÊø
+        WaitForSingleObject(hPipeThread, 1000);  // ç­‰å¾…çº¿ç¨‹ç»“æŸ
         CloseHandle(hPipeThread);
     }
 
-    // 8.2 ÊÍ·ÅĞéÄâÉãÏñÍ·
+    // 8.2 é‡Šæ”¾è™šæ‹Ÿæ‘„åƒå¤´
     if (vcam2 != NULL)
     {
         vcam_destroy(vcam2);
@@ -687,10 +687,10 @@ int main(int argc, char** argv)
         vcam_destroy(vcam1);
     }
 
-    // 8.3 ÊÍ·ÅµÚÒ»¸öÉãÏñÍ·×ÊÔ´£¨FFmpeg + DIB + ¹ÜµÀ£©
+    // 8.3 é‡Šæ”¾ç¬¬ä¸€ä¸ªæ‘„åƒå¤´èµ„æºï¼ˆFFmpeg + DIB + ç®¡é“ï¼‰
     if (p1.is_inited)
     {
-        // ÊÍ·Å FFmpeg ×ÊÔ´
+        // é‡Šæ”¾ FFmpeg èµ„æº
         if (p1.sws_ctx != NULL) sws_freeContext(p1.sws_ctx);
         if (p1.rgb_frame != NULL) av_frame_free(&p1.rgb_frame);
         if (p1.yuv_frame != NULL) av_frame_free(&p1.yuv_frame);
@@ -698,10 +698,10 @@ int main(int argc, char** argv)
         if (p1.codec_ctx != NULL) avcodec_free_context(&p1.codec_ctx);
         if (p1.fmt_ctx != NULL) avformat_close_input(&p1.fmt_ctx);
     }
-    // ÊÍ·Å DIB ×ÊÔ´
+    // é‡Šæ”¾ DIB èµ„æº
     if (p1.hbmp != NULL) DeleteObject(p1.hbmp);
     if (p1.hdc != NULL) DeleteDC(p1.hdc);
-    // ÊÍ·Å¹ÜµÀ×ÊÔ´
+    // é‡Šæ”¾ç®¡é“èµ„æº
     if (p1.hPipe != INVALID_HANDLE_VALUE)
     {
         DisconnectNamedPipe(p1.hPipe);
@@ -712,7 +712,7 @@ int main(int argc, char** argv)
         free(p1.pipe_buffer);
     }
 
-    // 8.4 ÊÍ·ÅµÚ¶ş¸öÉãÏñÍ·×ÊÔ´£¨FFmpeg + DIB£©
+    // 8.4 é‡Šæ”¾ç¬¬äºŒä¸ªæ‘„åƒå¤´èµ„æºï¼ˆFFmpeg + DIBï¼‰
     if (p2.is_inited)
     {
         if (p2.sws_ctx != NULL) sws_freeContext(p2.sws_ctx);
@@ -724,36 +724,36 @@ int main(int argc, char** argv)
     }
     if (p2.hbmp != NULL) DeleteObject(p2.hbmp);
     if (p2.hdc != NULL) DeleteDC(p2.hdc);
-    // ÊÍ·ÅµÚÒ»¸öÉãÏñÍ·µÄ»¥³âËø
+    // é‡Šæ”¾ç¬¬ä¸€ä¸ªæ‘„åƒå¤´çš„äº’æ–¥é”
     if (p1.hPipeMutex != NULL) {
         CloseHandle(p1.hPipeMutex);
     }
 
-    printf("³ÌĞòÒÑÍË³ö£¬ËùÓĞ×ÊÔ´ÒÑÊÍ·Å\n");
+    printf("ç¨‹åºå·²é€€å‡ºï¼Œæ‰€æœ‰èµ„æºå·²é‡Šæ”¾\n");
     return 0;
 }
 
-// 9. ÊµÏÖ¹ÜµÀÁ¬½ÓÏß³Ìº¯Êı£¨´«Í³º¯Êı£¬Ìæ´ú Lambda£¬¼æÈİËùÓĞ±àÒëÆ÷£©
+// 9. å®ç°ç®¡é“è¿æ¥çº¿ç¨‹å‡½æ•°ï¼ˆä¼ ç»Ÿå‡½æ•°ï¼Œæ›¿ä»£ Lambdaï¼Œå…¼å®¹æ‰€æœ‰ç¼–è¯‘å™¨ï¼‰
 DWORD WINAPI PipeConnectThread(LPVOID param)
 {
-    if (param == NULL) return 1;  // ²ÎÊıÎª¿Õ£¬Ö±½Ó·µ»Ø
+    if (param == NULL) return 1;  // å‚æ•°ä¸ºç©ºï¼Œç›´æ¥è¿”å›
 
     vcam_param* p = (vcam_param*)param;
-    // µÈ´ı¿Í»§¶ËÁ¬½Ó£¨ConnectNamedPipe »á×èÈûÖ±µ½ÓĞÁ¬½Ó£©
+    // ç­‰å¾…å®¢æˆ·ç«¯è¿æ¥ï¼ˆConnectNamedPipe ä¼šé˜»å¡ç›´åˆ°æœ‰è¿æ¥ï¼‰
     BOOL connectRet = ConnectNamedPipe(p->hPipe, NULL);
     DWORD lastErr = GetLastError();
 
-    // ÅĞ¶ÏÁ¬½Ó½á¹û£º³É¹¦ »ò ÒÑ´æÔÚÁ¬½Ó£¨ERROR_PIPE_CONNECTED£©
+    // åˆ¤æ–­è¿æ¥ç»“æœï¼šæˆåŠŸ æˆ– å·²å­˜åœ¨è¿æ¥ï¼ˆERROR_PIPE_CONNECTEDï¼‰
     if (connectRet || (lastErr == ERROR_PIPE_CONNECTED))
     {
         p->pipe_connected = true;
-        printf("¹ÜµÀÁ¬½Ó³É¹¦£¡µÈ´ıÍâ²¿Êı¾İÊäÈë£¨¸ñÊ½£º4×Ö½Ú¿í + 4×Ö½Ú¸ß + RGB24Êı¾İ£©\n");
+        printf("ç®¡é“è¿æ¥æˆåŠŸï¼ç­‰å¾…å¤–éƒ¨æ•°æ®è¾“å…¥ï¼ˆæ ¼å¼ï¼š4å­—èŠ‚å®½ + 4å­—èŠ‚é«˜ + RGB24æ•°æ®ï¼‰\n");
     }
     else
     {
         p->pipe_connected = false;
-        printf("¹ÜµÀÁ¬½ÓÊ§°Ü£¬´íÎóÂë£º%d\n", lastErr);
-        // Á¬½ÓÊ§°Ü¹Ø±Õ¹ÜµÀ
+        printf("ç®¡é“è¿æ¥å¤±è´¥ï¼Œé”™è¯¯ç ï¼š%d\n", lastErr);
+        // è¿æ¥å¤±è´¥å…³é—­ç®¡é“
         DisconnectNamedPipe(p->hPipe);
         CloseHandle(p->hPipe);
         p->hPipe = INVALID_HANDLE_VALUE;
