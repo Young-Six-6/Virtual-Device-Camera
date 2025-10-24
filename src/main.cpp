@@ -1,4 +1,6 @@
 //////Fanxiushu 2016-10-06
+//////Young-Six-6
+//////version 1.3.10
 
 #include <Windows.h>
 #include <stdio.h>
