@@ -6,14 +6,6 @@ fork自jasonsalex/Virtual-Device-Camera，意图做些修改
 注意：缺失一些dll暂时自己想办法，下载放到exe目录即可，稍后上传完成发行版
 现在项目比较混乱如有问题再说
 
-2025/10/10
-增加了mp4作为输入源
-
-2025/10/12
-增加了通过\\.\pipe\vcam_pipe传输画面，此后无错误将不再大修改，靠外部输入画面
-
-2025/10/19
-添加obs.py,现在可以使用obs控制画面了
 
 
 缺失dll自行补齐BtbN/FFmpeg-Builds

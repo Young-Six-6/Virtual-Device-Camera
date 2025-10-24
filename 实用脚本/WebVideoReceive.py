@@ -24,22 +24,22 @@ def writer_thread(pipe, q: queue.Queue):
         q.task_done()
 
 def main():
-    print(f"[🔌] 等待宿主连接 {HOST}:{PORT} ...")
+    print(f"等待宿主连接 {HOST}:{PORT} ...")
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind((HOST, PORT))
     s.listen(1)
     conn, addr = s.accept()
-    print(f"[✅] 已连接宿主：{addr}")
+    print(f"[SUCCESS] 已连接宿主：{addr}")
 
     # 打开虚拟摄像头管道
     pipe = open(PIPE_PATH, 'wb')
-    print(f"[✅] 已连接虚拟摄像头管道：{PIPE_PATH}")
+    print(f"[SUCCESS] 已连接虚拟摄像头管道：{PIPE_PATH}")
 
     # 接收分辨率头
     hdr = conn.recv(8)
     width, height = struct.unpack('<ii', hdr)
     frame_size = width * height * 3
-    print(f"[📐] 分辨率 {width}x{height}, 帧大小 {frame_size} 字节")
+    print(f"[INFO] 分辨率 {width}x{height}, 帧大小 {frame_size} 字节")
 
     pipe.write(struct.pack('<ii', width, height))
     pipe.flush()
@@ -64,25 +64,25 @@ def main():
             try:
                 q.put_nowait(buf)
             except queue.Full:
-                print("[⚠️] 写入线程忙，丢弃一帧")
+                print("[WAARNING️] 写入线程忙，丢弃一帧")
                 continue
 
             frames += 1
             now = time.perf_counter()
             if now - last_time >= 5:
-                print(f"[📊] 实际接收速率：{frames / (now - last_time):.2f} FPS")
+                print(f"[INFO] 实际接收速率：{frames / (now - last_time):.2f} FPS")
                 last_time = now
                 frames = 0
 
     except KeyboardInterrupt:
-        print("[⏹️] 手动中止")
+        print("[STOP️] 手动中止")
     finally:
         q.put(None)
         q.join()
         conn.close()
         s.close()
         pipe.close()
-        print("[🔚] 结束")
+        print("[STOP] 结束")
 
 if __name__ == "__main__":
     main()

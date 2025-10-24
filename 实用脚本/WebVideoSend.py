@@ -30,7 +30,7 @@ DEFAULT_HEIGHT = 720
 # -------------------------- 工具函数 --------------------------
 def ensure_admin():
     if not ctypes.windll.shell32.IsUserAnAdmin():
-        print("[⚠️] 本脚本需要管理员权限以访问 Hyper-V 命令，正在请求UAC权限...")
+        print("[WARNING] 本脚本需要管理员权限以访问 Hyper-V 命令，正在请求UAC权限...")
         ctypes.windll.shell32.ShellExecuteW(
             None, "runas", sys.executable, " ".join(sys.argv), None, 1
         )
@@ -50,12 +50,12 @@ def get_vm_ip(vm_name: str):
         ips = re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", output)
         if ips:
             ip = ips[0]
-            print(f"[✅] 自动检测到虚拟机 {vm_name} IP：{ip}")
+            print(f"自动检测到虚拟机 {vm_name} IP：{ip}")
             return ip
-        print(f"[⚠️] 未找到 IPv4，输出：\n{output}")
+        print(f"[WARNING️] 未找到 IPv4，输出：\n{output}")
         return None
     except Exception as e:
-        print(f"[❌] 获取虚拟机 IP 失败：{e}")
+        print(f"[ERROR] 获取虚拟机 IP 失败：{e}")
         return None
 
 # -------------------------- 主逻辑 --------------------------
@@ -70,14 +70,14 @@ def main():
     else:
         ip = MANUAL_IP
 
-    print(f"[🔌] 正在连接虚拟机 {ip}:{PORT} ...")
+    print(f"正在连接虚拟机 {ip}:{PORT} ...")
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
     try:
         sock.connect((ip, PORT))
-        print("[✅] 已建立 TCP 连接")
+        print("已建立 TCP 连接")
     except Exception as e:
-        print(f"[❌] 无法连接虚拟机：{e}")
+        print(f"[ERROR] 无法连接虚拟机：{e}")
         return
 
     # 初始化 OBS
@@ -86,14 +86,14 @@ def main():
         try:
             ws = obsws(OBS_HOST, OBS_PORT, OBS_PASSWORD)
             ws.connect()
-            print(f"[✅] 已连接 OBS WebSocket ({OBS_HOST}:{OBS_PORT})")
+            print(f"已连接 OBS WebSocket ({OBS_HOST}:{OBS_PORT})")
         except ConnectionFailure:
-            print("[❌] 无法连接 OBS WebSocket，请确认 obs-websocket 插件已启用。")
+            print("[ERROR] 无法连接 OBS WebSocket，请确认 obs-websocket 插件已启用。")
             return
 
     # 发送分辨率头
     sock.sendall(struct.pack('<ii', TARGET_WIDTH, TARGET_HEIGHT))
-    print(f"[📐] 已发送分辨率头：{TARGET_WIDTH}x{TARGET_HEIGHT}")
+    print(f"已发送分辨率头：{TARGET_WIDTH}x{TARGET_HEIGHT}")
 
     # 发送循环
     frame_count = 0
@@ -101,7 +101,7 @@ def main():
     next_time = time.perf_counter()
     interval = 1.0 / FRAME_RATE
 
-    print(f"[🎥] 开始推流：{FRAME_RATE} FPS | 场景：{SCENE_NAME}")
+    print(f"开始推流：{FRAME_RATE} FPS | 场景：{SCENE_NAME}")
 
     try:
         while True:
@@ -122,13 +122,13 @@ def main():
                     ))
                     img_b64 = resp.datain.get("imageData", "")
                     if not img_b64.startswith("data:image/jpeg;base64,"):
-                        print(f"[⚠️] 第{frame_count}帧：OBS返回无效截图")
+                        print(f"[WARNING️] 第{frame_count}帧：OBS返回无效截图")
                         continue
                     img_bytes = base64.b64decode(img_b64.split(",", 1)[1])
                     frame_bgr = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
                     frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                 except Exception as e:
-                    print(f"[⚠️] 第{frame_count}帧获取失败：{e}")
+                    print(f"[WARNING️] 第{frame_count}帧获取失败：{e}")
                     continue
 
             # 校验大小
@@ -147,17 +147,17 @@ def main():
             # 打印统计
             now = time.perf_counter()
             if now - start_stat >= 5:
-                print(f"[📊] 实际发送速率：{frame_count / (now - start_stat):.2f} FPS")
+                print(f"[LOGS] 实际发送速率：{frame_count / (now - start_stat):.2f} FPS")
                 start_stat = now
                 frame_count = 0
 
     except KeyboardInterrupt:
-        print("[⏹️] 手动中止")
+        print("[STOP️] 手动中止")
     finally:
         sock.close()
         if ws:
             ws.disconnect()
-        print("[🔚] 推流结束")
+        print("[STOP] 推流结束")
 
 if __name__ == "__main__":
     main()
