@@ -1,0 +1,18 @@
+Loading drivers carries risks. Tinkering requires caution. Don’t blame me if something goes wrong—please be careful.
+
+The most recommended method is using the "Disable Driver Signature Enforcement" option. It’s simple, fast, and has no side effects.
+
+Alternative methods:
+0. Some platforms may refer you to vendors (commonly found in the game hack community—not recommended).
+
+Find still-valid driver certificates (quite difficult).
+
+Use the downgrade exploit on Windows 11 to allow loading any driver (not well understood—figure it out yourself).
+
+Windows 7 methods are not discussed here—many approaches work perfectly.
+
+DSE-Patcher works on Windows 10 and some versions of Windows 11. Check the original project for details. It’s a very useful tool, but remember to restore DSE immediately after loading the driver (or you’ll get a BSOD). You’ll need to reinstall it every boot.
+
+EfiGuard—haven’t tried it.
+
+25/10/26

@@ -1,0 +1,5 @@
+The project does not include all dependent DLLs.（maybe） The README has made this clear. The released version includes some DLLs, but not all. I will add the missing ones when I have time. For now, please find the missing DLLs yourself and place them in the main program directory.
+
+If you still get error 0xc000007b after adding the DLLs, you may have added incorrect versions. You can try searching your computer with Everyone permissions. If your PC has common software installed, these DLLs can usually be found in their installation directories.
+
+25/10/26

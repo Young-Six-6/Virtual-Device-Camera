@@ -1,0 +1,14 @@
+Ancient Logs
+2025/10/10
+Added support for MP4 as an input source.
+
+2025/10/12
+Added video transmission via \\.\pipe\vcam_pipe. From this point onward, no major changes will be made unless errors occur. The system will rely on external input for video.
+
+2025/10/19
+Added obs.py. It is now possible to control the video feed using OBS.
+
+Version 1.3.10
+Formally introduced version management to prevent chaotic submissions (though still hard to prevent them all)/(ㄒoㄒ)/~~.
+
+25/10/26

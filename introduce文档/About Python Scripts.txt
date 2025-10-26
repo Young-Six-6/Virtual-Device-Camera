@@ -1,0 +1,48 @@
+Included some interesting scripts to improve practicality. Planning to add a GUI interface in the future.
+Below are descriptions for each script (located in the "Utility Scripts" folder).
+!!!!! NOTE: Be sure to modify the script settings appropriately. All parameters are for reference only !!!!!!
+
+ColorTest
+Sends a solid color test image to the pipe.
+You can: Change the resolution (must match).
+
+ObsLocalPipe
+Captures a specified scene from OBS and automatically sends it to the main program pipe.
+You must: Fill in all configuration items completely, otherwise errors will occur.
+
+OBS_HOST, PIPE_PATH: No need to modify.
+
+OBS_PORT, OBS_PASSWORD: Must match your OBS settings (the provided values are not the default port or password). Configure in OBS under Tools -> Server Settings.
+
+SCENE_NAME: The actual scene name in OBS.
+
+FRAME_RATE: Recommended 5-15 fps.
+
+TEST_SOLID_COLOR: True = sends a red test frame; False = sends OBS screenshots. Set to False if not debugging.
+
+DEFAULT_WIDTH, DEFAULT_HEIGHT: Resolution. Important: The OBS output, script, and main program must use the same resolution, otherwise screen tearing or automatic crashes will occur.
+
+WebVideoSend (Sender)
+Mainly used for sending video from the host machine. For use with a camera driver installed in a Hyper-V VM (use the receiver script). Theoretically can push video over a LAN, but untested.
+You must: Configure the settings.
+
+IfHyper: Whether it's for Hyper-V.
+
+VM_NAME: Target virtual machine name (used for attempting automatic IP detection).
+
+MANUAL_IP: Target VM IP (used if auto-detection fails). You might get lucky and not need to change this initially (mandatory for LAN sending).
+
+PORT: Must match the receiver.
+
+OBS_HOST, OBS_PORT, OBS_PASSWORD, SCENE_NAME, FRAME_RATE, TEST_SOLID_COLOR, DEFAULT_WIDTH, DEFAULT_HEIGHT: Same as in ObsLocalPipe above.
+
+WebVideoReceive (Receiver)
+The companion receiver script.
+You must:
+
+Set PORT to match the sender. Other settings can generally be left as default.
+
+ReceiveTest (Tester)
+A test program implemented independently of the main program. Used to verify whether the pipe can transmit video without loading the driver (not commonly used, not maintained).
+
+25/10/26
