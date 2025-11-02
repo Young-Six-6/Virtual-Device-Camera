@@ -1,5 +1,2 @@
-The project does not include all dependent DLLs.（maybe） The README has made this clear. The released version includes some DLLs, but not all. I will add the missing ones when I have time. For now, please find the missing DLLs yourself and place them in the main program directory.
-
-If you still get error 0xc000007b after adding the DLLs, you may have added incorrect versions. You can try searching your computer with Everyone permissions. If your PC has common software installed, these DLLs can usually be found in their installation directories.
-
-25/10/26
+# Currently, I admit that my submissions are quite chaotic, and I may have submitted corrupted/incorrect/unfinished versions. If you are a user and encounter any issues, please raise an issue.
+# It has been observed that if the resolutions of the input source, main program, and camera program are inconsistent, the display will be distorted. Please ensure they are consistent. If you need to change the resolution (recompile the main program), it is recommended to modify the device identifier.

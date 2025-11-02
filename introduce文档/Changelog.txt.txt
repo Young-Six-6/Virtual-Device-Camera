@@ -11,4 +11,5 @@ Added obs.py. It is now possible to control the video feed using OBS.
 Version 1.3.10
 Formally introduced version management to prevent chaotic submissions (though still hard to prevent them all)/(ㄒoㄒ)/~~.
 
-25/10/26
+Version 1.4.0
+use config file control resolution
