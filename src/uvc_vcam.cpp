@@ -1,10 +1,12 @@
-/// by fanxiushu 2016-10-01
-///符合 USB Video Class 协议的摄像头 版本 1.0
+﻿/// by fanxiushu 2016-10-01
+///符合 USB Video Class 协议的摄像头 版本 1.4.0
 ///驱动接口来自本人开发的虚拟USB驱动。
 ///Young-Six-6在此代码基础上修改完善
 
 ////
 #include <Windows.h>
+#include <fstream>
+#include <string>
 #include "uvc_struct.h"
 #include "virt_dev.h"
 #include "uvc_vcam.h"
@@ -90,34 +92,52 @@ uvc_vcam::uvc_vcam()
 {
 	curr_config = -1;
 	curr_interface = -1;
-	curr_alt_setting = -1; ///-1 表示当前没选择任何接口
+	curr_alt_setting = -1; /// -1 表示当前没选择任何接口
 
 	curr_format_index = 1;
-	curr_frame_index = 2;
-	////
 	iso_ep_addr = EP_ADDR;
+	format_count = 1;
 
-	format_count = 1; ///
-//	guidFormat = { 0xe436eb7d, 0x524f, 0x11ce, {0x9f, 0x53, 0x00, 0x20, 0xaf, 0x0b, 0xa7, 0x70 } };// MEDIASUBTYPE_RGB24 
-//	bitsPerPixel = 24; /// RGB 三原色
+	guidFormat = { 0x32595559, 0x0000, 0x0010,
+				   {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71} };
+	bitsPerPixel = 16; // YUY2
 
-	guidFormat = { 0x32595559, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } }; // MEDIASUBTYPE_YUY2
-	bitsPerPixel = 16; //// YUY2 
-	/////
-	frame_count = 3; ///
-	frames[0] = { 640, 480 };
-	frames[1] = { 1920, 1080 };
-	frames[2] = { 1280,  720 };
-	//////
-	usb_ptr = NULL; ///
-	hThread = NULL; ///
-	quit = false; ////
-	/////
+	// 默认分辨率（1080p）
+	int default_w = 1920;
+	int default_h = 1080;
+
+	// 读取配置文件 default_res.txt
+	try {
+		std::ifstream fin("default_res.txt");
+		if (fin.is_open()) {
+			std::string val;
+			fin >> val;
+			fin.close();
+
+			if (val == "480") { default_w = 640;  default_h = 480; }
+			else if (val == "720") { default_w = 1280; default_h = 720; }
+			else if (val == "1080") { default_w = 1920; default_h = 1080; }
+		}
+	}
+	catch (...) {}
+
+	// 仅上报一个帧
+	frame_count = 1;
+	frames[0] = { default_w, default_h };
+	curr_frame_index = 1;
+
+	printf("【VCAM】已加载配置：%dx%d，仅导出此一种分辨率。\n", default_w, default_h);
+
+	// 其他初始化
+	usb_ptr = NULL;
+	hThread = NULL;
+	quit = false;
+
 	frame_pos = 0;
 	frame_length = 0;
 	frame_buffer = NULL;
-	frame_flip = 0; 
-	frame_delay_msec = 33; // ms 
+	frame_flip = 0;
+	frame_delay_msec = 33;
 }
 uvc_vcam::~uvc_vcam()
 {
