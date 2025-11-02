@@ -1,0 +1,5 @@
+你应该：
+编辑default_res.txt，填写目标分辨率1080/720/480
+
+You Should:
+Edit default_res.txt,1080/720/480
