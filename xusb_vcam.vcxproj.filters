@@ -1,39 +1,23 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <Filter Include="Source Files">
-      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
-      <Extensions>cpp;c;cc;cxx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
-    </Filter>
-    <Filter Include="Header Files">
-      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
-      <Extensions>h;hh;hpp;hxx;hm;inl;inc;xsd</Extensions>
-    </Filter>
-    <Filter Include="Resource Files">
-      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
-      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
-    </Filter>
+    <Filter Include="Application"><UniqueIdentifier>{F6327CA4-4D7C-4128-8A5E-042560390A01}</UniqueIdentifier></Filter>
+    <Filter Include="Camera"><UniqueIdentifier>{F6327CA4-4D7C-4128-8A5E-042560390A02}</UniqueIdentifier></Filter>
+    <Filter Include="USB"><UniqueIdentifier>{F6327CA4-4D7C-4128-8A5E-042560390A03}</UniqueIdentifier></Filter>
+    <Filter Include="Protocol"><UniqueIdentifier>{F6327CA4-4D7C-4128-8A5E-042560390A04}</UniqueIdentifier></Filter>
+    <Filter Include="Media"><UniqueIdentifier>{F6327CA4-4D7C-4128-8A5E-042560390A05}</UniqueIdentifier></Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\virt_dev.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\uvc_vcam.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\main.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
+    <ClCompile Include="src\app\main.cpp"><Filter>Application</Filter></ClCompile>
+    <ClCompile Include="src\camera\uvc_vcam.cpp"><Filter>Camera</Filter></ClCompile>
+    <ClCompile Include="src\media\frame_source.cpp"><Filter>Media</Filter></ClCompile>
+    <ClCompile Include="src\usb\virt_dev.cpp"><Filter>USB</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\virt_dev.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="src\uvc_struct.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="src\uvc_vcam.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
+    <ClInclude Include="src\camera\uvc_vcam.h"><Filter>Camera</Filter></ClInclude>
+    <ClInclude Include="src\media\frame_source.h"><Filter>Media</Filter></ClInclude>
+    <ClInclude Include="src\protocol\uvc_struct.h"><Filter>Protocol</Filter></ClInclude>
+    <ClInclude Include="src\usb\ioctl.h"><Filter>USB</Filter></ClInclude>
+    <ClInclude Include="src\usb\virt_dev.h"><Filter>USB</Filter></ClInclude>
   </ItemGroup>
 </Project>

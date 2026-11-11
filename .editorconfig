@@ -1,0 +1,25 @@
+root = true
+
+[*]
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{cpp,h}]
+charset = utf-8
+end_of_line = crlf
+indent_style = space
+indent_size = 4
+
+[*.py]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 4
+
+[*.{md,ps1,txt}]
+charset = utf-8
+end_of_line = lf
+
+[*.{sln,vcxproj,filters}]
+charset = utf-8
+end_of_line = crlf

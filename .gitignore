@@ -1,1 +1,14 @@
-/.vs
+/.vs/
+/.deps/
+/.venv/
+/build/
+/dist/
+/x64/
+__pycache__/
+*.py[cod]
+*.vcxproj.user
+*.tlog/
+*.obj
+*.idb
+*.pdb
+*.log

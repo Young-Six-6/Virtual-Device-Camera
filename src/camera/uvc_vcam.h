@@ -1,0 +1,32 @@
+//// By Fanxiushu 2016-10-04
+/////
+#pragma once
+
+struct frame_t
+{
+	char* buffer;
+	int   length; // Writable YUY2 capacity in bytes; validate before conversion.
+	int   width;  // Fixed UVC output dimensions, independent of input dimensions.
+	int   height;
+	int   delay_msec; ///停留时间
+	////
+	void* param;  ///
+};
+
+typedef int (*FRAME_CALLBACK)(frame_t* frame);
+
+struct uvc_vcam_t
+{
+	int pid;
+	int vid;
+	const char* manu_fact;
+	const char* product; 
+	FRAME_CALLBACK  frame_callback; ///
+	void* param; 
+};
+
+//// function
+void* vcam_create(uvc_vcam_t* uvc);
+
+void vcam_destroy(void* handle);
+
