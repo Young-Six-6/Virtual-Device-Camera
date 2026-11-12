@@ -1,423 +1,232 @@
-////
-#include <WinSock2.h>
+#include <Windows.h>
 #include <InitGuid.h>
-#include <WinIoCtl.h>
-#include <stdio.h>
-#include <string.h>
-//#include "usb_info.h"
 #include <SetupAPI.h>
-#pragma comment(lib,"setupapi")
-#include <cfgmgr32.h>
+#include <WinIoCtl.h>
 #include "ioctl.h"
+#include "transport.h"
+#include "../common/pipe_io.h"
+#include <algorithm>
+#include <cstddef>
+#include <cstring>
+#include <vector>
 
-#include "virt_dev.h"
-#include <string>
-using namespace std;
+namespace {
+constexpr size_t maximum_payload = 32 * 1024 * 1024;
+constexpr size_t request_offset = offsetof(ioctl_usbtx_header_t, type);
+static_assert(request_offset == 24 && sizeof(ioctl_usbtx_header_t) == 24 + sizeof(usbtx_header_t),
+    "Legacy virtual USB driver ABI changed");
+struct Device {
+    vcam::unique_handle file, stop, semaphore, removed;
+    std::vector<unsigned char> buffer;
+    vcam::DeviceIdentity identity;
+    int address = 0;
+    bool plugged = false, remove_pending = false, active = false;
+    size_t payload_capacity = 0;
 
-struct virt_usb_t
-{
-	HANDLE hFile;
-
-	HANDLE hSemaphore;
-	HANDLE hRemoveEvent;
-	int    bus_addr;
-	BOOL   bReplug; ////
-	///////////////
-	string dev_id; 
-	string hw_ids;
-	string comp_ids;
-
-	int buf_size;
+    bool ioctl(DWORD code, void* input, DWORD input_bytes, void* output, DWORD output_bytes, DWORD& bytes) {
+        if (WaitForSingleObject(stop.get(), 0) == WAIT_OBJECT_0) return false;
+        vcam::unique_handle event(CreateEvent(NULL, TRUE, FALSE, NULL));
+        if (!event) return false;
+        OVERLAPPED operation = {};
+        operation.hEvent = event.get();
+        if (DeviceIoControl(file.get(), code, input, input_bytes, output, output_bytes, &bytes, &operation)) return true;
+        if (GetLastError() != ERROR_IO_PENDING) return false;
+        return vcam::finish_io(file.get(), operation, stop.get(), bytes);
+    }
 };
-
-static char* find_virt_usb_path(char* dev_path, size_t dev_path_size)
-{
-	HDEVINFO devList;
-	DWORD index = 0;
-	SP_DEVINFO_DATA devInfo = { sizeof(SP_DEVINFO_DATA) };
-	SP_DEVICE_INTERFACE_DATA         devInter = { sizeof(SP_DEVICE_INTERFACE_DATA) };
-
-	////
-
-	devList = SetupDiGetClassDevs(&GUID_XUSB_VIRT_INTERFACE, NULL, NULL,
-		DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-
-	if (devList == (HANDLE)-1){
-		printf("SetupDiGetClassDevs: [%s] error=%d\n", "USB", GetLastError());
-		return NULL;
-	}
-
-	while (SetupDiEnumDeviceInfo(devList, index++, &devInfo)){
-		char buf[4096];
-		PSP_DEVICE_INTERFACE_DETAIL_DATA devDetail = (PSP_DEVICE_INTERFACE_DETAIL_DATA)buf;
-		devDetail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
-		if (!SetupDiEnumDeviceInterfaces(devList, NULL, &GUID_XUSB_VIRT_INTERFACE, index - 1, &devInter)){
-			printf("SetupDiEnumDeviceInterfaces err\n");
-			continue;
-		}
-
-		if (!SetupDiGetDeviceInterfaceDetail(devList, &devInter, devDetail, sizeof(buf), NULL, NULL)){
-			printf("SetupDiGetDeviceInterfaceDetail err\n");
-			continue;
-		}
-		/////
-		if (strcpy_s(dev_path, dev_path_size, devDetail->DevicePath) != 0) {
-			dev_path[0] = '\0';
-			continue;
-		}
-
-		///////////////
-	}
-	SetupDiDestroyDeviceInfoList(devList);
-
-	if (dev_path[0] == 0) return NULL;
-
-	return dev_path;
+bool copy_id(WCHAR* output, const std::string& text, bool multi) {
+    std::fill(output, output + HW_IDS_COUNT, wchar_t(0));
+    if (text.empty()) return true;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.c_str(), -1, output, HW_IDS_COUNT-1)) return false;
+    if (multi) for (int i = 0; i < HW_IDS_COUNT; ++i) if (output[i] == L'\n') output[i] = L'\0';
+    return true;
+}
+vcam::unique_handle open_driver() {
+    HDEVINFO list = SetupDiGetClassDevsW(&GUID_XUSB_VIRT_INTERFACE, NULL, NULL,
+        DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (list == INVALID_HANDLE_VALUE) return {};
+    struct ListOwner { HDEVINFO value; ~ListOwner() { SetupDiDestroyDeviceInfoList(value); } } owner{list};
+    for (DWORD index = 0;; ++index) {
+        SP_DEVICE_INTERFACE_DATA entry{sizeof(entry)};
+        if (!SetupDiEnumDeviceInterfaces(list, NULL, &GUID_XUSB_VIRT_INTERFACE, index, &entry)) break;
+        DWORD needed = 0;
+        SetupDiGetDeviceInterfaceDetailW(list, &entry, NULL, 0, &needed, NULL);
+        if (needed < sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W)) continue;
+        std::vector<unsigned char> storage(needed);
+        auto* detail = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(storage.data());
+        detail->cbSize = sizeof(*detail);
+        if (!SetupDiGetDeviceInterfaceDetailW(list, &entry, detail, needed, NULL, NULL)) continue;
+        vcam::unique_handle file(CreateFileW(detail->DevicePath, GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL));
+        if (file) return file;
+    }
+    return {};
+}
+bool is_device_read(const usbtx_header_t& request) {
+    if (request.type == 1) return request.descriptor.is_read != 0;
+    if (request.type == 2) return request.vendor.is_read != 0;
+    if (request.type == 3) return request.transfer.is_read != 0;
+    return request.type == 5;
+}
 }
 
-void* virt_usb_open()
-{
-	char dev_path[260] = { 0 };
-	if (!find_virt_usb_path(dev_path, sizeof(dev_path))){
-		printf("*** not found virtual usb path.\n");
-		return NULL;
-	}
-
-	HANDLE hFile = CreateFile(dev_path, GENERIC_READ | GENERIC_WRITE,
-		FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-	if (hFile == INVALID_HANDLE_VALUE){
-		printf("open usb virtual device err=%d\n", GetLastError());
-		
-		return NULL;
-	}
-
-	virt_usb_t* dev = new virt_usb_t;
-	dev->hFile = hFile;
-	dev->hSemaphore = NULL;
-	dev->hRemoveEvent = NULL;
-	dev->bus_addr = 0;
-	dev->bReplug = FALSE;
-	dev->buf_size = 1024 * 64;
-
-	return dev;
+void* virt_usb_open() {
+    try {
+        auto device = std::make_unique<Device>();
+        device->file = open_driver();
+        device->stop.reset(CreateEvent(NULL, TRUE, FALSE, NULL));
+        if (!device->file || !device->stop) return nullptr;
+        device->buffer.resize(64 * 1024);
+        return device.release();
+    }
+    catch (...) { return nullptr; }
 }
-void virt_usb_close(void* handle)
-{
-	virt_usb_t* dev = (virt_usb_t*)handle;
-	if (!dev) return ;
-	////
-	if (dev->hSemaphore){
-		CloseHandle((HANDLE)dev->hSemaphore);
-		dev->hSemaphore = 0;
-	}
-
-	CloseHandle(dev->hFile);
-
-	delete dev; 
+void virt_usb_close(void* handle) {
+    if (!handle) return;
+    virt_usb_resume(handle);
+    virt_usb_unplug(handle);
+    delete static_cast<Device*>(handle);
 }
-
-int virt_usb_plugin(void* handle,const char* dev_id, const char* hw_ids, const char* comp_ids)
-{
-	virt_usb_t* dev = (virt_usb_t*)handle;
-	if (!dev) return -1;
-	////
-	int bus_addr = 0;
-	ioctl_pdo_create_t cp; memset(&cp, 0, sizeof(cp));
-
-	const wchar_t* devid;
-	devid = L"usb\\vid_05ac&pid_12a8";
-//	devid = L"usb\\vid_05ca&pid_18c6";
-//	devid = L"usb\\vid_0ac8&pid_3420"; // 0ac8, 3420
-//	devid = L"usb\\vid_0781&pid_5580"; // U store
-
-//	wcscpy(cp.hardware_ids, devid);
-//	wcscpy(cp.compatible_ids, L"USB\\COMPOSITE");
-
-	///
-	if (!hw_ids || strlen(hw_ids) == 0) {
-		return -1;
-	}
-	wchar_t t[HW_IDS_COUNT]; int i; memset(t, 0, sizeof(t));
-	MultiByteToWideChar(CP_ACP, 0, hw_ids, -1, t, 259);
-	t[258] = 0; t[259] = 0; //两个零结尾
-	for (i = 0; i < 260; ++i){
-		if (t[i] == L'\n') t[i] = L'\0';
-	}
-	memcpy(cp.hardware_ids, t, sizeof(t)); 
-
-	if (dev_id && strlen(dev_id) > 0) {
-		memset(t, 0, sizeof(t));
-		MultiByteToWideChar(CP_ACP, 0, dev_id, -1, t, 259);
-		t[259] = 0;
-		memcpy(cp.device_id, t, sizeof(t)); 
-	}
-	else{
-		memcpy( cp.device_id, t, sizeof(t));
-	}
-
-	if (comp_ids && strlen(comp_ids) > 0){
-		memset(t, 0, sizeof(t));
-		MultiByteToWideChar(CP_ACP, 0, comp_ids, -1, t, 259);
-		t[258] = 0; t[259] = 0; //两个0结尾
-		for (i = 0; i < 260; ++i){
-			if (t[i] == L'\n') t[i] = L'\0';
-		}
-		memcpy(cp.compatible_ids, t, sizeof(t));
-		//////
-	}
-	/////
-	if(dev_id)dev->dev_id = dev_id;
-	dev->hw_ids = hw_ids;
-	if(comp_ids)dev->comp_ids = comp_ids;
-	/////////
-
-	HANDLE hsem = CreateSemaphore(NULL, 0, MAXLONG, NULL);
-	cp.hSemaphore = (ULONGLONG)hsem;
-	dev->hSemaphore = hsem;
-
-	HANDLE hevt = CreateEvent(NULL, FALSE, FALSE, NULL); ///
-	cp.hRemoveEvent = (ULONGLONG)hevt;
-	dev->hRemoveEvent = hevt;
-	if (dev->bReplug) cp.BusAddress = dev->bus_addr; ///
-
-	DWORD bytes;
-	BOOL bRet = DeviceIoControl(dev->hFile, IOCTL_PDO_ADD, &cp, sizeof(cp), &bus_addr, sizeof(int), &bytes, NULL);
-	if (bRet) dev->bus_addr = bus_addr;
-
-	DWORD err = GetLastError();
-	printf("IOCTL_PDO_ADD: ret=%d,err=%d\n", bRet, err );
-
-	return bRet ? 0: -1;
+void virt_usb_interrupt(void* handle) {
+    if (auto* device = static_cast<Device*>(handle)) {
+        SetEvent(device->stop.get());
+        CancelIoEx(device->file.get(), NULL);
+    }
 }
-int virt_usb_unplug(void* handle)
-{
-	virt_usb_t* dev = (virt_usb_t*)handle;
-	if (!dev) return -1;
-	////
-	DWORD bytes;
-	BOOL bRet = DeviceIoControl(dev->hFile, IOCTL_PDO_REMOVE, NULL, 0, NULL, 0, &bytes, NULL);
-	if (bRet){
-		if (dev->hSemaphore){
-			CloseHandle((HANDLE)dev->hSemaphore);
-			dev->hSemaphore = 0;
-		}
-		if (dev->hRemoveEvent){
-			///等待3秒，直到设备被移除
-			LONG timeout = 5 * 1000; //
-			DWORD ret = ::WaitForSingleObject((HANDLE)dev->hRemoveEvent, timeout);
-			if (ret != 0){
-				printf("*** Not Wait For Device Remove.\n");
-			}
-			////
-			CloseHandle((HANDLE)dev->hRemoveEvent);
-			dev->hRemoveEvent = 0;
-		}
-	}
-
-	return bRet?0:-1;
+void virt_usb_resume(void* handle) {
+    if (auto* device = static_cast<Device*>(handle)) ResetEvent(device->stop.get());
 }
-int virt_usb_replug(void* handle)
-{
-	virt_usb_t* dev = (virt_usb_t*)handle;
-	if (!dev) return -1;
-	if (dev->hw_ids.length() < 2)return -1; //// HWID empty
-
-	printf("*** --- simuate unplug and replug \n");
-	/////
-	int r = virt_usb_unplug(handle);
-
-	dev->bReplug = TRUE;
-	r = virt_usb_plugin(handle, dev->dev_id.c_str(), dev->hw_ids.c_str(), dev->comp_ids.c_str()); 
-	dev->bReplug = FALSE;
-
-	return r; 
+size_t virt_usb_capacity(void* handle) {
+    auto* device = static_cast<Device*>(handle);
+    return device ? device->payload_capacity : 0;
+}
+int virt_usb_plugin(void* handle, const char* id, const char* hardware, const char* compatible) {
+    auto* device = static_cast<Device*>(handle);
+    if (!device || device->plugged || !hardware || !*hardware) return -1;
+    try {
+        vcam::DeviceIdentity identity{id ? id : hardware, hardware, compatible ? compatible : ""};
+        ioctl_pdo_create_t request = {};
+        if (!copy_id(request.device_id, identity.device_id, false) ||
+            !copy_id(request.hardware_ids, identity.hardware_ids, true) ||
+            !copy_id(request.compatible_ids, identity.compatible_ids, true)) return -1;
+        vcam::unique_handle semaphore(CreateSemaphore(NULL, 0, MAXLONG, NULL));
+        vcam::unique_handle removed(CreateEvent(NULL, FALSE, FALSE, NULL));
+        if (!semaphore || !removed) return -1;
+        request.hSemaphore = reinterpret_cast<ULONGLONG>(semaphore.get());
+        request.hRemoveEvent = reinterpret_cast<ULONGLONG>(removed.get());
+        request.BusAddress = device->address;
+        DWORD bytes = 0;
+        int address = 0;
+        if (!device->ioctl(IOCTL_PDO_ADD, &request, sizeof(request), &address, sizeof(address), bytes) ||
+            bytes < sizeof(address)) return -1;
+        device->identity = std::move(identity);
+        device->address = address;
+        device->remove_pending = false;
+        device->semaphore = std::move(semaphore);
+        device->removed = std::move(removed);
+        device->plugged = true;
+        return 0;
+    }
+    catch (...) { return -1; }
+}
+int virt_usb_unplug(void* handle) {
+    auto* device = static_cast<Device*>(handle);
+    if (!device) return -1;
+    if (!device->plugged) return 0;
+    DWORD bytes = 0;
+    if (!device->remove_pending) {
+        if (!device->ioctl(IOCTL_PDO_REMOVE, NULL, 0, NULL, 0, bytes)) return -1;
+        device->remove_pending = true;
+    }
+    HANDLE events[] = {device->removed.get(), device->stop.get()};
+    const DWORD result = WaitForMultipleObjects(2, events, FALSE, 5000);
+    if (result != WAIT_OBJECT_0) return -1;
+    device->plugged = false;
+    device->remove_pending = false;
+    device->active = false;
+    device->semaphore.reset();
+    device->removed.reset();
+    return 0;
+}
+int virt_usb_replug(void* handle) {
+    auto* device = static_cast<Device*>(handle);
+    if (!device || virt_usb_unplug(handle) < 0) return -1;
+    const auto identity = device->identity;
+    return virt_usb_plugin(handle, identity.device_id.c_str(), identity.hardware_ids.c_str(), identity.compatible_ids.c_str());
+}
+usbtx_header_t* virt_usb_begin(void* handle) {
+    auto* device = static_cast<Device*>(handle);
+    if (!device || !device->plugged || device->active) return nullptr;
+    HANDLE events[] = {device->stop.get(), device->semaphore.get()};
+    if (WaitForMultipleObjects(2, events, FALSE, INFINITE) != WAIT_OBJECT_0+1) return nullptr;
+    try {
+        DWORD bytes = 0;
+        bool complete = false;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            std::fill(device->buffer.begin(), device->buffer.end(), 0);
+            complete = device->ioctl(IOCTL_BEGIN_TRANS_USB_DATA, NULL, 0, device->buffer.data(),
+                static_cast<DWORD>(device->buffer.size()), bytes);
+            if (complete) break;
+            if (GetLastError() != ERROR_MORE_DATA || bytes != sizeof(ioctl_usbtx_header_t)) return nullptr;
+            const auto* header = reinterpret_cast<const ioctl_usbtx_header_t*>(device->buffer.data());
+            if (header->data_length < 0 || size_t(header->data_length) > maximum_payload) return nullptr;
+            device->buffer.resize(sizeof(*header) + size_t(header->data_length));
+        }
+        if (!complete || bytes < sizeof(ioctl_usbtx_header_t) || bytes > device->buffer.size()) return nullptr;
+        auto* raw = reinterpret_cast<ioctl_usbtx_header_t*>(device->buffer.data());
+        if (raw->data_length < 0 || size_t(raw->data_length) > maximum_payload) return nullptr;
+        const size_t declared = static_cast<size_t>(raw->data_length);
+        const size_t received = bytes - sizeof(*raw);
+        auto* request = reinterpret_cast<usbtx_header_t*>(device->buffer.data() + request_offset);
+        if (!is_device_read(*request) && declared > received) return nullptr;
+        if (request->type == 3 && request->transfer.type == 3) {
+            if (received < ISO_PACKET_HDR_SIZE) return nullptr;
+            const auto* iso = reinterpret_cast<const iso_packet_hdr*>(request->data);
+            if (iso->number_packets > (received - ISO_PACKET_HDR_SIZE) / sizeof(iso_packet)) return nullptr;
+        }
+        if (device->buffer.size() < sizeof(*raw)+declared) device->buffer.resize(sizeof(*raw)+declared);
+        request = reinterpret_cast<usbtx_header_t*>(device->buffer.data()+request_offset);
+        request->data_length = static_cast<int>(declared);
+        request->result = -1;
+        device->payload_capacity = declared;
+        device->active = true;
+        return request;
+    }
+    catch (...) { return nullptr; }
+}
+int virt_usb_end(void* handle, usbtx_header_t* request) {
+    auto* device = static_cast<Device*>(handle);
+    if (!device || !device->active || request != reinterpret_cast<usbtx_header_t*>(device->buffer.data()+request_offset)) return -1;
+    device->active = false;
+    if (request->data_length < 0 || size_t(request->data_length) > device->payload_capacity) return -1;
+    auto* raw = reinterpret_cast<ioctl_usbtx_header_t*>(device->buffer.data());
+    raw->result = request->result;
+    raw->data_length = request->data_length;
+    DWORD bytes = 0;
+    return device->ioctl(IOCTL_END_TRANS_USB_DATA, raw, static_cast<DWORD>(sizeof(*raw)+raw->data_length),
+        NULL, 0, bytes) ? 0 : -1;
 }
 
-static DWORD CALLBACK replug_thread(void* _p)
-{
-	printf("*** --- simuate unplug and replug \n");
-	virt_usb_t* dev = (virt_usb_t*)_p;
-//	Sleep(140);
-//	virt_usb_replug(dev);
-	virt_usb_unplug(dev);
-//	Sleep(150);
-	dev->bReplug = 1;
-	virt_usb_plugin(dev, dev->dev_id.c_str(), dev->hw_ids.c_str(), dev->comp_ids.c_str());
-	dev->bReplug = 0;
-	return 0;
+namespace vcam {
+class VirtualTransport final : public UsbTransport {
+    void* device_;
+public:
+    explicit VirtualTransport(void* device) : device_(device) {}
+    ~VirtualTransport() override { virt_usb_close(device_); }
+    bool plug(const DeviceIdentity& id) override { return virt_usb_plugin(device_, id.device_id.c_str(), id.hardware_ids.c_str(), id.compatible_ids.c_str()) == 0; }
+    bool unplug() override { return virt_usb_unplug(device_) == 0; }
+    bool replug() override { return virt_usb_replug(device_) == 0; }
+    usbtx_header_t* begin() override { return virt_usb_begin(device_); }
+    bool end(usbtx_header_t* value) override { return virt_usb_end(device_, value) == 0; }
+    size_t capacity() const override { return virt_usb_capacity(device_); }
+    void interrupt() noexcept override { virt_usb_interrupt(device_); }
+    void resume() noexcept override { virt_usb_resume(device_); }
+};
+std::unique_ptr<UsbTransport> make_virtual_transport() {
+    std::unique_ptr<void, decltype(&virt_usb_close)> device(virt_usb_open(), virt_usb_close);
+    if (!device) return nullptr;
+    auto transport = std::make_unique<VirtualTransport>(device.get());
+    device.release();
+    return transport;
 }
-usbtx_header_t* virt_usb_begin(void* handle )
-{
-	virt_usb_t* dev = (virt_usb_t*)handle;
-	if (!dev) return NULL;
-	//////
-	if( WaitForSingleObject(dev->hSemaphore, 10*1000 ) == WAIT_TIMEOUT ) 
-		return NULL; /////
-	///////
-	int buf_size = dev->buf_size;
-
-	ioctl_usbtx_header_t* hdr = (ioctl_usbtx_header_t*)malloc(buf_size);
-
-	DWORD bytes=0;
-	memset(hdr, 0, sizeof(ioctl_usbtx_header_t)); 
-	BOOL bRet = DeviceIoControl(dev->hFile, IOCTL_BEGIN_TRANS_USB_DATA, NULL, 0, hdr,buf_size, &bytes, NULL);
-	if (!bRet){
-		if (GetLastError() == ERROR_MORE_DATA  ){ // -> STATUS_BUFFER_OVERFLOW
-			printf("buffer too small.\n");
-			if (bytes != sizeof(ioctl_usbtx_header_t) ){ free(hdr); printf("bufferoverflow: ret not valid.\n"); return NULL; }
-			buf_size = hdr->data_length + sizeof(ioctl_usbtx_header_t) + 4096; ///
-			
-			dev->buf_size = buf_size; 
-
-			free(hdr);
-			hdr = (ioctl_usbtx_header_t*)malloc(buf_size);
-
-			bytes = 0;
-			bRet = DeviceIoControl(dev->hFile, IOCTL_BEGIN_TRANS_USB_DATA, NULL, 0, hdr, buf_size, &bytes, NULL);
-			////
-		}
-	}
-	if (!bRet){
-		printf("IOCTL begin: err=%d\n", GetLastError() );
-		free(hdr);
-		return NULL;
-	}
-	////
-	if (hdr->data_length + sizeof(ioctl_usbtx_header_t) > buf_size){ //
-		printf("---- buffer not larger.\n");
-		buf_size = hdr->data_length + sizeof(ioctl_usbtx_header_t) + 4096; ///
-
-		hdr = (ioctl_usbtx_header_t*)realloc(hdr, buf_size);
-
-		dev->buf_size = buf_size; 
-	}
-	//////
-	usbtx_header_t* ret = (usbtx_header_t*)( (char*)hdr + 24 );
-	ret->data_length = hdr->data_length; 
-	ret->result = (int)bytes - sizeof(ioctl_usbtx_header_t);
-
-	///
-	if (ret->type == 4 && ret->reset.type == 2 ){ //模拟设备replug
-		///
-		ret->result = 0; ///success,
-		ret->data_length = 0; 
-
-		virt_usb_end(handle, ret); /////
-		
-		////
-		DWORD tid;
-		CloseHandle(CreateThread(NULL, 0, replug_thread, dev, 0, &tid));
-		/////
-		return NULL; 
-	}
-	/////
-
-	return  ret;
-	/////
 }
-
-
-int virt_usb_end(void* handle, usbtx_header_t* header )
-{
-	virt_usb_t* dev = (virt_usb_t*)handle;
-	if (!dev) return -1;
-	//////
-	ioctl_usbtx_header_t* hdr = (ioctl_usbtx_header_t*)((char*)header - 24); 
-
-	if (hdr->data_length > header->data_length && hdr->type==3 && !hdr->transfer.is_read) {//
-		printf("type=3, subtype=%d, is_read=%d, len=%d, actual_len=%d\n", hdr->transfer.type,hdr->transfer.is_read, hdr->data_length,header->data_length);
-	}
-	hdr->result = header->result;
-	hdr->data_length = header->data_length;
-
-	/////
-	DWORD bytes;
-	BOOL bRet = DeviceIoControl(dev->hFile, IOCTL_END_TRANS_USB_DATA, hdr, sizeof(ioctl_usbtx_header_t) + hdr->data_length, NULL, 0, &bytes, NULL);
-//	printf("virt_usb_end: bRet=%d, err=%d\n", bRet, GetLastError());
-
-	free(hdr);
-
-	return 0;
-}
-
-
-#if 0
-
-#include "usb_dev.h"
-
-void cbk(void* header, void* data, int ret, void* param)
-{
-	usbtx_header_t* hdr = (usbtx_header_t*)header;
-	if (ret >= 0){
-		hdr->result = 0;
-		hdr->data_length = ret;
-	}
-	else{
-		hdr->result = -1;
-	}
-	
-//	printf("**TRANS** <--end IOCTL: type=%d, trans_type2=%d, Ret=%d\n\n", hdr->type, hdr->descriptor.type, ret );
-
-	virt_usb_end(param, hdr); 
-	/////
-}
-
-void test()
-{
-	list<usb_info_t> usb_infos;
-	enum_usb_devices(&usb_infos);
-	const char* dev_id;
-	void* usb = 0;
-
-	dev_id = "usb\\vid_05ac&pid_12a8";
-//	dev_id = "usb\\vid_05ca&pid_18c6";
-//	dev_id = "usb\\vid_0ac8&pid_3420";
-//	dev_id = "usb\\vid_0781&pid_5580"; // U 盘
-	for (list<usb_info_t>::iterator it = usb_infos.begin(); it != usb_infos.end(); ++it){
-		if (strnicmp(it->dev_id, dev_id, strlen(dev_id)) == 0){
-			printf("**** [%s] [%s] [%s] \n", it->hw_id, it->dev_id, it->dev_desc);
-
-			usb = xusb_open(&(*it));
-			//	break;
-		}
-	}
-//	xusb_close(usb); exit(0);
-	////
-	void* h = virt_usb_open();
-	virt_usb_add(h);
-
-	while (1){
-		///
-		usbtx_header_t* hdr = virt_usb_begin(h );
-		if (!hdr)continue;
-		////
-	//	printf("-->begin IOCTL: type=%d, type2=%d, dataLen=%d ", hdr->type, hdr->descriptor.type, hdr->data_length );
-	//	if (hdr->type == 3) printf(", bRead=%d, ep_address=0x%X\n", hdr->transfer.is_read, hdr->transfer.ep_address); else printf("\n");
-
-		int r;
-	
-		///
-		r = xusb_ioctl(usb, hdr, hdr->data, hdr->data_length, cbk, h );
-
-//		printf("<--end IOCTL: type=%d, type2=%d, Ret=%d\n\n", hdr->type,hdr->descriptor.type, r );
-		/////
-
-	}
-	//////
-//	xusb_close(usb);
-}
-
-int main(int argc, char** argv)
-{
-
-//	void* h = virt_usb_open();
-//	virt_usb_add(h);
-	int sz = sizeof(usbtx_header_t);
-
-	test();
-	return 0;
-}
-
-#endif
-
-

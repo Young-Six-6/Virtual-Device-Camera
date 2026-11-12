@@ -7,6 +7,7 @@
 - 传入一个或两个 MP4 路径，分别创建一个或两个摄像头实例。
 - 不传 MP4 时，通过 `\\.\pipe\vcam_pipe` 接收 RGB24 帧。
 - 将输入缩放到配置的摄像头分辨率，并转换成 UVC 使用的 YUY2 格式。
+- 通过独立命名管道查询状态，并在进程运行期间热更新输出分辨率。
 - 提供 OBS 本地管道、Hyper-V/TCP 转发、纯色帧发送和管道预览脚本。
 - 同时支持 Visual Studio `Debug | x64` 和 `Release | x64` 构建。
 
@@ -37,18 +38,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -FFmpegS
 
 应用程序构建成功不等于系统摄像头已经可用。程序通过 SetupAPI 查找虚拟 USB 总线接口；若接口不存在，会报告 `not found virtual usb path`。仓库保留了上游提供的 x86/x64 驱动文件；INF 会把同一个 `xusb_virt.sys` 安装为不同目标名称。驱动来源线索、文件清单和当前限制记录在[驱动文档](docs/driver.md)。此工作区没有安装或验证该内核驱动，因此摄像头设备的端到端运行尚未确认。
 
-`config/default_res.txt` 只接受 `480`、`720`、`1080`，分别表示 640×480、1280×720、1920×1080。它会复制到可执行文件目录；运行中的程序读取可执行文件旁的副本。
+`config/default_res.txt` 支持 `480`、`720`、`1080` 三种预设。也可在启动时使用 `--resolution WIDTHxHEIGHT`，或通过控制管道在运行中修改输出分辨率。分辨率变更会重建 UVC 描述符并重新枚举设备，摄像头客户端需要重新打开设备。详见[控制管道协议](docs/control-protocol.md)。
+
+```powershell
+.\.venv\Scripts\python.exe .\tools\python\CameraControl.py status --camera 1
+.\.venv\Scripts\python.exe .\tools\python\CameraControl.py resolution --camera 1 --resolution 1280x720
+```
 
 OBS 工具从 `OBS_WEBSOCKET_PASSWORD` 环境变量读取密码。旧版上游代码曾把密码直接写进源文件；若曾使用过该值，请在 OBS 中轮换凭据。TCP 转发接收端默认监听所有网卡的 5008 端口，只应在可信网络和受限防火墙规则下使用。
 
 ## 项目目录
 
 ```text
-src/app/                   应用入口和摄像头生命周期
-src/camera/                UVC 摄像头描述符和 USB 传输处理
+src/app/                   应用入口和控制服务
+src/camera/                UVC 描述符和摄像头会话生命周期
 src/media/                 MP4/管道帧源、缩放、像素格式转换
 src/protocol/              UVC/USB 协议结构
-src/usb/                   SetupAPI 和虚拟总线 IOCTL 接口
+src/usb/                   SetupAPI 和虚拟总线 IOCTL 传输
 config/                    摄像头分辨率配置
 drivers/usb-bus-legacy/    原仓库附带的旧版 x86/x64 驱动包
 tools/python/              OBS、TCP、管道测试工具

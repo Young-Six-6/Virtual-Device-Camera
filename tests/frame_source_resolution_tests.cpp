@@ -14,6 +14,7 @@
 #include "../src/media/frame_source.h"
 
 namespace {
+const std::string test_pipe = "\\\\.\\pipe\\vcam_resolution_test_" + std::to_string(GetCurrentProcessId());
 struct Resolution { int width; int height; };
 const Resolution resolutions[] = { {640, 480}, {1280, 720}, {1920, 1080} };
 using Source = std::unique_ptr<frame_source, decltype(&frame_source_destroy)>;
@@ -87,6 +88,7 @@ class PipeSender {
 
 public:
     std::atomic<bool> sent{false};
+    std::atomic<bool> rejected{false};
     PipeSender(Resolution size, bool send_frame)
     {
         require(done_ != NULL, "CreateEvent failed");
@@ -95,7 +97,7 @@ public:
             for (int attempt = 0; attempt < 100; ++attempt)
             {
                 if (WaitForSingleObject(done_, 0) == WAIT_OBJECT_0) return;
-                pipe = CreateFileA("\\\\.\\pipe\\vcam_pipe", GENERIC_WRITE, 0, NULL,
+                pipe = CreateFileA(test_pipe.c_str(), GENERIC_WRITE, 0, NULL,
                     OPEN_EXISTING, 0, NULL);
                 if (pipe != INVALID_HANDLE_VALUE) break;
                 Sleep(10);
@@ -110,6 +112,14 @@ public:
                 ok = write_all(pipe, rgb.data(), rgb.size(), 65521);
             }
             sent.store(ok);
+            if (!send_frame && ok) {
+                unsigned char probe = 0;
+                for (int attempt = 0; attempt < 100; ++attempt) {
+                    DWORD bytes = 0;
+                    if (!WriteFile(pipe, &probe, 1, &bytes, NULL)) { rejected.store(true); break; }
+                    Sleep(10);
+                }
+            }
             WaitForSingleObject(done_, 5000);
             CloseHandle(pipe);
         });
@@ -149,8 +159,8 @@ void check_output_change(frame_source* source, Resolution original)
     const Resolution changed = original.width == 640 ? resolutions[1] : resolutions[0];
     Output output(changed, source);
     const ULONGLONG started = GetTickCount64();
-    require(frame_source_callback(&output.frame) < 0 && output.untouched(),
-        "Unexpected UVC output change was not rejected before writes");
+    require(frame_source_callback(&output.frame) == 0 && output.guards_intact() && output.is_color(144,54,34),
+        "Hot output change did not resize safely");
     require(GetTickCount64() - started < 1000, "Output change attempted to read another input frame");
 }
 
@@ -174,7 +184,7 @@ void check_file(const std::string& fixture, Resolution target)
 
 void check_pipe(Resolution input, Resolution target, bool valid_header)
 {
-    Source source(frame_source_create_pipe(), frame_source_destroy);
+    Source source(frame_source_create_pipe(test_pipe.c_str()), frame_source_destroy);
     require(source != nullptr && frame_source_start_pipe_listener(source.get()),
         "Unable to start test pipe server (stop other vcam_pipe users)");
     Output output(target, source.get());
@@ -186,9 +196,9 @@ void check_pipe(Resolution input, Resolution target, bool valid_header)
         output.reset();
         const int result = frame_source_callback(&output.frame);
         require(output.guards_intact(), "Pipe output wrote outside its YUY2 buffer");
-        if (!valid_header && result < 0)
+        if (!valid_header && sender.rejected.load())
         {
-            require(output.untouched(), "Invalid pipe header wrote output pixels");
+            require(result == 0 && output.is_color(16,128,128), "Invalid pipe header did not leave a valid black frame");
             completed = true;
             break;
         }
@@ -221,6 +231,30 @@ void check_dynamic_file(const std::string& fixture, Resolution target)
             "Dynamic-size source produced stale, incomplete, or incorrect pixels");
     }
 }
+
+void check_pipe_shutdown() {
+    DWORD before = 0, after = 0;
+    GetProcessHandleCount(GetCurrentProcess(), &before);
+    for (int pass = 0; pass < 30; ++pass) {
+        Source source(frame_source_create_pipe(test_pipe.c_str()), frame_source_destroy);
+        require(source && frame_source_start_pipe_listener(source.get()), "Shutdown-test pipe start failed");
+        HANDLE client = INVALID_HANDLE_VALUE;
+        if (pass % 3 != 0) {
+            client = CreateFileA(test_pipe.c_str(), GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+            require(client != INVALID_HANDLE_VALUE, "Shutdown-test client connection failed");
+            const int32_t header[] = {1920,1080};
+            DWORD written = 0;
+            require(WriteFile(client, header, pass % 3 == 1 ? 1 : sizeof(header), &written, NULL) != FALSE, "Partial header write failed");
+            if (pass % 3 == 2) require(WriteFile(client, "rgb", 3, &written, NULL) != FALSE, "Partial frame write failed");
+        }
+        const auto started = GetTickCount64();
+        source.reset();
+        require(GetTickCount64()-started < 1000, "Pending pipe I/O blocked shutdown");
+        if (client != INVALID_HANDLE_VALUE) CloseHandle(client);
+    }
+    GetProcessHandleCount(GetCurrentProcess(), &after);
+    require(after <= before+2, "Pipe reader leaked Windows handles");
+}
 }
 
 int main(int argc, char** argv)
@@ -245,6 +279,7 @@ int main(int argc, char** argv)
         check_pipe({641, 481}, resolutions[1], true);
         check_pipe({0, 480}, resolutions[0], false);
         check_pipe({INT_MAX, INT_MAX}, resolutions[0], false);
+        check_pipe_shutdown();
         printf("PASS: 9 MP4 + 9 pipe combinations, odd-size pipe, dynamic-size video, looping, and buffer/header guards.\n");
         return 0;
     }

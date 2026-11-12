@@ -6,18 +6,32 @@
     <Filter Include="USB"><UniqueIdentifier>{F6327CA4-4D7C-4128-8A5E-042560390A03}</UniqueIdentifier></Filter>
     <Filter Include="Protocol"><UniqueIdentifier>{F6327CA4-4D7C-4128-8A5E-042560390A04}</UniqueIdentifier></Filter>
     <Filter Include="Media"><UniqueIdentifier>{F6327CA4-4D7C-4128-8A5E-042560390A05}</UniqueIdentifier></Filter>
+    <Filter Include="Common"><UniqueIdentifier>{F6327CA4-4D7C-4128-8A5E-042560390A06}</UniqueIdentifier></Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\app\main.cpp"><Filter>Application</Filter></ClCompile>
+    <ClCompile Include="src\app\control_server.cpp"><Filter>Application</Filter></ClCompile>
     <ClCompile Include="src\camera\uvc_vcam.cpp"><Filter>Camera</Filter></ClCompile>
+    <ClCompile Include="src\camera\uvc_device.cpp"><Filter>Camera</Filter></ClCompile>
+    <ClCompile Include="src\camera\camera_session.cpp"><Filter>Camera</Filter></ClCompile>
     <ClCompile Include="src\media\frame_source.cpp"><Filter>Media</Filter></ClCompile>
+    <ClCompile Include="src\media\pipe_reader.cpp"><Filter>Media</Filter></ClCompile>
     <ClCompile Include="src\usb\virt_dev.cpp"><Filter>USB</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\camera\uvc_vcam.h"><Filter>Camera</Filter></ClInclude>
+    <ClInclude Include="src\camera\uvc_device.h"><Filter>Camera</Filter></ClInclude>
+    <ClInclude Include="src\camera\camera_session.h"><Filter>Camera</Filter></ClInclude>
+    <ClInclude Include="src\app\control_server.h"><Filter>Application</Filter></ClInclude>
+    <ClInclude Include="src\common\win_handle.h"><Filter>Common</Filter></ClInclude>
+    <ClInclude Include="src\common\resolution.h"><Filter>Common</Filter></ClInclude>
+    <ClInclude Include="src\common\pipe_io.h"><Filter>Common</Filter></ClInclude>
+    <ClInclude Include="src\common\pipe_security.h"><Filter>Common</Filter></ClInclude>
     <ClInclude Include="src\media\frame_source.h"><Filter>Media</Filter></ClInclude>
+    <ClInclude Include="src\media\pipe_reader.h"><Filter>Media</Filter></ClInclude>
     <ClInclude Include="src\protocol\uvc_struct.h"><Filter>Protocol</Filter></ClInclude>
     <ClInclude Include="src\usb\ioctl.h"><Filter>USB</Filter></ClInclude>
     <ClInclude Include="src\usb\virt_dev.h"><Filter>USB</Filter></ClInclude>
+    <ClInclude Include="src\usb\transport.h"><Filter>USB</Filter></ClInclude>
   </ItemGroup>
 </Project>

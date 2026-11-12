@@ -47,6 +47,7 @@
   <ItemDefinitionGroup>
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
+      <LanguageStandard>stdcpp17</LanguageStandard>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <!-- Zero-length protocol tails are required to preserve the legacy driver ABI. -->
@@ -56,7 +57,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <AdditionalLibraryDirectories>$(FFmpegRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avformat.lib;avcodec.lib;swscale.lib;avutil.lib;setupapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>avformat.lib;avcodec.lib;swscale.lib;avutil.lib;setupapi.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
@@ -96,16 +97,29 @@
 
   <ItemGroup>
     <ClCompile Include="src\app\main.cpp" />
+    <ClCompile Include="src\app\control_server.cpp" />
     <ClCompile Include="src\camera\uvc_vcam.cpp" />
+    <ClCompile Include="src\camera\uvc_device.cpp" />
+    <ClCompile Include="src\camera\camera_session.cpp" />
     <ClCompile Include="src\media\frame_source.cpp" />
+    <ClCompile Include="src\media\pipe_reader.cpp" />
     <ClCompile Include="src\usb\virt_dev.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\camera\uvc_vcam.h" />
+    <ClInclude Include="src\camera\camera_session.h" />
+    <ClInclude Include="src\camera\uvc_device.h" />
+    <ClInclude Include="src\app\control_server.h" />
+    <ClInclude Include="src\common\win_handle.h" />
+    <ClInclude Include="src\common\resolution.h" />
+    <ClInclude Include="src\common\pipe_io.h" />
+    <ClInclude Include="src\common\pipe_security.h" />
     <ClInclude Include="src\media\frame_source.h" />
+    <ClInclude Include="src\media\pipe_reader.h" />
     <ClInclude Include="src\protocol\uvc_struct.h" />
     <ClInclude Include="src\usb\ioctl.h" />
     <ClInclude Include="src\usb\virt_dev.h" />
+    <ClInclude Include="src\usb\transport.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="config\default_res.txt" />

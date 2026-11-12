@@ -1,6 +1,6 @@
 # 构建与环境准备
 
-本文描述如何从干净检出准备依赖并生成可运行的应用程序目录。构建只处理用户态程序，不安装内核驱动。
+本文描述如何从干净检出准备依赖并生成可运行的应用程序目录。C++ 项目使用 C++17；构建只处理用户态程序，不安装内核驱动。
 
 ## 必需环境
 
@@ -34,7 +34,7 @@ FFmpeg 需要同时包含头文件、导入库和 DLL。可以从 [FFmpeg-Builds
 .\scripts\build.ps1 -Configuration Release -FFmpegRoot 'D:\SDKs\ffmpeg'
 ```
 
-解决方案也可直接在 Visual Studio 中打开 `xusb_vcam.sln`，选择 `Debug | x64` 或 `Release | x64`。项目按 Visual Studio 版本选择 v143/v145 工具集。
+解决方案也可直接在 Visual Studio 中打开 `xusb_vcam.sln`，选择 `Debug | x64` 或 `Release | x64`。项目按 Visual Studio 版本选择 v143/v145 工具集。验证过的 FFmpeg SDK 版本及下载散列记录在本地准备目录 `.deps/ffmpeg-source.json`；此下载清单不随仓库提交，使用其他来源时请记录其版本和散列。
 
 ## 输出与运行时依赖
 
@@ -64,3 +64,13 @@ Debug 使用静态 Debug CRT，Release 使用静态 Release CRT。Release 不依
 ### 在另一台电脑运行时找不到 DLL
 
 请复制整个配置输出目录，而不是只复制 EXE。每个配置目录已包含需要的 FFmpeg DLL；不要从 Debug 目录复制 DLL 到 Release。
+
+## 自动化验证
+
+准备 Python 虚拟环境和 FFmpeg SDK 后运行完整 Debug/Release 验证：
+
+```powershell
+.\scripts\test-all.ps1
+```
+
+也可用 `-Configurations Debug` 或 `-Configurations Release` 单独执行。脚本构建应用、运行媒体分辨率回归、USB/UVC 协议及生命周期测试，并运行 Python 单元和 Python 到 C++ 控制管道联调。`test-resolution.ps1` 还需 FFmpeg SDK 中有 `ffmpeg.exe` 和 `libx264` 编码器。

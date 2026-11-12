@@ -14,7 +14,9 @@ if (!(Test-Path -LiteralPath $ffmpeg)) { throw 'The FFmpeg SDK must include bin/
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 $vsPath = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if (!$vsPath) { throw 'Visual Studio C++ toolchain not found.' }
-& (Join-Path $vsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation -NoLogo
+if (!$env:VSCMD_VER -or $env:VSCMD_ARG_TGT_ARCH -notmatch '^(amd64|x64)$') {
+    & (Join-Path $vsPath 'Common7\Tools\Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation -NoLogo
+}
 
 $output = Join-Path $repoRoot "build\tests\resolution\$Configuration"
 New-Item -ItemType Directory -Path $output -Force | Out-Null
@@ -22,11 +24,12 @@ $testExe = Join-Path $output 'resolution-tests.exe'
 $compilerArgs = @('/nologo', '/std:c++17', '/EHsc', '/W4', '/utf-8', '/external:W0',
     ("/external:I$FFmpegRoot\include"), ("/Fo$output\"), ("/Fe$testExe"),
     (Join-Path $repoRoot 'tests\frame_source_resolution_tests.cpp'),
-    (Join-Path $repoRoot 'src\media\frame_source.cpp'))
+    (Join-Path $repoRoot 'src\media\frame_source.cpp'),
+    (Join-Path $repoRoot 'src\media\pipe_reader.cpp'))
 if ($Configuration -eq 'Debug') { $compilerArgs += @('/MTd', '/Od', '/Zi', ("/Fd$output\resolution-tests.pdb")) }
 else { $compilerArgs += @('/MT', '/O2') }
 $compilerArgs += @('/link', ("/LIBPATH:$FFmpegRoot\lib"),
-    'avformat.lib', 'avcodec.lib', 'swscale.lib', 'avutil.lib', 'gdi32.lib')
+    'avformat.lib', 'avcodec.lib', 'swscale.lib', 'avutil.lib', 'gdi32.lib', 'advapi32.lib')
 & cl.exe @compilerArgs
 if ($LASTEXITCODE -ne 0) { throw "Resolution test build failed: $LASTEXITCODE" }
 

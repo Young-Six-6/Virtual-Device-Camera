@@ -1,42 +1,50 @@
 # Python 工具
 
-所有工具面向 Windows x64 和 Python 3.11。依赖版本固定在 `tools/python/requirements.txt`；使用项目虚拟环境运行：
+工具面向 Windows x64 和 Python 3.11。依赖版本见 `tools/python/requirements.txt`；推荐使用仓库虚拟环境：
 
 ```powershell
 .\.venv\Scripts\python.exe .\tools\python\ColorTest.py
+.\.venv\Scripts\python.exe .\tools\python\CameraControl.py --help
 ```
 
-| 文件 | 用途 | 运行位置 |
-|---|---|---|
-| `ColorTest.py` | 以 10 FPS 发送纯绿色 RGB24 帧 | 与 C++ 程序同一 Windows 主机 |
-| `ObsLocalPine.py` | 截取 OBS 场景并通过本机命名管道发送 | 与 C++ 程序同一 Windows 主机 |
-| `ReceiveTest.py` | 创建命名管道、接收 RGB24 帧并用 OpenCV 预览 | 同一 Windows 主机；不启动 C++ 程序 |
-| `WebVideoSend.py` | 从 OBS 截图并经 TCP 发送 RGB24 帧 | 宿主机 |
-| `WebVideoReceive.py` | 监听 TCP 并把帧转发到本机命名管道 | Hyper-V 虚拟机 |
+| 入口 | 用途 |
+|---|---|
+| `ColorTest.py` | 发送纯绿色 RGB24 帧 |
+| `ObsLocalPine.py` | 从 OBS 截图并通过本机 RGB 管道发送 |
+| `ReceiveTest.py` | 接收 RGB 管道并显示预览 |
+| `WebVideoSend.py` | 从 OBS 或纯色源取图，经 TCP 发送 |
+| `WebVideoReceive.py` | 接收 TCP 帧并转发到本机 RGB 管道 |
+| `CameraControl.py` | 查询状态或发送分辨率热更新命令 |
 
-## OBS 配置
+各入口的 `--help` 列出可用参数。配置采用以下优先级：命令行参数覆盖 `VCAM_*` 环境变量，环境变量覆盖 `config/tools.toml`，最后使用内置默认值。配置文件按脚本所在位置向上查找仓库目录，也可用 `VCAM_CONFIG` 指定其他 TOML 文件。`OBS_WEBSOCKET_PASSWORD` 只从环境变量读取，不写入 TOML。
 
-OBS WebSocket 服务默认使用 `localhost:4458`，场景名为 `test1`。在 OBS 中启用 WebSocket 服务并按需修改脚本顶部的 `OBS_HOST`、`OBS_PORT`、`SCENE_NAME` 和帧率。若 OBS 设置了密码，在 PowerShell 中设置环境变量：
+例如，在应用运行时将摄像头 1 切换为 720p：
 
 ```powershell
-$env:OBS_WEBSOCKET_PASSWORD = '填入 OBS WebSocket 密码'
+.\.venv\Scripts\python.exe .\tools\python\CameraControl.py resolution --camera 1 --resolution 720
+.\.venv\Scripts\python.exe .\tools\python\CameraControl.py resolution --camera 1 --resolution 1024x768
+.\.venv\Scripts\python.exe .\tools\python\CameraControl.py status --camera 1
+```
+
+控制命令和重枚举行为见[控制管道协议](control-protocol.md)。
+
+## OBS 和本机管道
+
+OBS WebSocket 默认地址为 `localhost:4458`，场景名为 `test1`。启用 OBS WebSocket 服务并在需要时提供密码：
+
+```powershell
+$env:OBS_WEBSOCKET_PASSWORD = 'OBS WebSocket 密码'
 .\.venv\Scripts\python.exe .\tools\python\ObsLocalPine.py
 ```
 
-环境变量只对当前 PowerShell 进程及其子进程生效。脚本不再把密码写入源文件。
+`ObsLocalPine.py` 默认从 OBS 场景获取画布尺寸。显式指定 `--width` 和 `--height` 可关闭自动尺寸；也可使用 `--auto-size` 恢复自动尺寸。`ColorTest.py` 默认发送绿色画面，`ObsLocalPine.py` 默认使用红色纯色源作为 OBS 不可用时的配置选项。发送端与摄像头输出尺寸可不同，应用会缩放。
 
-`ObsLocalPine.py` 从 OBS 返回的场景尺寸获取输入分辨率，失败时使用 1920×1080。`WebVideoSend.py` 默认发送 1280×720；要改分辨率、场景或纯色测试模式，编辑脚本顶部常量。
+## Hyper-V/TCP
 
-## Hyper-V TCP 转发
+1. 在虚拟机内运行 `WebVideoReceive.py`，允许宿主机通过防火墙访问 TCP 5008。
+2. 在宿主机运行 `WebVideoSend.py`。默认查询 Hyper-V 虚拟机 `camera` 的 IPv4；若自动发现不可用，可传 `--no-hyper-v --tcp-host <虚拟机IP>`。
+3. 发送端默认从 OBS 截图，也可用 `--solid-color` 发送纯色测试帧。
 
-1. 在虚拟机内启动 `WebVideoReceive.py`，确认 TCP 5008 入站流量允许来自宿主机。
-2. 在宿主机启动 `WebVideoSend.py`。默认 `IfHyper = True`，会用 Hyper-V 查询虚拟机 `camera` 的 IPv4；必要时修改 `VM_NAME` 或 `MANUAL_IP`。
-3. 默认由 OBS 提供图像。设置 `TEST_SOLID_COLOR = True` 可发送纯绿色测试画面。
+Hyper-V 地址发现默认尝试读取本机 Hyper-V 信息，不会自动弹出管理员授权。需要提升权限时可显式传 `--elevate`。TCP 接收默认绑定所有网卡且没有认证/加密；只应在可信私有网络使用，并限制防火墙规则。
 
-`IfHyper = True` 时，脚本请求管理员权限以查询 Hyper-V 网络适配器地址。TCP 接收端没有认证和加密，务必使用私有网络并设置范围受限的防火墙规则。
-
-## 帧协议和运行边界
-
-本机命名管道与 TCP 都使用同一协议：一次 `<ii` little-endian 头部（宽、高），随后是不带逐帧头的 RGB24 数据。TCP 是字节流，接收端会循环读取，直到取满一个头或一帧。断开后需重新启动接收端和 C++ 管道服务程序建立新会话。
-
-`ReceiveTest.py` 通过 OpenCV 显示窗口预览，按 Esc 可关闭窗口。一个时刻只能有一个服务进程创建并占用 `\\.\pipe\vcam_pipe`。
+本机管道格式为一次 `<ii` little-endian 宽高头，之后是固定尺寸 RGB24 帧。TCP 是字节流，接收端会循环读取以处理分片。客户端断开后，C++ 输入服务保留并重新打开命名管道；发送脚本也会在限定时间内重试。

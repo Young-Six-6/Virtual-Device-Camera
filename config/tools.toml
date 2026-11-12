@@ -1,0 +1,35 @@
+[common]
+pipe = '\\.\pipe\vcam_pipe'
+control_pipe = '\\.\pipe\vcam_control'
+width = 1920
+height = 1080
+fps = 10.0
+timeout = 10.0
+frames = 0
+solid_color = false
+color = '0,255,0'
+
+[obs]
+obs_host = 'localhost'
+obs_port = 4458
+scene = 'test1'
+auto_size = false
+capture_retries = 5
+
+[network]
+tcp_host = '192.168.100.2'
+bind = '0.0.0.0'
+tcp_port = 5008
+vm = 'camera'
+hyper_v = true
+
+[tools.local]
+auto_size = true
+color = '255,0,0'
+
+[tools.send]
+width = 1280
+height = 720
+
+[tools.color]
+solid_color = true
