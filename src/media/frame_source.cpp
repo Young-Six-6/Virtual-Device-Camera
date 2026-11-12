@@ -155,8 +155,17 @@ frame_source* frame_source_create_pipe(const char* pipe_path) {
     }
     catch (...) { return nullptr; }
 }
-bool frame_source_start_pipe_listener(frame_source* source) {
-    return source && source->pipe_mode && source->receiver.start(source->pipe_path);
+bool frame_source_start_pipe_listener(frame_source* source, vcam::PipeAccess access) {
+    return source && source->pipe_mode && source->receiver.start(source->pipe_path, access);
+}
+bool frame_source_reconfigure_pipe(frame_source* source, const char* path, vcam::PipeAccess access) {
+    if (!source || !source->pipe_mode || !path || !*path) return false;
+    if (!source->receiver.reconfigure(path, access)) return false;
+    source->pipe_path = path;
+    return true;
+}
+vcam::PipeReaderStatus frame_source_pipe_status(frame_source* source) {
+    return source && source->pipe_mode ? source->receiver.status() : vcam::PipeReaderStatus{};
 }
 void frame_source_destroy(frame_source* source) { delete source; }
 void frame_source_interrupt(void* pointer) {

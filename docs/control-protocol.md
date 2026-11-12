@@ -34,4 +34,4 @@ ERR resize-and-rollback-failed
 .\.venv\Scripts\python.exe .\tools\python\CameraControl.py resolution --camera 1 --resolution 1280x720
 ```
 
-控制管道拒绝远程命名管道客户端，并将访问权限限制为创建进程的对象所有者和 SYSTEM。协议没有额外的应用层身份验证。分辨率修改只作用于当前进程，不会写回配置文件。
+控制管道拒绝远程命名管道客户端。默认 ACL 允许 Everyone、对象所有者和 SYSTEM；Web UI 可切换为对象所有者或本机 BUILTIN Users 组。协议没有额外的应用层身份验证。通过控制管道修改分辨率只作用于当前进程；Web UI 修改的设置会写回 `camera.ini`。

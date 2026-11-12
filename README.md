@@ -8,6 +8,7 @@
 - 不传 MP4 时，通过 `\\.\pipe\vcam_pipe` 接收 RGB24 帧。
 - 将输入缩放到配置的摄像头分辨率，并转换成 UVC 使用的 YUY2 格式。
 - 通过独立命名管道查询状态，并在进程运行期间热更新输出分辨率。
+- 提供本机 Web UI 查看驱动/管道状态、预览画面和持久化运行配置。
 - 提供 OBS 本地管道、Hyper-V/TCP 转发、纯色帧发送和管道预览脚本。
 - 同时支持 Visual Studio `Debug | x64` 和 `Release | x64` 构建。
 
@@ -31,6 +32,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -FFmpegS
 - [运行与输入协议](docs/usage.md)
 - [项目结构与数据流](docs/architecture.md)
 - [Python 工具](docs/python-tools.md)
+- [本机 Web UI](docs/web-ui.md)
 - [驱动包与来源记录](docs/driver.md)
 - [维护与交接](docs/maintenance.md)
 

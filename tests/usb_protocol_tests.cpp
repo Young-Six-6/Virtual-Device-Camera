@@ -1,6 +1,8 @@
 #include "../src/camera/camera_session.h"
 #include "../src/app/control_server.h"
 #include "../src/common/pipe_security.h"
+#include "../src/app/app_config.h"
+#include "../src/app/web_server.h"
 #include "../src/common/win_handle.h"
 #include <algorithm>
 #include <chrono>
@@ -9,11 +11,32 @@
 #include <cstring>
 #include <deque>
 #include <future>
+#include <fstream>
+#include <filesystem>
 #include <random>
 #include <stdexcept>
 
 namespace {
 void require(bool value, const char* reason) { if (!value) throw std::runtime_error(reason); }
+bool descriptor_grants(PSECURITY_DESCRIPTOR descriptor, WELL_KNOWN_SID_TYPE group) {
+    BOOL present = FALSE, defaulted = FALSE;
+    PACL acl = nullptr;
+    if (!GetSecurityDescriptorDacl(descriptor, &present, &acl, &defaulted) || !present || !acl) return false;
+    ACL_SIZE_INFORMATION information{};
+    if (!GetAclInformation(acl, &information, sizeof(information), AclSizeInformation)) return false;
+    BYTE sid_buffer[SECURITY_MAX_SID_SIZE]{};
+    DWORD sid_size = sizeof(sid_buffer);
+    if (!CreateWellKnownSid(group, nullptr, sid_buffer, &sid_size)) return false;
+    for (DWORD index = 0; index < information.AceCount; ++index) {
+        void* raw = nullptr;
+        if (!GetAce(acl, index, &raw)) return false;
+        const auto* header = static_cast<const ACE_HEADER*>(raw);
+        if (header->AceType != ACCESS_ALLOWED_ACE_TYPE) continue;
+        const auto* ace = static_cast<const ACCESS_ALLOWED_ACE*>(raw);
+        if (EqualSid(const_cast<DWORD*>(&ace->SidStart), sid_buffer)) return true;
+    }
+    return false;
+}
 int pattern(frame_t* frame) {
     for (int i = 0; i < frame->length; ++i) frame->buffer[i] = static_cast<char>(i & 0xff);
     return 0;
@@ -293,6 +316,25 @@ void cancellation_test() {
 }
 int main(int argc, char** argv) {
     try {
+        if (argc == 4 && std::string(argv[1]) == "--web-fixture") {
+            const auto port = static_cast<unsigned short>(std::stoi(argv[2]));
+            vcam::WebServer web;
+            require(web.start(port, argv[3], [] { return std::string("{\"fixture\":true}"); },
+                [](int camera) -> std::optional<vcam::CameraFrame> {
+                    if (camera != 1) return std::nullopt;
+                    return vcam::CameraFrame{{2,1}, {char(16), char(128), char(235), char(128)}};
+                }, [](const vcam::WebUpdate& update, std::string& error) {
+                    if (update.camera != 1 || update.resolution != vcam::Resolution{640,480} ||
+                        update.control_access != vcam::PipeAccess::everyone) {
+                        error = "fixture-rejected";
+                        return false;
+                    }
+                    return true;
+                }), "Web UI fixture start failed");
+            puts("READY"); fflush(stdout);
+            (void)getchar();
+            return 0;
+        }
         if (argc == 3 && std::string(argv[1]) == "--control-fixture") {
             auto state = std::make_shared<FakeState>();
             vcam::CameraSession session(configuration(), {640,480}, std::make_unique<FakeTransport>(state));
@@ -307,6 +349,41 @@ int main(int argc, char** argv) {
         }
         vcam::local_pipe_security security_check;
         require(static_cast<bool>(security_check), "Unable to initialize local pipe security descriptor");
+        vcam::local_pipe_security control_security(vcam::PipeAccess::everyone);
+        require(static_cast<bool>(control_security) &&
+                descriptor_grants(control_security.get()->lpSecurityDescriptor, WinWorldSid),
+            "Default control pipe security descriptor does not grant Everyone access");
+        {
+            const auto directory = std::filesystem::temp_directory_path() /
+                ("vcam-config-" + std::to_string(GetCurrentProcessId()));
+            require(std::filesystem::create_directory(directory), "Unable to create isolated config test directory");
+            const auto config = directory / "camera.ini";
+            const auto preset = directory / "default_res.txt";
+            { std::ofstream output(preset); output << "720\n"; }
+            auto settings = vcam::load_app_settings(config.u8string());
+            require(settings.cameras[0] == vcam::Resolution{1280,720}, "Default resolution preset was not loaded");
+            require(settings.rgb_pipe_access == vcam::PipeAccess::owner &&
+                    settings.control_pipe_access == vcam::PipeAccess::everyone,
+                "Default pipe access scopes were not applied independently");
+            settings.cameras[0] = {1024,768};
+            std::string error;
+            require(vcam::save_app_settings(config.u8string(), settings, error), "Persistent settings save failed");
+            auto restored = vcam::load_app_settings(config.u8string());
+            require(restored.cameras[0] == vcam::Resolution{1024,768} && restored.rgb_pipe == settings.rgb_pipe &&
+                    restored.rgb_pipe_access == vcam::PipeAccess::owner &&
+                    restored.control_pipe_access == vcam::PipeAccess::everyone,
+                "Persistent settings did not round-trip");
+            const auto legacy = directory / "legacy.ini";
+            { std::ofstream output(legacy); output << "pipe_access=users\n"; }
+            const auto migrated = vcam::load_app_settings(legacy.u8string());
+            require(migrated.rgb_pipe_access == vcam::PipeAccess::local_users &&
+                    migrated.control_pipe_access == vcam::PipeAccess::local_users,
+                "Legacy shared pipe access was not migrated");
+            std::filesystem::remove(legacy);
+            std::filesystem::remove(config);
+            std::filesystem::remove(preset);
+            std::filesystem::remove(directory);
+        }
         DWORD before = 0, after = 0;
         GetProcessHandleCount(GetCurrentProcess(), &before);
         protocol_tests();

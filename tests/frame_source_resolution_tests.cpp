@@ -89,15 +89,15 @@ class PipeSender {
 public:
     std::atomic<bool> sent{false};
     std::atomic<bool> rejected{false};
-    PipeSender(Resolution size, bool send_frame)
+    PipeSender(Resolution size, bool send_frame, std::string path = test_pipe)
     {
         require(done_ != NULL, "CreateEvent failed");
-        worker_ = std::thread([this, size, send_frame]() {
+        worker_ = std::thread([this, size, send_frame, path = std::move(path)]() {
             HANDLE pipe = INVALID_HANDLE_VALUE;
             for (int attempt = 0; attempt < 100; ++attempt)
             {
                 if (WaitForSingleObject(done_, 0) == WAIT_OBJECT_0) return;
-                pipe = CreateFileA(test_pipe.c_str(), GENERIC_WRITE, 0, NULL,
+                pipe = CreateFileA(path.c_str(), GENERIC_WRITE, 0, NULL,
                     OPEN_EXISTING, 0, NULL);
                 if (pipe != INVALID_HANDLE_VALUE) break;
                 Sleep(10);
@@ -255,6 +255,63 @@ void check_pipe_shutdown() {
     GetProcessHandleCount(GetCurrentProcess(), &after);
     require(after <= before+2, "Pipe reader leaked Windows handles");
 }
+
+void check_pipe_reconnect() {
+    Source source(frame_source_create_pipe(test_pipe.c_str()), frame_source_destroy);
+    require(source && frame_source_start_pipe_listener(source.get()), "Reconnect-test pipe failed to start");
+    Output output({640,480}, source.get());
+    {
+        PipeSender first({640,480}, true);
+        const ULONGLONG deadline = GetTickCount64() + 5000;
+        while (GetTickCount64() < deadline) {
+            require(frame_source_callback(&output.frame) == 0, "First pipe frame failed");
+            if (output.is_color(144,54,34)) break;
+            Sleep(2);
+        }
+        require(output.is_color(144,54,34), "First pipe client did not deliver a frame");
+    }
+    const ULONGLONG reconnect_deadline = GetTickCount64() + 5000;
+    while (frame_source_pipe_status(source.get()).connected && GetTickCount64() < reconnect_deadline) Sleep(5);
+    require(!frame_source_pipe_status(source.get()).connected, "Disconnected pipe client remained marked connected");
+    {
+        PipeSender second({1280,720}, true);
+        const ULONGLONG deadline = GetTickCount64() + 5000;
+        bool received = false;
+        while (GetTickCount64() < deadline) {
+            require(frame_source_callback(&output.frame) == 0, "Reconnected pipe frame failed");
+            const auto status = frame_source_pipe_status(source.get());
+            if (status.connected && status.frame_size.width == 1280 && status.frames >= 2 && output.is_color(144,54,34)) {
+                received = true;
+                break;
+            }
+            Sleep(2);
+        }
+        require(received, "RGB pipe listener did not recover after a client disconnect");
+    }
+}
+
+void check_pipe_reconfigure() {
+    const std::string replacement = test_pipe + "_replacement";
+    Source source(frame_source_create_pipe(test_pipe.c_str()), frame_source_destroy);
+    require(source && frame_source_start_pipe_listener(source.get()), "Pipe reconfiguration source failed to start");
+    require(frame_source_reconfigure_pipe(source.get(), replacement.c_str(), vcam::PipeAccess::local_users),
+        "Pipe listener did not reconfigure to the requested name and access scope");
+    const auto status = frame_source_pipe_status(source.get());
+    require(status.path == replacement && status.listening, "Reconfigured pipe status is incorrect");
+    Output output({640,480}, source.get());
+    PipeSender sender({640,480}, true, replacement);
+    const ULONGLONG deadline = GetTickCount64() + 5000;
+    bool received = false;
+    while (GetTickCount64() < deadline) {
+        require(frame_source_callback(&output.frame) == 0, "Reconfigured pipe frame failed");
+        if (frame_source_pipe_status(source.get()).frames && output.is_color(144,54,34)) {
+            received = true;
+            break;
+        }
+        Sleep(2);
+    }
+    require(received, "Reconfigured pipe did not accept a client");
+}
 }
 
 int main(int argc, char** argv)
@@ -279,8 +336,10 @@ int main(int argc, char** argv)
         check_pipe({641, 481}, resolutions[1], true);
         check_pipe({0, 480}, resolutions[0], false);
         check_pipe({INT_MAX, INT_MAX}, resolutions[0], false);
+        check_pipe_reconnect();
         check_pipe_shutdown();
-        printf("PASS: 9 MP4 + 9 pipe combinations, odd-size pipe, dynamic-size video, looping, and buffer/header guards.\n");
+        check_pipe_reconfigure();
+        printf("PASS: 9 MP4 + 9 pipe combinations, reconnect/reconfigure, dynamic-size video, looping, and buffer/header guards.\n");
         return 0;
     }
     catch (const std::exception& error)

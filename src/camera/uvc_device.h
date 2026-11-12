@@ -50,6 +50,7 @@ public:
     UvcDevice(const uvc_vcam_t& config, Resolution size);
     bool set_resolution(Resolution size);
     Resolution resolution() const { return {frames[0].width, frames[0].height}; }
+    std::vector<char> frame_copy() const { return pixels_; }
     void handle(usbtx_header_t& request, size_t payload_capacity);
     int delay_before(const usbtx_header_t& request) const;
 };

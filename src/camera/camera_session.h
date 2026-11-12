@@ -5,10 +5,17 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 namespace vcam {
+struct CameraFrame {
+    Resolution size;
+    std::vector<char> yuy2;
+};
+
 class CameraSession {
     mutable std::mutex lifecycle_;
+    mutable std::mutex frame_mutex_;
     std::string manufacturer_, product_;
     uvc_vcam_t config_;
     std::unique_ptr<UvcDevice> device_;
@@ -27,6 +34,7 @@ public:
     bool start();
     bool resize(Resolution, std::string& error);
     Resolution resolution() const;
+    CameraFrame snapshot() const;
     bool running() const { return running_.load(); }
 };
 }

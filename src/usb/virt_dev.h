@@ -54,3 +54,4 @@ int virt_usb_end(void* handle, usbtx_header_t* header);
 void virt_usb_interrupt(void* handle);
 void virt_usb_resume(void* handle);
 size_t virt_usb_capacity(void* handle);
+bool virt_usb_driver_available();

@@ -70,6 +70,10 @@ bool is_device_read(const usbtx_header_t& request) {
 }
 }
 
+bool virt_usb_driver_available() {
+    return static_cast<bool>(open_driver());
+}
+
 void* virt_usb_open() {
     try {
         auto device = std::make_unique<Device>();

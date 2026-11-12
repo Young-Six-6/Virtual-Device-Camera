@@ -11,6 +11,9 @@
   <ItemGroup>
     <ClCompile Include="src\app\main.cpp"><Filter>Application</Filter></ClCompile>
     <ClCompile Include="src\app\control_server.cpp"><Filter>Application</Filter></ClCompile>
+    <ClCompile Include="src\app\app_config.cpp"><Filter>Application</Filter></ClCompile>
+    <ClCompile Include="src\app\runtime_controller.cpp"><Filter>Application</Filter></ClCompile>
+    <ClCompile Include="src\app\web_server.cpp"><Filter>Application</Filter></ClCompile>
     <ClCompile Include="src\camera\uvc_vcam.cpp"><Filter>Camera</Filter></ClCompile>
     <ClCompile Include="src\camera\uvc_device.cpp"><Filter>Camera</Filter></ClCompile>
     <ClCompile Include="src\camera\camera_session.cpp"><Filter>Camera</Filter></ClCompile>
@@ -23,6 +26,9 @@
     <ClInclude Include="src\camera\uvc_device.h"><Filter>Camera</Filter></ClInclude>
     <ClInclude Include="src\camera\camera_session.h"><Filter>Camera</Filter></ClInclude>
     <ClInclude Include="src\app\control_server.h"><Filter>Application</Filter></ClInclude>
+    <ClInclude Include="src\app\app_config.h"><Filter>Application</Filter></ClInclude>
+    <ClInclude Include="src\app\runtime_controller.h"><Filter>Application</Filter></ClInclude>
+    <ClInclude Include="src\app\web_server.h"><Filter>Application</Filter></ClInclude>
     <ClInclude Include="src\common\win_handle.h"><Filter>Common</Filter></ClInclude>
     <ClInclude Include="src\common\resolution.h"><Filter>Common</Filter></ClInclude>
     <ClInclude Include="src\common\pipe_io.h"><Filter>Common</Filter></ClInclude>

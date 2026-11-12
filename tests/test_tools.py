@@ -1,6 +1,7 @@
 import base64
 import contextlib
 import io
+import http.client
 import os
 from pathlib import Path
 import socket
@@ -107,6 +108,64 @@ class FrameTests(unittest.TestCase):
 
 
 class WindowsPipeTests(unittest.TestCase):
+    def test_webui_auth_status_preview_and_config_update(self):
+        executable = os.environ.get('VCAM_TEST_CONTROL_EXE')
+        if not executable:
+            self.skipTest('USB/Web UI fixture executable is not configured')
+        with socket.socket() as probe:
+            probe.bind(('127.0.0.1', 0))
+            port = probe.getsockname()[1]
+        token = '0123456789abcdef' * 2
+        process = subprocess.Popen([executable, '--web-fixture', str(port), token], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        connection = None
+        try:
+            self.assertEqual(process.stdout.readline().strip(), b'READY')
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+            connection.request('GET', '/')
+            page = connection.getresponse()
+            self.assertEqual(page.status, 200)
+            self.assertIn(b'VIRTUAL CAMERA / CONTROL', page.read())
+            connection.close()
+
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+            connection.request('GET', '/api/status')
+            self.assertEqual(connection.getresponse().status, 401)
+            connection.close()
+
+            auth = {'Authorization': f'Bearer {token}'}
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+            connection.request('GET', '/api/status', headers=auth)
+            status = connection.getresponse()
+            self.assertEqual(status.status, 200)
+            self.assertEqual(status.read(), b'{"fixture":true}')
+            connection.close()
+
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+            connection.request('GET', '/api/status', headers={**auth, 'Origin': 'http://evil.example'})
+            self.assertEqual(connection.getresponse().status, 403)
+            connection.close()
+
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+            connection.request('GET', '/api/frame?camera=1', headers=auth)
+            frame = connection.getresponse()
+            self.assertEqual(frame.status, 200)
+            self.assertEqual((frame.getheader('X-Frame-Width'), frame.getheader('X-Frame-Height')), ('2', '1'))
+            self.assertEqual(frame.read(), bytes([16,128,235,128]))
+            connection.close()
+
+            body = 'camera=1&width=640&height=480&rgb_pipe=%5C%5C.%5Cpipe%5Cvcam_pipe&control_pipe=%5C%5C.%5Cpipe%5Cvcam_control&control_pipe_access=everyone'
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+            connection.request('POST', '/api/config', body=body, headers={**auth,
+                'Origin': f'http://127.0.0.1:{port}', 'Content-Type': 'application/x-www-form-urlencoded'})
+            result = connection.getresponse()
+            self.assertEqual(result.status, 200)
+            self.assertEqual(result.read(), b'{"ok":true}')
+        finally:
+            if connection:
+                connection.close()
+            process.communicate(input=b'\n', timeout=5)
+
     def test_preview_stream_and_pending_read_cancellation(self):
         name = pipe_name()
         receiver = PipePreview(name)

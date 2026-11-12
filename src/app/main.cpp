@@ -3,7 +3,10 @@
 #include <filesystem>
 #include <memory>
 #include <sstream>
+#include "app_config.h"
 #include "control_server.h"
+#include "runtime_controller.h"
+#include "web_server.h"
 #include "../camera/camera_session.h"
 #include "../media/frame_source.h"
 
@@ -61,22 +64,24 @@ int wmain(int argc, wchar_t** argv) {
     try {
         executable_directory();
         if (!application_stop) throw std::runtime_error("Unable to create shutdown event");
-        std::string rgb_pipe = "\\\\.\\pipe\\vcam_pipe", control_pipe = "\\\\.\\pipe\\vcam_control";
+        const std::filesystem::path config_path = std::filesystem::current_path() / "camera.ini";
+        auto settings = vcam::load_app_settings(config_path.u8string());
         std::vector<std::string> files;
-        vcam::Resolution size{};
         bool override_size = false;
+        vcam::Resolution size{};
         for (int index = 1; index < argc; ++index) {
             const std::string argument = utf8(argv[index]);
             if (argument == "--help" || argument == "-h") {
                 printf("Usage: virtual-device-camera [video1 [video2]] [--resolution 480|720|1080|WIDTHxHEIGHT]\n"
-                       "       [--pipe PATH] [--control-pipe PATH]\n");
+                       "       [--pipe PATH] [--control-pipe PATH]\n"
+                       "Settings and the local web UI are configured in camera.ini.\n");
                 return 0;
             }
             if (argument == "--pipe" || argument == "--control-pipe" || argument == "--resolution") {
                 if (++index == argc) throw std::invalid_argument("Missing option value");
                 const auto value = utf8(argv[index]);
-                if (argument == "--pipe") rgb_pipe = value;
-                else if (argument == "--control-pipe") control_pipe = value;
+                if (argument == "--pipe") settings.rgb_pipe = value;
+                else if (argument == "--control-pipe") settings.control_pipe = value;
                 else {
                     if (!parse_resolution(value, size)) throw std::invalid_argument("Invalid output resolution");
                     override_size = true;
@@ -86,13 +91,16 @@ int wmain(int argc, wchar_t** argv) {
             else files.push_back(argument);
         }
         if (files.size() > 2) throw std::invalid_argument("At most two video inputs are supported");
-        if (rgb_pipe == control_pipe) throw std::invalid_argument("RGB and control pipes must have different names");
+        if (!vcam::valid_pipe_path(settings.rgb_pipe) || !vcam::valid_pipe_path(settings.control_pipe) ||
+            settings.rgb_pipe == settings.control_pipe) throw std::invalid_argument("Invalid or duplicate pipe name");
+        if (override_size) settings.cameras[0] = settings.cameras[1] = size;
         using Source = std::unique_ptr<frame_source, decltype(&frame_source_destroy)>;
         using Camera = std::unique_ptr<void, decltype(&vcam_destroy)>;
-        Source source1(files.empty() ? frame_source_create_pipe(rgb_pipe.c_str()) : frame_source_create_file(files[0].c_str()), frame_source_destroy);
+        Source source1(files.empty() ? frame_source_create_pipe(settings.rgb_pipe.c_str()) : frame_source_create_file(files[0].c_str()), frame_source_destroy);
         Source source2(files.size() == 2 ? frame_source_create_file(files[1].c_str()) : nullptr, frame_source_destroy);
         if (!source1 || (files.size() == 2 && !source2)) throw std::runtime_error("Unable to allocate frame source");
-        if (files.empty() && !frame_source_start_pipe_listener(source1.get())) throw std::runtime_error("Unable to start RGB pipe");
+        if (files.empty() && !frame_source_start_pipe_listener(source1.get(), settings.rgb_pipe_access))
+            throw std::runtime_error("Unable to start RGB pipe");
         auto create = [&](frame_source* source, int number) {
             uvc_vcam_t config{};
             config.pid = number == 1 ? 0xcc10 : 0xcc11;
@@ -103,7 +111,8 @@ int wmain(int argc, wchar_t** argv) {
             config.param = source;
             config.request_stop = frame_source_interrupt;
             config.resume = frame_source_resume;
-            if (override_size) { config.width = size.width; config.height = size.height; }
+            config.width = settings.cameras[number - 1].width;
+            config.height = settings.cameras[number - 1].height;
             return Camera(vcam_create(&config), vcam_destroy);
         };
         Camera camera1 = create(source1.get(), 1);
@@ -118,11 +127,21 @@ int wmain(int argc, wchar_t** argv) {
         };
         vcam::ControlRouter router({actions(camera1.get()), actions(camera2.get())});
         vcam::ControlServer server;
-        if (!server.start(control_pipe, [&router](const std::string& command) {
+        if (!server.start(settings.control_pipe, [&router](const std::string& command) {
             return router.execute(command);
-        })) throw std::runtime_error("Unable to start camera control pipe");
+        }, settings.control_pipe_access)) throw std::runtime_error("Unable to start camera control pipe");
+        vcam::RuntimeController runtime(settings, config_path.u8string(), source1.get(), camera1.get(), camera2.get(), server);
+        vcam::WebServer web;
+        const std::string token = vcam::create_web_token();
+        if (!web.start(static_cast<unsigned short>(settings.web_port), token,
+            [&runtime, &web] { return runtime.status_json(web.port()); },
+            [&runtime](int camera) { return runtime.frame(camera); },
+            [&runtime](const vcam::WebUpdate& update, std::string& error) { return runtime.apply(update, error); }))
+            throw std::runtime_error("Unable to start local Web UI; check camera.ini web_port");
         SetConsoleCtrlHandler(console_signal, TRUE);
-        printf("Control pipe: %s\nPress Enter or Ctrl+C to stop.\n", control_pipe.c_str());
+        printf("Control pipe: %s\n", settings.control_pipe.c_str());
+        printf("Web UI: http://127.0.0.1:%u/#%s\n", settings.web_port, token.c_str());
+        printf("Press Enter or Ctrl+C to stop.\n");
         wait_for_exit();
         // server is destroyed and joined before cameras; cameras stop and join
         // their workers before the frame sources are released.

@@ -49,14 +49,23 @@ bool CameraSession::start() {
     return false;
 }
 Resolution CameraSession::resolution() const {
-    std::lock_guard<std::mutex> lock(lifecycle_);
+    std::lock_guard<std::mutex> lifecycle_lock(lifecycle_);
+    std::lock_guard<std::mutex> frame_lock(frame_mutex_);
     return device_->resolution();
+}
+CameraFrame CameraSession::snapshot() const {
+    std::lock_guard<std::mutex> lifecycle_lock(lifecycle_);
+    std::lock_guard<std::mutex> frame_lock(frame_mutex_);
+    return {device_->resolution(), device_->frame_copy()};
 }
 bool CameraSession::resize(Resolution size, std::string& error) {
     if (!valid_output(size)) { error = "invalid-resolution"; return false; }
     std::lock_guard<std::mutex> lock(lifecycle_);
     if (!plugged_ || !running_) { error = "camera-not-running"; return false; }
-    if (device_->resolution() == size) return true;
+    {
+        std::lock_guard<std::mutex> frame_lock(frame_mutex_);
+        if (device_->resolution() == size) return true;
+    }
     // Allocate descriptors and frame storage before disrupting the active device.
     auto replacement = std::make_unique<UvcDevice>(config_, size);
     stop_worker();
@@ -83,11 +92,22 @@ void CameraSession::run() noexcept {
             auto* request = transport_->begin();
             if (!request) break;
             const bool cycle = request->type == 4 && request->reset.type == 2;
-            const int delay = device_->delay_before(*request);
+            int delay = 0;
+            {
+                std::lock_guard<std::mutex> lock(frame_mutex_);
+                delay = device_->delay_before(*request);
+            }
             if (delay && WaitForSingleObject(stop_.get(), delay) == WAIT_OBJECT_0) break;
-            device_->handle(*request, transport_->capacity());
+            {
+                std::lock_guard<std::mutex> lock(frame_mutex_);
+                device_->handle(*request, transport_->capacity());
+            }
             if (!transport_->end(request)) break;
-            if (cycle && (!transport_->replug() || !device_->set_resolution(device_->resolution()))) break;
+            if (cycle) {
+                if (!transport_->replug()) break;
+                std::lock_guard<std::mutex> lock(frame_mutex_);
+                if (!device_->set_resolution(device_->resolution())) break;
+            }
         }
     }
     catch (const std::exception& error) { fprintf(stderr, "USB worker: %s\n", error.what()); }

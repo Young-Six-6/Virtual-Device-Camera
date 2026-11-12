@@ -22,8 +22,8 @@
 脚本对 Debug 和 Release 分别构建并运行：
 
 - MP4/管道输入输出分辨率矩阵、动态视频尺寸、缓冲区边界和重复停止测试。
-- 描述符长度截断、UVC 协商、ISO 包边界、20,000 条确定性畸形请求、假 USB 传输生命周期、热更新回滚和控制管道联调。
-- Python 配置、OBS 捕获模拟、分片 TCP、命名管道取消，以及 Python 客户端到 C++ 控制服务的联调。
+- 描述符长度截断、UVC 协商、ISO 包边界、20,000 条确定性畸形请求、假 USB 传输生命周期、热更新回滚、管道重连和配置文件读写。
+- Python 配置、OBS 捕获模拟、分片 TCP、命名管道取消，以及 Python 客户端到 C++ 控制服务/Web UI 的 HTTP 授权、预览和设置联调。
 
 单独运行脚本可限定配置：`scripts/test-resolution.ps1 -Configuration Release`、`scripts/test-usb.ps1 -Configuration Debug`。后者不需要 FFmpeg。
 

@@ -3,13 +3,21 @@
 #include <sddl.h>
 
 namespace vcam {
+enum class PipeAccess { owner, local_users, everyone };
+
 class local_pipe_security {
     PSECURITY_DESCRIPTOR descriptor_ = nullptr;
     SECURITY_ATTRIBUTES attributes_{sizeof(SECURITY_ATTRIBUTES), nullptr, FALSE};
 public:
-    local_pipe_security() {
+    explicit local_pipe_security(PipeAccess scope = PipeAccess::owner) {
+        // Pipe creation also uses PIPE_REJECT_REMOTE_CLIENTS; Everyone is local-only here.
+        const wchar_t* sddl = scope == PipeAccess::everyone
+            ? L"D:P(A;;GA;;;SY)(A;;GA;;;OW)(A;;GA;;;WD)"
+            : scope == PipeAccess::local_users
+                ? L"D:P(A;;GA;;;SY)(A;;GA;;;OW)(A;;GA;;;BU)"
+                : L"D:P(A;;GA;;;SY)(A;;GA;;;OW)";
         if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                L"D:P(A;;GA;;;SY)(A;;GA;;;OW)", SDDL_REVISION_1, &descriptor_, nullptr)) {
+                sddl, SDDL_REVISION_1, &descriptor_, nullptr)) {
             attributes_.lpSecurityDescriptor = descriptor_;
         }
     }

@@ -14,10 +14,12 @@ $arguments = @('/nologo','/std:c++17','/EHsc','/W3','/wd4200','/utf-8',("/Fo$out
     (Join-Path $repoRoot 'tests\usb_protocol_tests.cpp'),
     (Join-Path $repoRoot 'src\camera\uvc_device.cpp'),
     (Join-Path $repoRoot 'src\camera\camera_session.cpp'),
-    (Join-Path $repoRoot 'src\app\control_server.cpp'))
+    (Join-Path $repoRoot 'src\app\control_server.cpp'),
+    (Join-Path $repoRoot 'src\app\app_config.cpp'),
+    (Join-Path $repoRoot 'src\app\web_server.cpp'))
 if ($Configuration -eq 'Debug') { $arguments += @('/MTd','/Od','/Zi',("/Fd$output\usb-tests.pdb")) }
 else { $arguments += @('/MT','/O2') }
-$arguments += @('/link', 'advapi32.lib')
+$arguments += @('/link', 'advapi32.lib', 'ws2_32.lib', 'bcrypt.lib')
 & cl.exe @arguments
 if ($LASTEXITCODE -ne 0) { throw 'USB test compilation failed.' }
 & (Join-Path $output 'usb-tests.exe')

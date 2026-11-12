@@ -43,7 +43,7 @@ FFmpeg 需要同时包含头文件、导入库和 DLL。可以从 [FFmpeg-Builds
 | Debug | `build/bin/x64/Debug/` |
 | Release | `build/bin/x64/Release/` |
 
-每个输出目录包含 `virtual-device-camera.exe`、`default_res.txt` 和程序链接所需的 FFmpeg 运行时 DLL：`avformat`、`avcodec`、`avutil`、`swscale`、`swresample`。程序会切换当前工作目录到自身所在目录，因此从资源管理器、终端或 Visual Studio 启动时都能找到旁边的配置文件；相对 MP4 路径也以该目录为基准。
+每个输出目录包含 `virtual-device-camera.exe`、`default_res.txt`、默认配置 `camera.ini` 和程序链接所需的 FFmpeg 运行时 DLL：`avformat`、`avcodec`、`avutil`、`swscale`、`swresample`。运行时设置保存在 EXE 旁；后续构建不会覆盖已存在的 `camera.ini`。程序会切换当前工作目录到自身所在目录，因此从资源管理器、终端或 Visual Studio 启动时都能找到旁边的配置文件；相对 MP4 路径也以该目录为基准。
 
 Debug 使用静态 Debug CRT，Release 使用静态 Release CRT。Release 不依赖 Debug CRT DLL。FFmpeg 仍以 shared DLL 方式分发，不能只复制 EXE。
 

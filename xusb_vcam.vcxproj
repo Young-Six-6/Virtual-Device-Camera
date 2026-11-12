@@ -57,7 +57,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <AdditionalLibraryDirectories>$(FFmpegRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avformat.lib;avcodec.lib;swscale.lib;avutil.lib;setupapi.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>avformat.lib;avcodec.lib;swscale.lib;avutil.lib;setupapi.lib;advapi32.lib;ws2_32.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
@@ -98,6 +98,9 @@
   <ItemGroup>
     <ClCompile Include="src\app\main.cpp" />
     <ClCompile Include="src\app\control_server.cpp" />
+    <ClCompile Include="src\app\app_config.cpp" />
+    <ClCompile Include="src\app\runtime_controller.cpp" />
+    <ClCompile Include="src\app\web_server.cpp" />
     <ClCompile Include="src\camera\uvc_vcam.cpp" />
     <ClCompile Include="src\camera\uvc_device.cpp" />
     <ClCompile Include="src\camera\camera_session.cpp" />
@@ -110,6 +113,9 @@
     <ClInclude Include="src\camera\camera_session.h" />
     <ClInclude Include="src\camera\uvc_device.h" />
     <ClInclude Include="src\app\control_server.h" />
+    <ClInclude Include="src\app\app_config.h" />
+    <ClInclude Include="src\app\runtime_controller.h" />
+    <ClInclude Include="src\app\web_server.h" />
     <ClInclude Include="src\common\win_handle.h" />
     <ClInclude Include="src\common\resolution.h" />
     <ClInclude Include="src\common\pipe_io.h" />
@@ -123,6 +129,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="config\default_res.txt" />
+    <None Include="config\camera.ini" />
   </ItemGroup>
 
   <Target Name="ValidateFFmpeg" BeforeTargets="PrepareForBuild">
@@ -147,6 +154,7 @@
     </ItemGroup>
     <Copy SourceFiles="@(FFmpegRuntime)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(ProjectDir)config\default_res.txt" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(ProjectDir)config\camera.ini" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="!Exists('$(OutDir)camera.ini')" />
   </Target>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
