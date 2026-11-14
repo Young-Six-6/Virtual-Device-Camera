@@ -1,8 +1,12 @@
 #include <ntddk.h>
 #include <wdmsec.h>
+#include <wdmguid.h>
+#include <usbioctl.h>
 #include "xusb_driver.h"
 
 IO_COMPLETION_ROUTINE XusbReleaseControlRemoveLock;
+
+#define XUSB_MAX_CHILD_DEVICES 256
 
 static const GUID XusbChildDeviceClassGuid = {
     0x7a39372f,
@@ -18,6 +22,45 @@ static VOID XusbCompleteIrp(_Inout_ PIRP Irp, _In_ NTSTATUS Status, _In_ ULONG_P
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information = Information;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
+}
+
+static NTSTATUS XusbReturnHubName(
+    _In_ PXUSB_PARENT_EXTENSION Parent,
+    _Inout_ PIRP Irp,
+    _Out_ PULONG_PTR Information)
+{
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+    ULONG outputLength = stack->Parameters.DeviceIoControl.OutputBufferLength;
+    PUSB_HUB_NAME output = (PUSB_HUB_NAME)Irp->AssociatedIrp.SystemBuffer;
+    SIZE_T requiredLength;
+
+    *Information = 0;
+    if (Parent->Role != XusbRoleRootHub || Parent->InterfaceName.Buffer == NULL) {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+    if (output == NULL ||
+        outputLength < (ULONG)FIELD_OFFSET(USB_HUB_NAME, HubName)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    requiredLength = FIELD_OFFSET(USB_HUB_NAME, HubName) +
+        Parent->InterfaceName.Length + sizeof(WCHAR);
+    if (requiredLength > MAXULONG) {
+        return STATUS_INTEGER_OVERFLOW;
+    }
+    output->ActualLength = (ULONG)requiredLength;
+    if ((SIZE_T)outputLength < requiredLength) {
+        *Information = FIELD_OFFSET(USB_HUB_NAME, HubName);
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    RtlCopyMemory(
+        output->HubName,
+        Parent->InterfaceName.Buffer,
+        Parent->InterfaceName.Length);
+    output->HubName[Parent->InterfaceName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+    *Information = requiredLength;
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS XusbReleaseControlRemoveLock(
@@ -544,6 +587,7 @@ static NTSTATUS XusbCreateChild(
     PXUSB_CHILD_EXTENSION child;
     NTSTATUS status;
     BOOLEAN transactionsInitialized = FALSE;
+    ULONG childCount = 0;
 
     if (parent->Role != XusbRoleUsbOnlyEnumerator &&
         parent->Role != XusbRoleRootHub &&
@@ -607,11 +651,19 @@ static NTSTATUS XusbCreateChild(
 
     childPdo->Flags |= DO_BUS_ENUMERATED_DEVICE | DO_POWER_PAGABLE;
     ExAcquireFastMutex(&parent->ChildMutex);
+    for (PLIST_ENTRY entry = parent->Children.Flink;
+        entry != &parent->Children;
+        entry = entry->Flink) {
+        ++childCount;
+    }
     if (FileContext->ChildPdo != NULL ||
-        InterlockedCompareExchange(&parent->Removing, 0, 0) != 0) {
+        InterlockedCompareExchange(&parent->Removing, 0, 0) != 0 ||
+        childCount >= XUSB_MAX_CHILD_DEVICES) {
         BOOLEAN fileBusy = FileContext->ChildPdo != NULL;
+        BOOLEAN capacityExceeded = childCount >= XUSB_MAX_CHILD_DEVICES;
         ExReleaseFastMutex(&parent->ChildMutex);
-        status = fileBusy ? STATUS_DEVICE_BUSY : STATUS_DELETE_PENDING;
+        status = fileBusy ? STATUS_DEVICE_BUSY :
+            (capacityExceeded ? STATUS_INSUFFICIENT_RESOURCES : STATUS_DELETE_PENDING);
         goto Exit;
     }
     child->BusAddress = XusbAllocateBusAddress(parent);
@@ -680,6 +732,12 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
         IoReleaseRemoveLock(&parent->RemoveLock, Irp);
         XusbCompleteIrp(Irp, STATUS_INVALID_DEVICE_STATE, 0);
         return STATUS_INVALID_DEVICE_STATE;
+    }
+    if (code == IOCTL_INTERNAL_USB_GET_HUB_NAME && parent->Role == XusbRoleRootHub) {
+        status = XusbReturnHubName(parent, Irp, &information);
+        IoReleaseRemoveLock(&parent->RemoveLock, Irp);
+        XusbCompleteIrp(Irp, status, information);
+        return status;
     }
     if (code == IOCTL_XUSB_QUERY_DRIVER_INFO) {
         if (inputBytes != 0 || outputBytes < sizeof(xusb_driver_info_t) ||
@@ -970,6 +1028,23 @@ NTSTATUS XusbDispatchChildPnp(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp
             break;
         }
         break;
+
+    case IRP_MN_QUERY_BUS_INFORMATION: {
+        PPNP_BUS_INFORMATION busInformation = ExAllocatePool2(
+            POOL_FLAG_PAGED,
+            sizeof(*busInformation),
+            XUSB_POOL_TAG);
+        if (busInformation == NULL) {
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+        busInformation->BusTypeGuid = GUID_BUS_TYPE_USB;
+        busInformation->LegacyBusType = PNPBus;
+        busInformation->BusNumber = 0;
+        IoReleaseRemoveLock(&child->RemoveLock, Irp);
+        XusbCompleteIrp(Irp, STATUS_SUCCESS, (ULONG_PTR)busInformation);
+        return STATUS_SUCCESS;
+    }
 
     case IRP_MN_QUERY_DEVICE_RELATIONS:
         if (stack->Parameters.QueryDeviceRelations.Type == TargetDeviceRelation) {

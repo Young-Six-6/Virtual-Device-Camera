@@ -6,6 +6,8 @@
 #define XUSB_MAX_TRANSACTION_BYTES (32u * 1024u * 1024u)
 #define XUSB_MAX_QUEUED_TRANSACTIONS 256
 #define XUSB_MAX_QUEUED_BYTES (64ll * 1024ll * 1024ll)
+#define XUSB_MAX_PARENT_QUEUED_TRANSACTIONS 1024
+#define XUSB_MAX_PARENT_QUEUED_BYTES (256ll * 1024ll * 1024ll)
 #define XUSB_TRANSACTION_TAG 'tUXV'
 
 typedef struct _XUSB_TRANSACTION {
@@ -75,6 +77,100 @@ static PXUSB_TRANSACTION XusbGetTransaction(_In_ PIRP Irp)
     return (PXUSB_TRANSACTION)Irp->Tail.Overlay.DriverContext[0];
 }
 
+static NTSTATUS XusbReserveTransactionResources(
+    _Inout_ PXUSB_CHILD_EXTENSION Child,
+    _In_ LONG64 Reservation)
+{
+    PXUSB_PARENT_EXTENSION parent =
+        (PXUSB_PARENT_EXTENSION)Child->ParentDevice->DeviceExtension;
+    LONG childCount = InterlockedCompareExchange(&Child->TransactionCount, 0, 0);
+    LONG64 childBytes;
+    LONG parentCount;
+    LONG64 parentBytes;
+
+    for (;;) {
+        LONG previous;
+        if (childCount >= XUSB_MAX_QUEUED_TRANSACTIONS) {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        previous = InterlockedCompareExchange(
+            &Child->TransactionCount,
+            childCount + 1,
+            childCount);
+        if (previous == childCount) {
+            break;
+        }
+        childCount = previous;
+    }
+
+    childBytes = InterlockedCompareExchange64(&Child->TransactionBytes, 0, 0);
+    for (;;) {
+        LONG64 previous;
+        if (childBytes > XUSB_MAX_QUEUED_BYTES - Reservation) {
+            InterlockedDecrement(&Child->TransactionCount);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        previous = InterlockedCompareExchange64(
+            &Child->TransactionBytes,
+            childBytes + Reservation,
+            childBytes);
+        if (previous == childBytes) {
+            break;
+        }
+        childBytes = previous;
+    }
+
+    parentCount = InterlockedCompareExchange(&parent->TransactionCount, 0, 0);
+    for (;;) {
+        LONG previous;
+        if (parentCount >= XUSB_MAX_PARENT_QUEUED_TRANSACTIONS) {
+            InterlockedAdd64(&Child->TransactionBytes, -Reservation);
+            InterlockedDecrement(&Child->TransactionCount);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        previous = InterlockedCompareExchange(
+            &parent->TransactionCount,
+            parentCount + 1,
+            parentCount);
+        if (previous == parentCount) {
+            break;
+        }
+        parentCount = previous;
+    }
+
+    parentBytes = InterlockedCompareExchange64(&parent->TransactionBytes, 0, 0);
+    for (;;) {
+        LONG64 previous;
+        if (parentBytes > XUSB_MAX_PARENT_QUEUED_BYTES - Reservation) {
+            InterlockedDecrement(&parent->TransactionCount);
+            InterlockedAdd64(&Child->TransactionBytes, -Reservation);
+            InterlockedDecrement(&Child->TransactionCount);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        previous = InterlockedCompareExchange64(
+            &parent->TransactionBytes,
+            parentBytes + Reservation,
+            parentBytes);
+        if (previous == parentBytes) {
+            break;
+        }
+        parentBytes = previous;
+    }
+    return STATUS_SUCCESS;
+}
+
+static VOID XusbReleaseTransactionResources(
+    _Inout_ PXUSB_CHILD_EXTENSION Child,
+    _In_ LONG64 Reservation)
+{
+    PXUSB_PARENT_EXTENSION parent =
+        (PXUSB_PARENT_EXTENSION)Child->ParentDevice->DeviceExtension;
+    InterlockedAdd64(&Child->TransactionBytes, -Reservation);
+    InterlockedDecrement(&Child->TransactionCount);
+    InterlockedAdd64(&parent->TransactionBytes, -Reservation);
+    InterlockedDecrement(&parent->TransactionCount);
+}
+
 static VOID XusbCompleteUsbIrp(
     _In_ PXUSB_TRANSACTION Transaction,
     _In_ NTSTATUS Status)
@@ -98,8 +194,9 @@ static VOID XusbReleaseTransaction(_In_opt_ PXUSB_TRANSACTION Transaction)
             ObDereferenceObject(Transaction->Semaphore);
         }
         if (Transaction->Child != NULL) {
-            InterlockedAdd64(&Transaction->Child->TransactionBytes, -Transaction->ReservedBytes);
-            InterlockedDecrement(&Transaction->Child->TransactionCount);
+            XusbReleaseTransactionResources(
+                Transaction->Child,
+                Transaction->ReservedBytes);
             ObDereferenceObject(Transaction->Child->Self);
         }
         ExFreePoolWithTag(Transaction, XUSB_TRANSACTION_TAG);
@@ -555,8 +652,6 @@ static NTSTATUS XusbBuildTransaction(
     ULONG payloadLength = 0;
     ULONG packetCount = 0;
     ULONG isoMetadataLength = 0;
-    LONG count;
-    LONG64 bytes;
     LONG64 reservation;
     PXUSB_TRANSACTION transaction;
     PVOID transferBuffer = NULL;
@@ -787,43 +882,13 @@ static NTSTATUS XusbBuildTransaction(
     }
 
     reservation = (LONG64)sizeof(*transaction) + sizeof(ioctl_usbtx_header_t) + payloadLength;
-    count = InterlockedCompareExchange(&child->TransactionCount, 0, 0);
-    for (;;) {
-        if (count >= XUSB_MAX_QUEUED_TRANSACTIONS) {
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-        {
-            LONG previous = InterlockedCompareExchange(
-                &child->TransactionCount,
-                count + 1,
-                count);
-            if (previous == count) {
-                break;
-            }
-            count = previous;
-        }
-    }
-    bytes = InterlockedCompareExchange64(&child->TransactionBytes, 0, 0);
-    for (;;) {
-        if (bytes > XUSB_MAX_QUEUED_BYTES - reservation) {
-            InterlockedDecrement(&child->TransactionCount);
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-        {
-            LONG64 previous = InterlockedCompareExchange64(
-                &child->TransactionBytes,
-                bytes + reservation,
-                bytes);
-            if (previous == bytes) {
-                break;
-            }
-            bytes = previous;
-        }
+    status = XusbReserveTransactionResources(child, reservation);
+    if (!NT_SUCCESS(status)) {
+        return status;
     }
     transaction = ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*transaction), XUSB_TRANSACTION_TAG);
     if (transaction == NULL) {
-        InterlockedAdd64(&child->TransactionBytes, -reservation);
-        InterlockedDecrement(&child->TransactionCount);
+        XusbReleaseTransactionResources(child, reservation);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     RtlZeroMemory(transaction, sizeof(*transaction));
@@ -1060,11 +1125,10 @@ static NTSTATUS XusbBuildPortTransaction(
 {
     PXUSB_CHILD_EXTENSION child = (PXUSB_CHILD_EXTENSION)DeviceObject->DeviceExtension;
     PXUSB_TRANSACTION transaction;
-    LONG count;
-    LONG64 bytes;
     const LONG64 reservation = sizeof(*transaction) + sizeof(ioctl_usbtx_header_t);
     ioctl_usbtx_header_t* outer;
     PXUSB_USER_TRANSACTION request;
+    NTSTATUS status;
 
     *Result = NULL;
     if (IoControlCode != IOCTL_INTERNAL_USB_RESET_PORT &&
@@ -1072,39 +1136,14 @@ static NTSTATUS XusbBuildPortTransaction(
         return STATUS_INVALID_DEVICE_REQUEST;
     }
 
-    count = InterlockedCompareExchange(&child->TransactionCount, 0, 0);
-    for (;;) {
-        LONG previous;
-        if (count >= XUSB_MAX_QUEUED_TRANSACTIONS) {
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-        previous = InterlockedCompareExchange(&child->TransactionCount, count + 1, count);
-        if (previous == count) {
-            break;
-        }
-        count = previous;
-    }
-    bytes = InterlockedCompareExchange64(&child->TransactionBytes, 0, 0);
-    for (;;) {
-        LONG64 previous;
-        if (bytes > XUSB_MAX_QUEUED_BYTES - reservation) {
-            InterlockedDecrement(&child->TransactionCount);
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-        previous = InterlockedCompareExchange64(
-            &child->TransactionBytes,
-            bytes + reservation,
-            bytes);
-        if (previous == bytes) {
-            break;
-        }
-        bytes = previous;
+    status = XusbReserveTransactionResources(child, reservation);
+    if (!NT_SUCCESS(status)) {
+        return status;
     }
 
     transaction = ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*transaction), XUSB_TRANSACTION_TAG);
     if (transaction == NULL) {
-        InterlockedAdd64(&child->TransactionBytes, -reservation);
-        InterlockedDecrement(&child->TransactionCount);
+        XusbReleaseTransactionResources(child, reservation);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     RtlZeroMemory(transaction, sizeof(*transaction));
@@ -1145,6 +1184,41 @@ static NTSTATUS XusbBuildPortTransaction(
 }
 #pragma warning(pop)
 
+static NTSTATUS XusbGetVirtualPortStatus(
+    _In_ PXUSB_CHILD_EXTENSION Child,
+    _Inout_ PIRP Irp)
+{
+    PXUSB_PARENT_EXTENSION parent =
+        (PXUSB_PARENT_EXTENSION)Child->ParentDevice->DeviceExtension;
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+    PULONG output = (PULONG)stack->Parameters.Others.Argument1;
+    ULONG portStatus = 0;
+    BOOLEAN connected;
+
+    if (output == NULL || Irp->RequestorMode != KernelMode ||
+        KeGetCurrentIrql() != PASSIVE_LEVEL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    ExAcquireFastMutex(&parent->ChildMutex);
+    connected = !Child->Internal && Child->Present && !Child->Removed;
+    ExReleaseFastMutex(&parent->ChildMutex);
+    if (connected) {
+        portStatus = USBD_PORT_CONNECTED | USBD_PORT_ENABLED;
+    }
+
+    __try {
+        *output = portStatus;
+    }
+    __except (GetExceptionCode() == STATUS_ACCESS_VIOLATION ||
+        GetExceptionCode() == STATUS_DATATYPE_MISALIGNMENT
+        ? EXCEPTION_EXECUTE_HANDLER
+        : EXCEPTION_CONTINUE_SEARCH) {
+        return GetExceptionCode();
+    }
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS XusbQueueUsbRequest(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
 {
     PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
@@ -1170,6 +1244,14 @@ NTSTATUS XusbQueueUsbRequest(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
         Irp->IoStatus.Information = 0;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         return STATUS_NOT_SUPPORTED;
+    }
+    if (ioControlCode == IOCTL_INTERNAL_USB_GET_PORT_STATUS) {
+        status = XusbGetVirtualPortStatus(child, Irp);
+        IoReleaseRemoveLock(&child->RemoveLock, Irp);
+        Irp->IoStatus.Status = status;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return status;
     }
     if (ioControlCode == IOCTL_INTERNAL_USB_RESET_PORT ||
         ioControlCode == IOCTL_INTERNAL_USB_CYCLE_PORT) {

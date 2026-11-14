@@ -32,6 +32,8 @@ typedef struct _XUSB_PARENT_EXTENSION {
     LIST_ENTRY Children;
     ULONG NextBusAddress;
     XUSB_DEVICE_ROLE Role;
+    volatile LONG TransactionCount;
+    volatile LONG64 TransactionBytes;
     UNICODE_STRING InterfaceName;
     BOOLEAN InterfaceEnabled;
     UNICODE_STRING ControlInterfaceName;

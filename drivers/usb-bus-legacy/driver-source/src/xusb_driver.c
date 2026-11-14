@@ -1,6 +1,8 @@
 #include <ntddk.h>
 #include <initguid.h>
 #include <usbiodef.h>
+#include <usbioctl.h>
+#include <wdmguid.h>
 #include "xusb_driver.h"
 
 DRIVER_INITIALIZE DriverEntry;
@@ -101,6 +103,99 @@ static NTSTATUS XusbSetRoleInterfaces(
         if (NT_SUCCESS(status)) {
             status = interfaceStatus;
         }
+    }
+    return status;
+}
+
+/* The virtual root hub terminates the stack count query after adding itself. */
+static NTSTATUS XusbHandleHubCount(
+    _In_ PXUSB_PARENT_EXTENSION Extension,
+    _Inout_ PIRP Irp)
+{
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+    PULONG hubCount = (PULONG)stack->Parameters.Others.Argument1;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (Extension->Role != XusbRoleRootHub || hubCount == NULL ||
+        Irp->RequestorMode != KernelMode || KeGetCurrentIrql() > APC_LEVEL) {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    __try {
+        if (*hubCount == MAXULONG) {
+            status = STATUS_INTEGER_OVERFLOW;
+        } else {
+            ++*hubCount;
+        }
+    }
+    __except (GetExceptionCode() == STATUS_ACCESS_VIOLATION ||
+        GetExceptionCode() == STATUS_DATATYPE_MISALIGNMENT
+        ? EXCEPTION_EXECUTE_HANDLER
+        : EXCEPTION_CONTINUE_SEARCH) {
+        status = GetExceptionCode();
+    }
+    return status;
+}
+
+/* Both returned device objects carry references owned by the caller. */
+static NTSTATUS XusbHandleRootHubPdo(
+    _In_ PXUSB_PARENT_EXTENSION Extension,
+    _Inout_ PIRP Irp)
+{
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
+    PDEVICE_OBJECT* rootHubOutput =
+        (PDEVICE_OBJECT*)stack->Parameters.Others.Argument1;
+    PDEVICE_OBJECT* stackTopOutput =
+        (PDEVICE_OBJECT*)stack->Parameters.Others.Argument2;
+    PDEVICE_OBJECT rootHubPdo = NULL;
+    PDEVICE_OBJECT stackTop = NULL;
+    PLIST_ENTRY entry;
+    NTSTATUS status = STATUS_NO_SUCH_DEVICE;
+
+    if (Extension->Role != XusbRoleHostController || rootHubOutput == NULL ||
+        stackTopOutput == NULL || Irp->RequestorMode != KernelMode ||
+        KeGetCurrentIrql() > APC_LEVEL) {
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
+    ExAcquireFastMutex(&Extension->ChildMutex);
+    for (entry = Extension->Children.Flink;
+        entry != &Extension->Children;
+        entry = entry->Flink) {
+        PXUSB_CHILD_EXTENSION child = CONTAINING_RECORD(
+            entry,
+            XUSB_CHILD_EXTENSION,
+            Link);
+        if (child->Internal && child->Present && !child->Removed) {
+            rootHubPdo = child->Self;
+            ObReferenceObject(rootHubPdo);
+            break;
+        }
+    }
+    ExReleaseFastMutex(&Extension->ChildMutex);
+    if (rootHubPdo == NULL) {
+        return status;
+    }
+
+    stackTop = IoGetAttachedDeviceReference(rootHubPdo);
+    if (stackTop == NULL) {
+        ObDereferenceObject(rootHubPdo);
+        return STATUS_NO_SUCH_DEVICE;
+    }
+    __try {
+        *rootHubOutput = rootHubPdo;
+        *stackTopOutput = stackTop;
+        status = STATUS_SUCCESS;
+    }
+    __except (GetExceptionCode() == STATUS_ACCESS_VIOLATION ||
+        GetExceptionCode() == STATUS_DATATYPE_MISALIGNMENT
+        ? EXCEPTION_EXECUTE_HANDLER
+        : EXCEPTION_CONTINUE_SEARCH) {
+        status = GetExceptionCode();
+    }
+    if (!NT_SUCCESS(status)) {
+        ObDereferenceObject(stackTop);
+        ObDereferenceObject(rootHubPdo);
     }
     return status;
 }
@@ -270,6 +365,30 @@ NTSTATUS XusbDispatchPassThrough(
         return STATUS_DELETE_PENDING;
     }
 
+    if (IoGetCurrentIrpStackLocation(Irp)->MajorFunction == IRP_MJ_INTERNAL_DEVICE_CONTROL &&
+        extension->Role == XusbRoleHostController &&
+        IoGetCurrentIrpStackLocation(Irp)->Parameters.DeviceIoControl.IoControlCode ==
+            IOCTL_INTERNAL_USB_GET_ROOTHUB_PDO) {
+        status = XusbHandleRootHubPdo(extension, Irp);
+        IoReleaseRemoveLock(&extension->RemoveLock, Irp);
+        Irp->IoStatus.Status = status;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return status;
+    }
+
+    if (IoGetCurrentIrpStackLocation(Irp)->MajorFunction == IRP_MJ_INTERNAL_DEVICE_CONTROL &&
+        extension->Role == XusbRoleRootHub &&
+        IoGetCurrentIrpStackLocation(Irp)->Parameters.DeviceIoControl.IoControlCode ==
+            IOCTL_INTERNAL_USB_GET_HUB_COUNT) {
+        status = XusbHandleHubCount(extension, Irp);
+        IoReleaseRemoveLock(&extension->RemoveLock, Irp);
+        Irp->IoStatus.Status = status;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return status;
+    }
+
     IoCopyCurrentIrpStackLocationToNext(Irp);
     IoSetCompletionRoutine(
         Irp,
@@ -307,6 +426,28 @@ NTSTATUS XusbDispatchPnp(
         Irp->IoStatus.Information = 0;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         return status;
+    }
+
+    if (stack->MinorFunction == IRP_MN_QUERY_LEGACY_BUS_INFORMATION) {
+        PLEGACY_BUS_INFORMATION busInformation = ExAllocatePool2(
+            POOL_FLAG_PAGED,
+            sizeof(*busInformation),
+            'bUXV');
+        if (busInformation == NULL) {
+            IoReleaseRemoveLock(&extension->RemoveLock, Irp);
+            Irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+            Irp->IoStatus.Information = 0;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+        busInformation->BusTypeGuid = GUID_BUS_TYPE_USB;
+        busInformation->LegacyBusType = PNPBus;
+        busInformation->BusNumber = 0;
+        IoReleaseRemoveLock(&extension->RemoveLock, Irp);
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = (ULONG_PTR)busInformation;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_SUCCESS;
     }
 
     if (stack->MinorFunction == IRP_MN_QUERY_DEVICE_RELATIONS &&
