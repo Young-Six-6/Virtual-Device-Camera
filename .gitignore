@@ -12,3 +12,8 @@ __pycache__/
 *.idb
 *.pdb
 *.log
+
+# Local binary reverse-engineering output; driver source lives in its own tree.
+/drivers/usb-bus-legacy/source-reconstruction/
+/drivers/usb-bus-legacy/driver-source/build/
+/drivers/usb-bus-legacy/driver-source/xusb_driver/

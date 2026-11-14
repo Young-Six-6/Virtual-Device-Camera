@@ -24,7 +24,7 @@ DEFINE_GUID(GUID_XUSB_VIRT_INTERFACE,
 
 #define HW_IDS_COUNT    260
 
-struct ioctl_pdo_create_t
+typedef struct ioctl_pdo_create_t
 {
 
 	ULONGLONG     hSemaphore;
@@ -38,18 +38,18 @@ struct ioctl_pdo_create_t
 
 	WCHAR compatible_ids[HW_IDS_COUNT];
 
-};
+} ioctl_pdo_create_t;
 
 #pragma pack(1)
 
 
-struct iso_packet_t
+typedef struct iso_packet_t
 {
 	unsigned int offset;
 	unsigned int length;
 	unsigned int status;
-};
-struct iso_packet_hdr_t
+} iso_packet_t;
+typedef struct iso_packet_hdr_t
 {
 	unsigned int start_frame;
 	unsigned int flags;
@@ -57,10 +57,10 @@ struct iso_packet_hdr_t
 	unsigned int number_packets;
 
 	iso_packet_t packets[1];
-};
+} iso_packet_hdr_t;
 #define ISO_PACKET_HDR_SIZE    (4*sizeof(unsigned int))
 
-struct ioctl_usbtx_header_t
+typedef struct ioctl_usbtx_header_t
 {
 	ULONGLONG        inter_handle;
 	LONG             inter_seqno;
@@ -132,6 +132,6 @@ struct ioctl_usbtx_header_t
 	};
 
 
-};
+} ioctl_usbtx_header_t;
 
 #pragma pack()

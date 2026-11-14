@@ -58,7 +58,7 @@ src/media/                 MP4/管道帧源、缩放、像素格式转换
 src/protocol/              UVC/USB 协议结构
 src/usb/                   SetupAPI 和虚拟总线 IOCTL 传输
 config/                    摄像头分辨率配置
-drivers/usb-bus-legacy/    原仓库附带的旧版 x86/x64 驱动包
+drivers/usb-bus-legacy/    原版 x86/x64 驱动包和独立重建的 WDM 源码工程
 tools/python/              OBS、TCP、管道测试工具
 scripts/                   环境检查和构建脚本
 docs/                      当前维护文档
@@ -67,4 +67,4 @@ archive/legacy-2016/       历史原文和旧接口代码，仅作溯源参考
 
 ## 许可与驱动
 
-应用代码沿用仓库中的 MIT 许可文件。内核驱动是单独的二进制和安装包；其来源、签名信息及许可状态需要与应用代码分别看待。仓库中没有完整的驱动源码，也没有证明该驱动适用于当前 Windows 版本的端到端验证记录。
+应用代码沿用仓库中的 MIT 许可文件。仓库保留了上游旧版驱动二进制，并新增了独立的 WDM 重建源码工程；重建源码不是原版驱动源码，也没有替换旧驱动包。驱动来源、签名、许可边界、重建范围和未完成的运行时验证见[驱动文档](docs/driver.md)。
