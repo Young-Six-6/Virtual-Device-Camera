@@ -61,6 +61,7 @@ typedef struct _XUSB_CHILD_EXTENSION {
     LIST_ENTRY Link;
     BOOLEAN Linked;
     BOOLEAN Reported;
+    BOOLEAN Internal;
     LONG BusAddress;
     BOOLEAN Present;
     BOOLEAN Removed;
@@ -98,6 +99,7 @@ NTSTATUS XusbEnumerateChildren(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Ir
 _IRQL_requires_(PASSIVE_LEVEL)
 _Dispatch_type_(IRP_MJ_PNP) DRIVER_DISPATCH XusbDispatchChildPnp;
 VOID XusbRemoveAllChildren(_In_ PDEVICE_OBJECT DeviceObject);
+NTSTATUS XusbCreateRoleChild(_In_ PDEVICE_OBJECT DeviceObject);
 NTSTATUS XusbGetDeviceRole(_In_ PDEVICE_OBJECT PhysicalDeviceObject, _Out_ XUSB_DEVICE_ROLE* Role);
 VOID XusbWmiInitialize(_Inout_ PXUSB_PARENT_EXTENSION Parent);
 NTSTATUS XusbWmiSetServiceRegistryPath(_In_ PCUNICODE_STRING RegistryPath);

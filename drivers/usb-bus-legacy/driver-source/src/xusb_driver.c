@@ -309,7 +309,8 @@ NTSTATUS XusbDispatchPnp(
         stack->Parameters.QueryDeviceRelations.Type == BusRelations &&
         (extension->Role == XusbRoleUsbOnlyEnumerator ||
             extension->Role == XusbRoleRootHub ||
-            extension->Role == XusbRoleUsbTreeEnumerator)) {
+            extension->Role == XusbRoleUsbTreeEnumerator ||
+            extension->Role == XusbRoleHostController)) {
         status = XusbEnumerateChildren(DeviceObject, Irp);
         return status;
     }
@@ -342,6 +343,9 @@ NTSTATUS XusbDispatchPnp(
         }
         if (NT_SUCCESS(status)) {
             status = XusbSetRoleInterfaces(extension, TRUE);
+        }
+        if (NT_SUCCESS(status)) {
+            status = XusbCreateRoleChild(DeviceObject);
         }
         if (!NT_SUCCESS(status)) {
             (VOID)XusbSetRoleInterfaces(extension, FALSE);

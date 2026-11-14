@@ -372,6 +372,161 @@ static LONG XusbAllocateBusAddress(_Inout_ PXUSB_PARENT_EXTENSION Parent)
     }
 }
 
+NTSTATUS XusbCreateRoleChild(_In_ PDEVICE_OBJECT DeviceObject)
+{
+    static const WCHAR rootHubId[] = L"vFxsUSB\\vRootHUB&Virtual&Fanxiushu";
+    static const WCHAR rootHubHardwareIds[] = L"vFxsUSB\\vRootHUB&Virtual&Fanxiushu\0";
+    static const WCHAR hostControllerId[] =
+        L"PCI\\VEN_37FA&DEV_FE09&SUBSYS_9976A077&REV_88";
+    static const WCHAR hostControllerHardwareIds[] =
+        L"PCI\\VEN_37FA&DEV_FE09&SUBSYS_9976A077&REV_88\0";
+    static const WCHAR emptyMultiSz[] = { UNICODE_NULL, UNICODE_NULL };
+    PXUSB_PARENT_EXTENSION parent = (PXUSB_PARENT_EXTENSION)DeviceObject->DeviceExtension;
+    PCWSTR childId;
+    ULONG childIdChars;
+    PCWSTR hardwareIds;
+    ULONG hardwareIdChars;
+    PDEVICE_OBJECT childPdo = NULL;
+    PXUSB_CHILD_EXTENSION child;
+    PLIST_ENTRY entry;
+    NTSTATUS status;
+    BOOLEAN transactionsInitialized = FALSE;
+
+    if (parent->Signature != XUSB_PARENT_SIGNATURE) {
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+    switch (parent->Role) {
+    case XusbRoleHostController:
+        childId = rootHubId;
+        childIdChars = RTL_NUMBER_OF(rootHubId);
+        hardwareIds = rootHubHardwareIds;
+        hardwareIdChars = RTL_NUMBER_OF(rootHubHardwareIds);
+        break;
+    case XusbRoleUsbTreeEnumerator:
+        childId = hostControllerId;
+        childIdChars = RTL_NUMBER_OF(hostControllerId);
+        hardwareIds = hostControllerHardwareIds;
+        hardwareIdChars = RTL_NUMBER_OF(hostControllerHardwareIds);
+        break;
+    default:
+        return STATUS_SUCCESS;
+    }
+
+    ExAcquireFastMutex(&parent->ChildMutex);
+    for (entry = parent->Children.Flink; entry != &parent->Children; entry = entry->Flink) {
+        PXUSB_CHILD_EXTENSION existing = CONTAINING_RECORD(
+            entry,
+            XUSB_CHILD_EXTENSION,
+            Link);
+        if (existing->Internal && existing->Present && !existing->Removed) {
+            ExReleaseFastMutex(&parent->ChildMutex);
+            return STATUS_SUCCESS;
+        }
+    }
+    if (InterlockedCompareExchange(&parent->Removing, 0, 0) != 0) {
+        ExReleaseFastMutex(&parent->ChildMutex);
+        return STATUS_DELETE_PENDING;
+    }
+    ExReleaseFastMutex(&parent->ChildMutex);
+
+    status = IoCreateDeviceSecure(
+        DeviceObject->DriverObject,
+        sizeof(XUSB_CHILD_EXTENSION),
+        NULL,
+        FILE_DEVICE_UNKNOWN,
+        FILE_DEVICE_SECURE_OPEN,
+        FALSE,
+        &XusbChildDefaultSddl,
+        &XusbChildDeviceClassGuid,
+        &childPdo);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    child = (PXUSB_CHILD_EXTENSION)childPdo->DeviceExtension;
+    RtlZeroMemory(child, sizeof(*child));
+    child->Signature = XUSB_CHILD_SIGNATURE;
+    child->Self = childPdo;
+    child->ParentDevice = DeviceObject;
+    child->PhysicalDeviceObject = parent->PhysicalDeviceObject;
+    child->Internal = TRUE;
+    child->Present = TRUE;
+    child->DevicePowerState = PowerDeviceD0;
+    ExInitializeFastMutex(&child->ConfigurationMutex);
+    ObReferenceObject(DeviceObject);
+    ObReferenceObject(child->PhysicalDeviceObject);
+
+    status = XusbCopyString(childId, childIdChars, FALSE, &child->DeviceId);
+    if (!NT_SUCCESS(status)) {
+        goto Exit;
+    }
+    status = XusbCopyMultiSz(hardwareIds, hardwareIdChars, FALSE, &child->HardwareIds);
+    if (!NT_SUCCESS(status)) {
+        goto Exit;
+    }
+    status = XusbCopyMultiSz(
+        emptyMultiSz,
+        RTL_NUMBER_OF(emptyMultiSz),
+        TRUE,
+        &child->CompatibleIds);
+    if (!NT_SUCCESS(status)) {
+        goto Exit;
+    }
+
+    IoInitializeRemoveLock(&child->RemoveLock, 'rUXV', 0, 0);
+    status = XusbInitializeTransactions(child);
+    if (!NT_SUCCESS(status)) {
+        goto Exit;
+    }
+    transactionsInitialized = TRUE;
+    childPdo->Flags |= DO_BUS_ENUMERATED_DEVICE | DO_POWER_PAGABLE;
+
+    ExAcquireFastMutex(&parent->ChildMutex);
+    if (InterlockedCompareExchange(&parent->Removing, 0, 0) != 0) {
+        ExReleaseFastMutex(&parent->ChildMutex);
+        status = STATUS_DELETE_PENDING;
+        goto Exit;
+    }
+    for (entry = parent->Children.Flink; entry != &parent->Children; entry = entry->Flink) {
+        PXUSB_CHILD_EXTENSION existing = CONTAINING_RECORD(
+            entry,
+            XUSB_CHILD_EXTENSION,
+            Link);
+        if (existing->Internal && existing->Present && !existing->Removed) {
+            ExReleaseFastMutex(&parent->ChildMutex);
+            status = STATUS_SUCCESS;
+            goto Exit;
+        }
+    }
+
+    child->BusAddress = XusbAllocateBusAddress(parent);
+    InsertTailList(&parent->Children, &child->Link);
+    child->Linked = TRUE;
+    ObReferenceObject(childPdo);
+    ExReleaseFastMutex(&parent->ChildMutex);
+
+    childPdo->Flags &= ~DO_DEVICE_INITIALIZING;
+    IoInvalidateDeviceRelations(parent->PhysicalDeviceObject, BusRelations);
+    return STATUS_SUCCESS;
+
+Exit:
+    if (transactionsInitialized) {
+        NTSTATUS cleanupStatus;
+        XusbStopTransactions(child);
+        cleanupStatus = IoAcquireRemoveLock(&child->RemoveLock, childPdo);
+        if (NT_SUCCESS(cleanupStatus)) {
+            XusbCancelTransactions(child);
+            IoReleaseRemoveLockAndWait(&child->RemoveLock, childPdo);
+        }
+    }
+    XusbReleaseChildConfiguration(child);
+    XusbFreeChildStrings(child);
+    ObDereferenceObject(DeviceObject);
+    ObDereferenceObject(child->PhysicalDeviceObject);
+    IoDeleteDevice(childPdo);
+    return status;
+}
+
 static NTSTATUS XusbCreateChild(
     _In_ PDEVICE_OBJECT ParentDevice,
     _In_ PXUSB_FILE_CONTEXT FileContext,
