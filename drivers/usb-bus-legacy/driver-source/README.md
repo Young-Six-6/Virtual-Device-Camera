@@ -4,7 +4,33 @@
 
 ## 当前实现
 
-目前已补入有限的总线枚举路径和 URB 事务。USB-only 与 Root HUB 角色均可通过父设备控制接口处理 PDO 新增/移除 IOCTL、创建子 PDO、返回 BusRelations 和 PnP ID，并在用户清理或 PDO 移除时回收引用、发出移除事件。角色设备接口已按旧二进制恢复：USB-only 使用应用控制接口，Root HUB 使用标准 USB HUB 接口并额外提供应用控制接口，Host Controller 使用标准主控制器接口。USB-tree 角色处理 BusRelations 但没有用户控制接口。Host Controller 启动时创建 Root HUB 内部 PDO，USB-tree 启动时创建 Host Controller 内部 PDO，并通过 BusRelations 暴露；内部 PDO 的标识和基础关系已实现。子 PDO 将控制/控制扩展、设备/接口/端点描述符、vendor/class、status、feature、pipe reset、frame number、Microsoft feature descriptor、配置/接口选择、bulk/interrupt 与 isochronous URB 映射到既有 64 字节 BEGIN/END ABI；RESET_PORT/CYCLE_PORT 也转成旧协议的 Type 4 事务。配置 URB 解析接口/端点描述符并生成代际化的合成句柄；等时传输校验包表并回写数据、长度与状态。子 PDO 使用从旧二进制恢复的 IoCreateDeviceSecure 默认 SDDL 和 class GUID；默认 ACL 允许 SY 完全访问、BA/WD/RC 读写执行，Windows class 注册表 override 通过相同 GUID 生效。cancel-safe queue 仲裁取消与 END，设备移除/惊奇移除会停止并清空队列；每个子 PDO 限制 256 个事务、合计 64 MiB 非分页事务缓冲区。子 PDO 可响应基础 query/set power IRP；父 FDO 已补 WMI provider 注册、8 字节数据块回调和内嵌的 WMI schema/resource。MOF 经 `mofcomp -WMI` 编译后嵌入驱动，WMI 消费者发现仍待目标系统验证。当前用户态 UVC handler 尚未实现 bulk/interrupt 传输或 Microsoft OS feature descriptor，因此这些路径暂不可用。驱动已兼容该 handler 对 GET_CURRENT_FRAME_NUMBER 返回的 16 位值，并按 URB 需要扩展为 32 位。旧二进制的 child URB 序列化路径中未发现 GET_PORT_STATUS 支持；其他 USB hub/port 请求仍未覆盖。用户态服务无响应时也没有单请求超时。父设备按 INF/旧二进制 ID 识别四种角色。完整 USB Host Controller 协议、父 FDO 控制接口的最终访问策略，以及端到端 USB/PnP/摄像头运行时验证仍未完成，因此仍不能安装或替换仓库中的旧驱动。
+该目录提供一个独立的 x64 WDM 源码工程。实现按“父 FDO 管理总线与子 PDO、子 PDO 转发 USB 请求到既有用户态 ABI”组织，主要代码位于 `src/xusb_driver.c`、`src/xusb_bus.c`、`src/xusb_transactions.c` 和 `src/xusb_wmi.c`。
+
+### 设备角色和枚举
+
+- USB-only 与 Root Hub 父设备提供用户态控制接口，支持现有 PDO add/remove IOCTL，并通过 BusRelations 枚举子 PDO。
+- Host Controller 启动时创建 Root Hub 内部 PDO；USB-tree 启动时创建 Host Controller 内部 PDO。内部 PDO 通过 BusRelations 暴露，并使用旧 INF/二进制中恢复的标识。
+- USB-only、Root Hub、Host Controller 的设备接口分别对应应用控制接口、标准 USB Hub 接口（另提供应用控制接口）和标准 USB Host Controller 接口。USB-tree 不暴露用户控制接口。
+- PDO 在用户 cleanup、PnP remove、surprise removal 和父设备移除路径上停止新事务、排空队列并释放引用；移除通知事件在适用时触发。
+
+### URB 和事务映射
+
+子 PDO 将旧二进制 ABI 能表达的控制/控制扩展、描述符、vendor/class、status、feature、pipe reset、frame number、configuration/interface selection、bulk/interrupt 和 isochronous URB 映射到 `src/usb/ioctl.h` 定义的 BEGIN/END 事务。`RESET_PORT` 与 `CYCLE_PORT` 映射为旧协议的 Type 4 事务。
+
+配置选择会解析并校验 USB 配置、接口和端点描述符；合成的 pipe/interface 句柄包含代际信息，alternate setting 或配置切换后旧句柄不再有效。等时传输校验包描述符边界，并将数据、长度和包状态复制回 URB。GET_CURRENT_FRAME_NUMBER 同时接受现有用户态 handler 的 16 位结果和标准 URB 所需的 32 位结果，短值会零扩展。
+
+每个子 PDO 最多允许 256 个待处理事务，事务缓冲区合计上限为 64 MiB。cancel-safe queue 负责 END、IRP cancel 和设备移除之间的队列仲裁。子 PDO 使用从旧二进制恢复的 `IoCreateDeviceSecure` 默认 SDDL/class GUID：SY 完全访问，BA、WD、RC 读写执行；相同 class GUID 保留 Windows 类注册表 ACL override 能力。子 PDO 响应基础 query/set power IRP。
+
+### WMI
+
+父 FDO 注册 WMI provider，提供 8 字节数据块回调。MOF schema/resource 被嵌入驱动，构建脚本会运行 `mofcomp -WMI` 检查；WMI class 能否被目标系统消费者发现，仍需实机确认。
+
+## 已知限制
+
+- 仓库当前 UVC handler 未实现 bulk/interrupt 传输或 Microsoft OS feature descriptor，因此对应路径尚不能与该用户态端到端工作。
+- 旧 child URB 序列化路径没有发现 `GET_PORT_STATUS` 支持；其他 Hub/port 请求未覆盖。完整 USB Host Controller 协议也未实现。
+- 用户态服务无响应时没有独立的单请求超时。旧父 FDO 控制接口的最终访问策略还需目标系统确认。
+- 未在真实 Windows USB/PnP/摄像头环境完成端到端运行验证。当前 `.sys` 为未签名构建，不能安装，也不能替换仓库中的旧驱动包。
 
 共享 ABI 头直接包含 `src/usb/ioctl.h`，字段、布局和控制码以该文件为准。不要为了适配重建驱动而改变用户态协议。
 

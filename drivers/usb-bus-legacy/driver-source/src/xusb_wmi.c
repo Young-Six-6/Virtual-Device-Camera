@@ -18,7 +18,6 @@ static WMIGUIDREGINFO XusbWmiGuidList[] = {
     { &XusbWmiGuid, 1, 0 }
 };
 static UNICODE_STRING XusbWmiRegistryPath;
-static volatile LONG XusbWmiGlobalValue;
 
 _Function_class_(WMI_QUERY_REGINFO_CALLBACK)
 static NTSTATUS XusbWmiQueryRegInfo(
@@ -110,7 +109,6 @@ static NTSTATUS XusbWmiSetDataBlock(
 
     RtlCopyMemory(&value, Buffer + sizeof(ULONG), sizeof(value));
     InterlockedExchange(&parent->WmiValue1, (LONG)value);
-    InterlockedExchange(&XusbWmiGlobalValue, (LONG)value);
     return WmiCompleteRequest(
         DeviceObject, Irp, STATUS_SUCCESS, XUSB_WMI_DATA_LENGTH, IO_NO_INCREMENT);
 }

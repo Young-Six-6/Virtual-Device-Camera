@@ -289,6 +289,15 @@ static NTSTATUS XusbPopulateInterface(
     return STATUS_SUCCESS;
 }
 
+static ULONG XusbNextHandleGeneration(_Inout_ PXUSB_CHILD_EXTENSION Child)
+{
+    ++Child->HandleGeneration;
+    if (Child->HandleGeneration == 0) {
+        ++Child->HandleGeneration;
+    }
+    return Child->HandleGeneration;
+}
+
 static NTSTATUS XusbSelectConfiguration(
     _Inout_ PXUSB_CHILD_EXTENSION Child,
     _Inout_ PURB Urb)
@@ -351,11 +360,7 @@ static NTSTATUS XusbSelectConfiguration(
             goto Exit;
         }
         configurationValue = configuration->bConfigurationValue;
-        ++Child->HandleGeneration;
-        if (Child->HandleGeneration == 0) {
-            ++Child->HandleGeneration;
-        }
-        configurationHandle = ((ULONG_PTR)Child->HandleGeneration << 16) |
+        configurationHandle = ((ULONG_PTR)XusbNextHandleGeneration(Child) << 16) |
             configurationValue;
 
         {
@@ -378,7 +383,7 @@ static NTSTATUS XusbSelectConfiguration(
                     configurationLength,
                     interfaceInfo,
                     remaining,
-                    ++Child->HandleGeneration,
+                    XusbNextHandleGeneration(Child),
                     pipes,
                     &pipeCount);
                 if (!NT_SUCCESS(status)) {
@@ -461,7 +466,7 @@ static NTSTATUS XusbSelectInterface(
         Child->ConfigurationLength,
         interfaceInfo,
         Urb->UrbHeader.Length - FIELD_OFFSET(struct _URB_SELECT_INTERFACE, Interface),
-        ++Child->HandleGeneration,
+        XusbNextHandleGeneration(Child),
         pipes,
         &pipeCount);
     if (NT_SUCCESS(status)) {

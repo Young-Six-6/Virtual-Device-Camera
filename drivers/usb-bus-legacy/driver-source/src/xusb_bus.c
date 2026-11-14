@@ -248,6 +248,11 @@ NTSTATUS XusbCreateFile(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
         XusbCompleteIrp(Irp, status, 0);
         return status;
     }
+    if (InterlockedCompareExchange(&parent->Removing, 0, 0) != 0) {
+        IoReleaseRemoveLock(&parent->RemoveLock, Irp);
+        XusbCompleteIrp(Irp, STATUS_DELETE_PENDING, 0);
+        return STATUS_DELETE_PENDING;
+    }
     if (stack->FileObject->FsContext != NULL) {
         IoReleaseRemoveLock(&parent->RemoveLock, Irp);
         XusbCompleteIrp(Irp, STATUS_INVALID_DEVICE_STATE, 0);
@@ -538,6 +543,7 @@ static NTSTATUS XusbCreateChild(
     PDEVICE_OBJECT childPdo = NULL;
     PXUSB_CHILD_EXTENSION child;
     NTSTATUS status;
+    BOOLEAN transactionsInitialized = FALSE;
 
     if (parent->Role != XusbRoleUsbOnlyEnumerator &&
         parent->Role != XusbRoleRootHub &&
@@ -597,6 +603,7 @@ static NTSTATUS XusbCreateChild(
     if (!NT_SUCCESS(status)) {
         goto Exit;
     }
+    transactionsInitialized = TRUE;
 
     childPdo->Flags |= DO_BUS_ENUMERATED_DEVICE | DO_POWER_PAGABLE;
     ExAcquireFastMutex(&parent->ChildMutex);
@@ -620,6 +627,16 @@ static NTSTATUS XusbCreateChild(
     return STATUS_SUCCESS;
 
 Exit:
+    if (transactionsInitialized) {
+        NTSTATUS cleanupStatus;
+        XusbStopTransactions(child);
+        cleanupStatus = IoAcquireRemoveLock(&child->RemoveLock, childPdo);
+        if (NT_SUCCESS(cleanupStatus)) {
+            XusbCancelTransactions(child);
+            IoReleaseRemoveLockAndWait(&child->RemoveLock, childPdo);
+        }
+        XusbReleaseChildConfiguration(child);
+    }
     if (child->RemoveEvent != NULL) {
         ObDereferenceObject(child->RemoveEvent);
     }
@@ -652,6 +669,11 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
     if (!NT_SUCCESS(status)) {
         XusbCompleteIrp(Irp, status, 0);
         return status;
+    }
+    if (InterlockedCompareExchange(&parent->Removing, 0, 0) != 0) {
+        IoReleaseRemoveLock(&parent->RemoveLock, Irp);
+        XusbCompleteIrp(Irp, STATUS_DELETE_PENDING, 0);
+        return STATUS_DELETE_PENDING;
     }
     fileContext = XusbGetFileContext(stack->FileObject);
     if (fileContext == NULL) {

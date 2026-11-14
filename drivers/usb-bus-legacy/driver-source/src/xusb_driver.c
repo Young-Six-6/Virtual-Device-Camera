@@ -42,9 +42,6 @@ static NTSTATUS XusbRegisterRoleInterfaces(
             &GUID_XUSB_VIRT_INTERFACE,
             NULL,
             &Extension->ControlInterfaceName);
-        if (!NT_SUCCESS(status)) {
-            RtlFreeUnicodeString(&Extension->InterfaceName);
-        }
         return status;
 
     case XusbRoleHostController:
@@ -264,6 +261,13 @@ NTSTATUS XusbDispatchPassThrough(
         Irp->IoStatus.Information = 0;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         return status;
+    }
+    if (InterlockedCompareExchange(&extension->Removing, 0, 0) != 0) {
+        IoReleaseRemoveLock(&extension->RemoveLock, Irp);
+        Irp->IoStatus.Status = STATUS_DELETE_PENDING;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_DELETE_PENDING;
     }
 
     IoCopyCurrentIrpStackLocationToNext(Irp);
