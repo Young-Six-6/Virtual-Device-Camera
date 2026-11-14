@@ -308,6 +308,7 @@ NTSTATUS XusbDispatchPnp(
     if (stack->MinorFunction == IRP_MN_QUERY_DEVICE_RELATIONS &&
         stack->Parameters.QueryDeviceRelations.Type == BusRelations &&
         (extension->Role == XusbRoleUsbOnlyEnumerator ||
+            extension->Role == XusbRoleRootHub ||
             extension->Role == XusbRoleUsbTreeEnumerator)) {
         status = XusbEnumerateChildren(DeviceObject, Irp);
         return status;

@@ -384,6 +384,7 @@ static NTSTATUS XusbCreateChild(
     NTSTATUS status;
 
     if (parent->Role != XusbRoleUsbOnlyEnumerator &&
+        parent->Role != XusbRoleRootHub &&
         parent->Role != XusbRoleUsbTreeEnumerator) {
         return STATUS_INVALID_DEVICE_REQUEST;
     }

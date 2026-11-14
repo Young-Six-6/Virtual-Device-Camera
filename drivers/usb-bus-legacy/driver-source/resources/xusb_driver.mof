@@ -1,0 +1,25 @@
+#pragma namespace ("\\\\.\\root\\wmi")
+#pragma autorecover
+
+[
+    WMI,
+    Dynamic,
+    Provider("WMIProv"),
+    Guid("{FD2700E7-1773-43AB-82B5-E6F11C1497C8}"),
+    Locale("MS\\0x409"),
+    Description("Runtime counters exposed by the reconstructed XUSB bus driver.")
+]
+class XusbBusStatus
+{
+    [key, read]
+    string InstanceName;
+
+    [read]
+    boolean Active;
+
+    [read, WmiDataId(1)]
+    uint32 Value0;
+
+    [read, write, WmiDataId(2)]
+    uint32 Value1;
+};

@@ -55,10 +55,18 @@
     <ClInclude Include="include\xusb_driver.h" />
     <ClInclude Include="include\xusb_abi.h" />
   </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="resources\xusb_driver.rc" />
+    <None Include="resources\xusb_driver.mof" />
+  </ItemGroup>
   <PropertyGroup>
     <OutDir>$(ProjectDir)build\$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(ProjectDir)build\obj\$(Platform)\$(Configuration)\</IntDir>
   </PropertyGroup>
+  <Target Name="CompileXusbWmiMof" BeforeTargets="ResourceCompile">
+    <MakeDir Directories="$(ProjectDir)build" />
+    <Exec Command="mofcomp.exe -WMI -B:&quot;$(ProjectDir)build\BusEnumWMI.bmf&quot; &quot;$(ProjectDir)resources\xusb_driver.mof&quot;" />
+  </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>
