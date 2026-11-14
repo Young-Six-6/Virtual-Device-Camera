@@ -449,6 +449,7 @@ NTSTATUS XusbCreateRoleChild(_In_ PDEVICE_OBJECT DeviceObject)
     child->Self = childPdo;
     child->ParentDevice = DeviceObject;
     child->PhysicalDeviceObject = parent->PhysicalDeviceObject;
+    InitializeListHead(&child->RemovalLink);
     child->Internal = TRUE;
     child->Present = TRUE;
     child->DevicePowerState = PowerDeviceD0;
@@ -564,6 +565,7 @@ static NTSTATUS XusbCreateChild(
     child->Self = childPdo;
     child->ParentDevice = ParentDevice;
     child->PhysicalDeviceObject = parent->PhysicalDeviceObject;
+    InitializeListHead(&child->RemovalLink);
     child->Present = TRUE;
     child->DevicePowerState = PowerDeviceD0;
     ExInitializeFastMutex(&child->ConfigurationMutex);
@@ -1023,9 +1025,11 @@ VOID XusbRemoveAllChildren(_In_ PDEVICE_OBJECT DeviceObject)
     PXUSB_PARENT_EXTENSION parent = (PXUSB_PARENT_EXTENSION)DeviceObject->DeviceExtension;
     PLIST_ENTRY entry;
     LIST_ENTRY unreportedChildren;
+    LIST_ENTRY pendingTransactions;
     BOOLEAN changed = FALSE;
 
     InitializeListHead(&unreportedChildren);
+    InitializeListHead(&pendingTransactions);
     InterlockedExchange(&parent->Removing, 1);
     ExAcquireFastMutex(&parent->ChildMutex);
     entry = parent->Children.Flink;
@@ -1035,6 +1039,12 @@ VOID XusbRemoveAllChildren(_In_ PDEVICE_OBJECT DeviceObject)
         if (child->Present && !child->Removed) {
             child->Present = FALSE;
             changed = TRUE;
+        }
+        if (child->Reported && !child->Removed && !child->RemovalPending) {
+            child->RemovalPending = TRUE;
+            XusbStopTransactions(child);
+            ObReferenceObject(child->Self);
+            InsertTailList(&pendingTransactions, &child->RemovalLink);
         }
         if (!child->Reported) {
             RemoveEntryList(&child->Link);
@@ -1057,6 +1067,18 @@ VOID XusbRemoveAllChildren(_In_ PDEVICE_OBJECT DeviceObject)
         InitializeListHead(&child->Link);
         XusbDisposeUnreportedChild(childPdo);
         ObDereferenceObject(childPdo);
+    }
+    while (!IsListEmpty(&pendingTransactions)) {
+        PXUSB_CHILD_EXTENSION child = CONTAINING_RECORD(
+            RemoveHeadList(&pendingTransactions),
+            XUSB_CHILD_EXTENSION,
+            RemovalLink);
+        InitializeListHead(&child->RemovalLink);
+        XusbCancelTransactions(child);
+        ExAcquireFastMutex(&parent->ChildMutex);
+        child->RemovalPending = FALSE;
+        ExReleaseFastMutex(&parent->ChildMutex);
+        ObDereferenceObject(child->Self);
     }
     if (changed) {
         IoInvalidateDeviceRelations(parent->PhysicalDeviceObject, BusRelations);

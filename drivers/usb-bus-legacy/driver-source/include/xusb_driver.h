@@ -59,9 +59,11 @@ typedef struct _XUSB_CHILD_EXTENSION {
     PDEVICE_OBJECT ParentDevice;
     PDEVICE_OBJECT PhysicalDeviceObject;
     LIST_ENTRY Link;
+    LIST_ENTRY RemovalLink;
     BOOLEAN Linked;
     BOOLEAN Reported;
     BOOLEAN Internal;
+    BOOLEAN RemovalPending;
     LONG BusAddress;
     BOOLEAN Present;
     BOOLEAN Removed;

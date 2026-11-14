@@ -1657,8 +1657,13 @@ NTSTATUS XusbEndUsbTransaction(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Ir
                     transaction->Urb->UrbOSFeatureDescriptorRequest.TransferBufferLength = actualLength;
                     break;
                 case URB_FUNCTION_GET_CURRENT_FRAME_NUMBER:
-                    if (actualLength != sizeof(ULONG)) {
+                    /* The existing UVC user-mode handler returns a 16-bit frame value. */
+                    if (actualLength != sizeof(USHORT) && actualLength != sizeof(ULONG)) {
                         status = STATUS_INVALID_PARAMETER;
+                    } else if (actualLength == sizeof(USHORT)) {
+                        USHORT frameNumber;
+                        RtlCopyMemory(&frameNumber, response->Data, sizeof(frameNumber));
+                        transaction->Urb->UrbGetCurrentFrameNumber.FrameNumber = frameNumber;
                     }
                     break;
                 }

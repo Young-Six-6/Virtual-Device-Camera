@@ -26,7 +26,7 @@ x64 `xusb_virt.sys` 大小为 51,368 字节；其 Git blob SHA-1 为 `fb62e68217
 - 配置/接口选择会校验当前配置。Pipe 和 interface 句柄带有代际信息，避免 alternate setting 切换后旧句柄误指向新端点。每个子 PDO 最多允许 256 个事务、总计最多 64 MiB 事务缓冲区。
 - 子 PDO 使用从旧二进制恢复的 `IoCreateDeviceSecure` 默认 SDDL 和 class GUID：SY 完全访问，BA/WD/RC 读写执行；相同 class GUID 保留 Windows 类注册表安全覆盖机制。子 PDO 处理基础 query/set power IRP。父 FDO 已实现 WMI provider 注册和 8 字节数据块回调。
 
-协议路径打通不代表与仓库当前用户态服务兼容。现有 UVC handler 尚未处理 bulk/interrupt、`GET_MS_FEATURE_DESCRIPTOR` 和 `GET_CURRENT_FRAME_NUMBER` 的响应，因此这些请求不能端到端完成。旧二进制的 child URB 序列化路径中未发现 `GET_PORT_STATUS` 支持；Root HUB 角色是否经其他路径处理该请求尚未确认。其他 USB hub/port 请求也未覆盖。驱动已将 WMI MOF schema/resource 嵌入镜像并通过 `mofcomp -WMI` 检查，WMI 消费者发现 class 的行为仍未在目标系统验证。用户态服务无响应时没有单请求超时。完整 USB Host Controller 协议、父 FDO 控制接口的最终访问策略以及 Windows USB/PnP/摄像头端到端运行均待验证。
+协议路径打通不代表与仓库当前用户态服务兼容。现有 UVC handler 尚未实现 bulk/interrupt 传输或 Microsoft OS feature descriptor，因此这些路径暂不可用。驱动已兼容该 handler 对 `GET_CURRENT_FRAME_NUMBER` 返回的 16 位值，并按 URB 需要扩展为 32 位。旧二进制的 child URB 序列化路径中未发现 `GET_PORT_STATUS` 支持；Root HUB 角色是否经其他路径处理该请求尚未确认。其他 USB hub/port 请求也未覆盖。驱动已将 WMI MOF schema/resource 嵌入镜像并通过 `mofcomp -WMI` 检查，WMI 消费者发现 class 的行为仍未在目标系统验证。用户态服务无响应时没有单请求超时。完整 USB Host Controller 协议、父 FDO 控制接口的最终访问策略以及 Windows USB/PnP/摄像头端到端运行均待验证。
 
 目前新驱动源码已通过本机 x64 Release/Debug 构建，但尚不能视为可替换旧驱动的全功能实现。上游 `x86/`、`x64/` 二进制保持原样。反编译清单和函数分析保存在本机 `source-reconstruction/` 目录，由 `.gitignore` 排除，不属于项目源码。
 
