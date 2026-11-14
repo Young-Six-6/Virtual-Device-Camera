@@ -15,6 +15,8 @@ constexpr size_t maximum_payload = 32 * 1024 * 1024;
 constexpr size_t request_offset = offsetof(ioctl_usbtx_header_t, type);
 static_assert(request_offset == 24 && sizeof(ioctl_usbtx_header_t) == 24 + sizeof(usbtx_header_t),
     "Legacy virtual USB driver ABI changed");
+static_assert(IOCTL_XUSB_QUERY_DRIVER_INFO == 0x226028 && sizeof(xusb_driver_info_t) == 16,
+    "Driver identification query ABI changed");
 struct Device {
     vcam::unique_handle file, stop, semaphore, removed;
     std::vector<unsigned char> buffer;
@@ -62,6 +64,53 @@ vcam::unique_handle open_driver() {
     }
     return {};
 }
+VirtUsbDriverKind classify_unsupported_driver_ioctl(DWORD error) {
+    return error == ERROR_INVALID_FUNCTION || error == ERROR_NOT_SUPPORTED
+        ? VirtUsbDriverKind::original
+        : VirtUsbDriverKind::unknown;
+}
+VirtUsbDriverKind query_driver_kind(HANDLE file) {
+    xusb_driver_info_t info{};
+    DWORD bytes = 0;
+    vcam::unique_handle event(CreateEventW(NULL, TRUE, FALSE, NULL));
+    if (!event) return VirtUsbDriverKind::unknown;
+
+    OVERLAPPED operation{};
+    operation.hEvent = event.get();
+    BOOL complete = DeviceIoControl(
+        file,
+        IOCTL_XUSB_QUERY_DRIVER_INFO,
+        NULL,
+        0,
+        &info,
+        sizeof(info),
+        &bytes,
+        &operation);
+    if (!complete) {
+        DWORD error = GetLastError();
+        if (error == ERROR_IO_PENDING) {
+            if (GetOverlappedResult(file, &operation, &bytes, TRUE)) {
+                complete = TRUE;
+            } else {
+                error = GetLastError();
+                return classify_unsupported_driver_ioctl(error);
+            }
+        } else {
+            return classify_unsupported_driver_ioctl(error);
+        }
+    }
+
+    if (!complete || bytes < sizeof(info) ||
+        info.Signature != XUSB_DRIVER_INFO_SIGNATURE ||
+        info.StructureSize < sizeof(info)) {
+        return VirtUsbDriverKind::unknown;
+    }
+    if (info.DriverKind == XUSB_DRIVER_KIND_RECONSTRUCTED &&
+        info.AbiVersion == XUSB_DRIVER_ABI_VERSION) {
+        return VirtUsbDriverKind::foss_reconstructed;
+    }
+    return VirtUsbDriverKind::unknown;
+}
 bool is_device_read(const usbtx_header_t& request) {
     if (request.type == 1) return request.descriptor.is_read != 0;
     if (request.type == 2) return request.vendor.is_read != 0;
@@ -72,6 +121,11 @@ bool is_device_read(const usbtx_header_t& request) {
 
 bool virt_usb_driver_available() {
     return static_cast<bool>(open_driver());
+}
+
+VirtUsbDriverKind virt_usb_detect_driver() {
+    vcam::unique_handle file = open_driver();
+    return file ? query_driver_kind(file.get()) : VirtUsbDriverKind::unavailable;
 }
 
 void* virt_usb_open() {

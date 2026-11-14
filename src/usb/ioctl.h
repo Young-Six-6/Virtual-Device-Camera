@@ -21,6 +21,21 @@ DEFINE_GUID(GUID_XUSB_VIRT_INTERFACE,
 #define IOCTL_END_TRANS_USB_DATA \
 	CTL_CODE(FILE_DEVICE_UNKNOWN, 0x809, METHOD_NEITHER, FILE_ANY_ACCESS)
 
+// Additive query used by the reconstructed driver; the original four IOCTLs remain unchanged.
+#define IOCTL_XUSB_QUERY_DRIVER_INFO \
+	CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80a, METHOD_BUFFERED, FILE_READ_DATA)
+
+#define XUSB_DRIVER_INFO_SIGNATURE 0x53534f46UL // "FOSS"
+#define XUSB_DRIVER_KIND_RECONSTRUCTED 1UL
+#define XUSB_DRIVER_ABI_VERSION 1UL
+
+typedef struct xusb_driver_info_t {
+	ULONG Signature;
+	ULONG StructureSize;
+	ULONG DriverKind;
+	ULONG AbiVersion;
+} xusb_driver_info_t;
+
 
 #define HW_IDS_COUNT    260
 

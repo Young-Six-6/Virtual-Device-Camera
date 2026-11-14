@@ -22,6 +22,15 @@ const char* access_name(PipeAccess access) {
     }
     return "owner";
 }
+const char* driver_kind_name(VirtUsbDriverKind kind) {
+    switch (kind) {
+    case VirtUsbDriverKind::original: return "original";
+    case VirtUsbDriverKind::foss_reconstructed: return "foss";
+    case VirtUsbDriverKind::unknown: return "unknown";
+    case VirtUsbDriverKind::unavailable: return "unavailable";
+    }
+    return "unknown";
+}
 }
 
 RuntimeController::RuntimeController(AppSettings settings, std::string config_path, frame_source* source,
@@ -33,8 +42,10 @@ std::string RuntimeController::status_json(unsigned short web_port) const {
     std::lock_guard<std::mutex> lock(mutex_);
     const PipeReaderStatus pipe = frame_source_pipe_status(source_);
     const uint64_t now = GetTickCount64();
+    const VirtUsbDriverKind driver = virt_usb_detect_driver();
     std::ostringstream json;
-    json << "{\"driverAvailable\":" << (virt_usb_driver_available() ? "true" : "false")
+    json << "{\"driverAvailable\":" << (driver != VirtUsbDriverKind::unavailable ? "true" : "false")
+         << ",\"driverKind\":" << json_string(driver_kind_name(driver))
          << ",\"controlPipeAccess\":" << json_string(access_name(settings_.control_pipe_access))
          << ",\"webPort\":" << web_port
          << ",\"rgbPipe\":{\"name\":" << json_string(settings_.rgb_pipe)

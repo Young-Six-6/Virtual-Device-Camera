@@ -55,3 +55,12 @@ void virt_usb_interrupt(void* handle);
 void virt_usb_resume(void* handle);
 size_t virt_usb_capacity(void* handle);
 bool virt_usb_driver_available();
+
+enum class VirtUsbDriverKind {
+    unavailable,
+    original,
+    foss_reconstructed,
+    unknown
+};
+
+VirtUsbDriverKind virt_usb_detect_driver();

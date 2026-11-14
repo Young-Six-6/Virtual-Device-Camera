@@ -19,6 +19,8 @@ x64 `xusb_virt.sys` 大小为 51,368 字节；其 Git blob SHA-1 为 `fb62e68217
 
 `drivers/usb-bus-legacy/driver-source/` 是独立的新 WDM 源码工程，不会覆盖旧二进制包。其当前复刻范围和限制如下：
 
+用户态通过 `IOCTL_XUSB_QUERY_DRIVER_INFO` 探测重建驱动。FOSS 版本返回带 `FOSS` 签名的版本结构；旧原版不识别这个私有查询码，用户态将其标记为“原版驱动”。既有四个 USB IOCTL 编号和结构保持不变。Web UI 的驱动状态卡也会显示识别结果。
+
 - 父设备按硬件 ID 识别 USB-only、USB-tree、Root HUB 和 Host Controller 角色。已按旧二进制补齐角色设备接口：USB-only 使用应用控制接口，Root HUB 使用标准 USB HUB 接口并额外提供应用控制接口，Host Controller 使用标准主控制器接口。USB-only 可通过控制接口新增/移除子 PDO；USB-tree 会处理 `BusRelations`，但没有用户控制接口。旧驱动在 Host Controller/USB-tree PnP 启动时创建内部 Root HUB/Host Controller PDO；这组角色专属 PDO 创建和完整关系枚举尚未复刻。
 - 子 PDO 经 cancel-safe queue 转发旧协议支持的控制/控制扩展、设备/接口/端点描述符、vendor/class、status、feature、pipe reset、frame number、Microsoft feature descriptor、配置/接口选择、bulk/interrupt 和等时 URB。`RESET_PORT`/`CYCLE_PORT` 也映射到旧 BEGIN/END 协议。
 - 配置/接口选择会校验当前配置。Pipe 和 interface 句柄带有代际信息，避免 alternate setting 切换后旧句柄误指向新端点。每个子 PDO 最多允许 256 个事务、总计最多 64 MiB 事务缓冲区。

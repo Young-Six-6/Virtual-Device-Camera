@@ -501,6 +501,25 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
         XusbCompleteIrp(Irp, STATUS_INVALID_DEVICE_STATE, 0);
         return STATUS_INVALID_DEVICE_STATE;
     }
+    if (code == IOCTL_XUSB_QUERY_DRIVER_INFO) {
+        if (inputBytes != 0 || outputBytes < sizeof(xusb_driver_info_t) ||
+            Irp->AssociatedIrp.SystemBuffer == NULL) {
+            status = STATUS_BUFFER_TOO_SMALL;
+        } else {
+            const xusb_driver_info_t info = {
+                XUSB_DRIVER_INFO_SIGNATURE,
+                sizeof(xusb_driver_info_t),
+                XUSB_DRIVER_KIND_RECONSTRUCTED,
+                XUSB_DRIVER_ABI_VERSION
+            };
+            RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer, &info, sizeof(info));
+            status = STATUS_SUCCESS;
+            information = sizeof(info);
+        }
+        IoReleaseRemoveLock(&parent->RemoveLock, Irp);
+        XusbCompleteIrp(Irp, status, information);
+        return status;
+    }
     if (code != IOCTL_PDO_ADD && code != IOCTL_PDO_REMOVE) {
         if (code == IOCTL_BEGIN_TRANS_USB_DATA || code == IOCTL_END_TRANS_USB_DATA) {
             PDEVICE_OBJECT childPdo = NULL;

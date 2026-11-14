@@ -12,3 +12,5 @@ C_ASSERT(sizeof(ioctl_usbtx_header_t) == 64);
 C_ASSERT(sizeof(iso_packet_t) == 12);
 C_ASSERT(FIELD_OFFSET(ioctl_pdo_create_t, device_id) == 20);
 C_ASSERT(sizeof(ioctl_pdo_create_t) == 1584);
+C_ASSERT(IOCTL_XUSB_QUERY_DRIVER_INFO == 0x226028);
+C_ASSERT(sizeof(xusb_driver_info_t) == 16);
