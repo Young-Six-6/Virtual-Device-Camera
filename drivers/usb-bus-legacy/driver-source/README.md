@@ -7,7 +7,7 @@
 | 原包角色 | 原包设备 ID | 重建版行为 | 默认安装包 |
 |---|---|---|---|
 | USB-only enumerator (0) | `root\*xusb_enumbus`；原二进制将其他未匹配 ID 也归入 role 0 | 应用控制接口；添加/移除子 PDO、BusRelations、事务队列 | 是 |
-| Root Hub (1) | `vFxsUSB\vRootHUB&Virtual&Fanxiushu` | Hub 与应用接口；基础子 PDO 枚举、Hub name、部分内部请求 | 是，应用接口替换 |
+| Root Hub (1) | `vFxsUSB\vRootHUB&Virtual&Fanxiushu` | Hub 与应用接口；基础子 PDO 枚举、Hub name、基础节点/能力/连接信息查询、部分内部请求 | 是，应用接口替换 |
 | Host Controller (2) | `PCI\VEN_37FA&DEV_FE09&SUBSYS_9976A077&REV_88` | 仅重建少数请求和 Root Hub PDO 查找 | 否，实验包 |
 | USB-tree enumerator (3) | `root\*xusb_tree` | 创建内部 Host Controller PDO | 否，实验包 |
 
@@ -15,9 +15,9 @@
 
 子 PDO 支持当前 UVC 活跃路径所需的控制/描述符/等时 URB，并将请求映射到旧用户态事务 ABI。`IRP_MN_QUERY_INTERFACE` 按旧二进制的布局提供 USBDI V0–V3，结构大小逐版校验；版本号、USB 2.0 标记和各回调结果与旧回调对齐。原版对应的 QueryBusTime/BusInformation/isochronous OUT 等回调本身就是失败 stub，新实现保留其返回状态。PDO 还处理设备文本、usage notification、ContainerID fallback 和移除状态；它声明不支持 Eject，由现有用户态 remove IOCTL 触发动态移除。PnP 查询停止、停止、取消停止、D3/D0 使用可恢复的事务 quiesce 状态：停止期间拒绝新 URB、取消挂起事务，START/D0 恢复接收；STOP 清空选中配置和 pipe 句柄。配置与接口选择会校验描述符；合成 pipe 句柄含代际信息。等时包边界和返回长度会校验。
 
-用户态在 PDO_ADD 中把上次返回的 BusAddress 作为建议值传回。新驱动会在该地址空闲时复用它，从而让同一摄像头断开/重连保持相同的 PnP instance ID；若地址仍被占用则重新分配。当前 ABI 没有设备序列号/稳定唯一 ID，驱动不伪造硬件 ContainerID，让 PnP 依据可移除设备能力生成容器 ID。
+用户态在 PDO_ADD 中把上次返回的 BusAddress 作为建议值传回。新驱动会在该地址空闲时复用它，从而让同一摄像头断开/重连保持相同的 PnP instance ID；若地址仍被占用则重新分配。地址分配遵循 USB 地址范围 1–127。当前 ABI 没有设备序列号/稳定唯一 ID，驱动不伪造硬件 ContainerID，让 PnP 依据可移除设备能力生成容器 ID。
 
-原二进制的四个角色均有对应源码分支和硬件 ID 识别，但这不代表四角色都能替代旧驱动。Host Controller 还不是完整 Usbport/UCX HCD；USB-tree 依赖该未完成角色；Root Hub 的 hub/port 内部请求也只覆盖已实现部分。因此默认包绑定 USB-only role 0，并包含用于更新旧应用控制接口提供者的 Root Hub role 1；Host Controller 和 USB-tree 隔离在实验包。当前用户态 handler 还未实现 bulk/interrupt 与 Microsoft OS feature descriptor 的完整处理。
+原二进制的四个角色均有对应源码分支和硬件 ID 识别，但这不代表四角色都能替代旧驱动。Host Controller 还不是完整 Usbport/UCX HCD；USB-tree 依赖该未完成角色。Root Hub 目前实现单端口节点描述符、能力、连接状态、设备描述符转发和 DriverKeyName 查询；EX_V2 连接信息、扩展状态和完整端口/电源行为仍未完整重建。因此默认包绑定 USB-only role 0，并包含用于更新旧应用控制接口提供者的 Root Hub role 1；Host Controller 和 USB-tree 隔离在实验包。当前用户态 handler 还未实现 bulk/interrupt 与 Microsoft OS feature descriptor 的完整处理。
 
 ## 安装包与构建
 

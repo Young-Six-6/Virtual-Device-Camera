@@ -504,6 +504,7 @@ static NTSTATUS XusbSelectConfiguration(
     Child->ConfigurationDescriptor = configuration;
     Child->ConfigurationLength = configurationLength;
     Child->ConfigurationHandle = configurationHandle;
+    Child->CurrentConfigurationValue = (UCHAR)configurationValue;
     Child->PipeCount = pipeCount;
     RtlCopyMemory(Child->Pipes, pipes, pipeCount * sizeof(pipes[0]));
     KeReleaseSpinLock(&Child->TransactionLock, oldIrql);
@@ -610,6 +611,7 @@ VOID XusbReleaseChildConfiguration(_Inout_ PXUSB_CHILD_EXTENSION Child)
     Child->ConfigurationDescriptor = NULL;
     Child->ConfigurationLength = 0;
     Child->ConfigurationHandle = 0;
+    Child->CurrentConfigurationValue = 0;
     Child->PipeCount = 0;
     RtlZeroMemory(Child->Pipes, sizeof(Child->Pipes));
     KeReleaseSpinLock(&Child->TransactionLock, oldIrql);
@@ -1715,6 +1717,21 @@ NTSTATUS XusbEndUsbTransaction(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Ir
                     ? EXCEPTION_EXECUTE_HANDLER
                     : EXCEPTION_CONTINUE_SEARCH) {
                     status = GetExceptionCode();
+                }
+            }
+            if (NT_SUCCESS(status) &&
+                transaction->UrbFunction == URB_FUNCTION_GET_DESCRIPTOR_FROM_DEVICE &&
+                transaction->Urb->UrbControlDescriptorRequest.DescriptorType ==
+                    USB_DEVICE_DESCRIPTOR_TYPE &&
+                actualLength >= sizeof(USB_DEVICE_DESCRIPTOR)) {
+                USB_DEVICE_DESCRIPTOR descriptor;
+                RtlCopyMemory(&descriptor, response->Data, sizeof(descriptor));
+                if (descriptor.bLength >= sizeof(descriptor) &&
+                    descriptor.bDescriptorType == USB_DEVICE_DESCRIPTOR_TYPE) {
+                    ExAcquireFastMutex(&child->ConfigurationMutex);
+                    child->DeviceDescriptor = descriptor;
+                    child->DeviceDescriptorValid = TRUE;
+                    ExReleaseFastMutex(&child->ConfigurationMutex);
                 }
             }
             if (NT_SUCCESS(status)) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ntddk.h>
+#include <usb.h>
 #include <wmilib.h>
 #include "xusb_abi.h"
 
@@ -9,6 +10,7 @@
 #define XUSB_FILE_SIGNATURE   'FXUX'
 #define XUSB_POOL_TAG         'sUXV'
 #define XUSB_MAX_PIPES        64
+#define XUSB_MAX_USB_ADDRESS  127
 
 typedef enum _XUSB_DEVICE_ROLE {
     XusbRoleUsbOnlyEnumerator = 0,
@@ -92,6 +94,9 @@ typedef struct _XUSB_CHILD_EXTENSION {
     PVOID ConfigurationDescriptor;
     ULONG ConfigurationLength;
     ULONG_PTR ConfigurationHandle;
+    USB_DEVICE_DESCRIPTOR DeviceDescriptor;
+    BOOLEAN DeviceDescriptorValid;
+    UCHAR CurrentConfigurationValue;
     ULONG HandleGeneration;
     ULONG PipeCount;
     XUSB_PIPE_ENTRY Pipes[XUSB_MAX_PIPES];

@@ -39,10 +39,18 @@ if (-not $DevConPath -or -not (Test-Path -LiteralPath $DevConPath)) {
 }
 
 if ($PSCmdlet.ParameterSetName -eq 'Remove') {
-    & $DevConPath remove $hardwareId
-    if ($LASTEXITCODE -ne 0) {
-        throw "DevCon remove failed with exit code $LASTEXITCODE"
+    $matchingDevices = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.InstanceId.StartsWith('ROOT\*XUSB_ENUMBUS', [StringComparison]::OrdinalIgnoreCase) -or
+            $_.InstanceId.StartsWith('VFXSUSB\VROOTHUB&VIRTUAL&FANXIUSHU', [StringComparison]::OrdinalIgnoreCase)
+        })
+    foreach ($device in $matchingDevices) {
+        & $DevConPath remove $device.InstanceId
+        if ($LASTEXITCODE -ne 0) {
+            throw "DevCon could not remove device '$($device.InstanceId)' (exit code $LASTEXITCODE)"
+        }
     }
+    Write-Output "Removed $($matchingDevices.Count) reconstructed USB device instance(s). Driver Store packages were left installed."
     return
 }
 

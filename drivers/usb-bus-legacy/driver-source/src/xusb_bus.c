@@ -3,11 +3,216 @@
 #include <wdmguid.h>
 #include <usb.h>
 #include <usbioctl.h>
+#include <usbdlib.h>
 #include <usbbusif.h>
 #include <ntstrsafe.h>
 #include "xusb_driver.h"
 
 IO_COMPLETION_ROUTINE XusbReleaseControlRemoveLock;
+
+_IRQL_requires_(PASSIVE_LEVEL)
+static NTSTATUS XusbHandleRootHubDescriptorRequest(
+    _In_ PXUSB_PARENT_EXTENSION Parent,
+    _Inout_ PIRP Irp,
+    _In_ ULONG InputBytes,
+    _In_ ULONG OutputBytes,
+    _Out_ PULONG_PTR Information)
+{
+    PUSB_DESCRIPTOR_REQUEST request = (PUSB_DESCRIPTOR_REQUEST)Irp->AssociatedIrp.SystemBuffer;
+    const ULONG requestHeaderBytes = FIELD_OFFSET(USB_DESCRIPTOR_REQUEST, Data);
+    ULONG transferLength;
+    PDEVICE_OBJECT childPdo = NULL;
+    PDEVICE_OBJECT childStack = NULL;
+    PLIST_ENTRY entry;
+    URB urb;
+    IO_STATUS_BLOCK ioStatus;
+    KEVENT completionEvent;
+    PIRP requestIrp;
+    LARGE_INTEGER timeout;
+    NTSTATUS status;
+
+    *Information = 0;
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || request == NULL ||
+        InputBytes < requestHeaderBytes ||
+        OutputBytes < requestHeaderBytes || request->ConnectionIndex != 1) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (request->SetupPacket.bmRequest != 0x80 || request->SetupPacket.bRequest != 0x06) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    transferLength = request->SetupPacket.wLength;
+    if (transferLength > OutputBytes - requestHeaderBytes) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    ExAcquireFastMutex(&Parent->ChildMutex);
+    for (entry = Parent->Children.Flink;
+        entry != &Parent->Children;
+        entry = entry->Flink) {
+        PXUSB_CHILD_EXTENSION child = CONTAINING_RECORD(entry, XUSB_CHILD_EXTENSION, Link);
+        if (child->Present && !child->Removed && !child->Internal) {
+            childPdo = child->Self;
+            ObReferenceObject(childPdo);
+            break;
+        }
+    }
+    ExReleaseFastMutex(&Parent->ChildMutex);
+    if (childPdo == NULL) {
+        return STATUS_DEVICE_NOT_CONNECTED;
+    }
+
+    childStack = IoGetAttachedDeviceReference(childPdo);
+    if (childStack == NULL) {
+        ObDereferenceObject(childPdo);
+        return STATUS_DEVICE_NOT_CONNECTED;
+    }
+    RtlZeroMemory(&urb, sizeof(urb));
+    UsbBuildGetDescriptorRequest(
+        &urb,
+        sizeof(urb.UrbControlDescriptorRequest),
+        (UCHAR)(request->SetupPacket.wValue >> 8),
+        (UCHAR)request->SetupPacket.wValue,
+        request->SetupPacket.wIndex,
+        request->Data,
+        NULL,
+        transferLength,
+        NULL);
+
+    KeInitializeEvent(&completionEvent, NotificationEvent, FALSE);
+    requestIrp = IoBuildDeviceIoControlRequest(
+        IOCTL_INTERNAL_USB_SUBMIT_URB,
+        childStack,
+        NULL,
+        0,
+        NULL,
+        0,
+        TRUE,
+        &completionEvent,
+        &ioStatus);
+    if (requestIrp == NULL) {
+        ObDereferenceObject(childStack);
+        ObDereferenceObject(childPdo);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    IoGetNextIrpStackLocation(requestIrp)->Parameters.Others.Argument1 = &urb;
+    status = IoCallDriver(childStack, requestIrp);
+    if (status == STATUS_PENDING) {
+        timeout.QuadPart = -5LL * 10 * 1000 * 1000;
+        status = KeWaitForSingleObject(
+            &completionEvent,
+            Executive,
+            KernelMode,
+            FALSE,
+            &timeout);
+        if (status == STATUS_TIMEOUT) {
+            (VOID)IoCancelIrp(requestIrp);
+            KeWaitForSingleObject(&completionEvent, Executive, KernelMode, FALSE, NULL);
+            status = STATUS_IO_TIMEOUT;
+        } else {
+            status = ioStatus.Status;
+        }
+    }
+    if (NT_SUCCESS(status) && !USBD_SUCCESS(urb.UrbHeader.Status)) {
+        status = STATUS_UNSUCCESSFUL;
+    }
+    if (NT_SUCCESS(status)) {
+        ULONG actualLength = urb.UrbControlDescriptorRequest.TransferBufferLength;
+        if (actualLength > transferLength) {
+            status = STATUS_DATA_ERROR;
+        } else {
+            *Information = requestHeaderBytes + actualLength;
+        }
+    }
+    ObDereferenceObject(childStack);
+    ObDereferenceObject(childPdo);
+    return status;
+}
+
+_IRQL_requires_(PASSIVE_LEVEL)
+static NTSTATUS XusbHandleRootHubDriverKeyName(
+    _In_ PXUSB_PARENT_EXTENSION Parent,
+    _Inout_ PIRP Irp,
+    _In_ ULONG InputBytes,
+    _In_ ULONG OutputBytes,
+    _Out_ PULONG_PTR Information)
+{
+    PUSB_NODE_CONNECTION_DRIVERKEY_NAME request =
+        (PUSB_NODE_CONNECTION_DRIVERKEY_NAME)Irp->AssociatedIrp.SystemBuffer;
+    const ULONG headerBytes = FIELD_OFFSET(USB_NODE_CONNECTION_DRIVERKEY_NAME, DriverKeyName);
+    PDEVICE_OBJECT childPdo = NULL;
+    PLIST_ENTRY entry;
+    ULONG propertyBytes = 0;
+    PWSTR propertyBuffer = NULL;
+    NTSTATUS status;
+
+    *Information = 0;
+    if (KeGetCurrentIrql() != PASSIVE_LEVEL || request == NULL ||
+        InputBytes < sizeof(ULONG) || OutputBytes < headerBytes) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (request->ConnectionIndex != 1) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    ExAcquireFastMutex(&Parent->ChildMutex);
+    for (entry = Parent->Children.Flink;
+        entry != &Parent->Children;
+        entry = entry->Flink) {
+        PXUSB_CHILD_EXTENSION child = CONTAINING_RECORD(entry, XUSB_CHILD_EXTENSION, Link);
+        if (child->Present && !child->Removed && !child->Internal) {
+            childPdo = child->Self;
+            ObReferenceObject(childPdo);
+            break;
+        }
+    }
+    ExReleaseFastMutex(&Parent->ChildMutex);
+    if (childPdo == NULL) {
+        return STATUS_DEVICE_NOT_CONNECTED;
+    }
+
+    status = IoGetDeviceProperty(
+        childPdo,
+        DevicePropertyDriverKeyName,
+        0,
+        NULL,
+        &propertyBytes);
+    if (status != STATUS_BUFFER_TOO_SMALL || propertyBytes < sizeof(WCHAR) ||
+        (propertyBytes % sizeof(WCHAR)) != 0 || propertyBytes > MAXUSHORT) {
+        ObDereferenceObject(childPdo);
+        return NT_SUCCESS(status) ? STATUS_DATA_ERROR : status;
+    }
+    {
+        propertyBuffer = ExAllocatePool2(POOL_FLAG_PAGED, propertyBytes, XUSB_POOL_TAG);
+        if (propertyBuffer == NULL) {
+            status = STATUS_INSUFFICIENT_RESOURCES;
+        } else {
+            status = IoGetDeviceProperty(
+                childPdo,
+                DevicePropertyDriverKeyName,
+                propertyBytes,
+                propertyBuffer,
+                &propertyBytes);
+        }
+    }
+    ObDereferenceObject(childPdo);
+    if (!NT_SUCCESS(status)) {
+        if (propertyBuffer != NULL) {
+            ExFreePoolWithTag(propertyBuffer, XUSB_POOL_TAG);
+        }
+        return status;
+    }
+
+    request->ActualLength = headerBytes + propertyBytes;
+    if (OutputBytes < request->ActualLength) {
+        *Information = headerBytes;
+        status = STATUS_BUFFER_TOO_SMALL;
+    } else {
+        RtlCopyMemory(request->DriverKeyName, propertyBuffer, propertyBytes);
+        *Information = request->ActualLength;
+        status = STATUS_SUCCESS;
+    }
+    ExFreePoolWithTag(propertyBuffer, XUSB_POOL_TAG);
+    return status;
+}
 
 static VOID USB_BUSIFFN XusbUsbdInterfaceReference(_In_ PVOID BusContext)
 {
@@ -582,12 +787,12 @@ static LONG XusbAllocateBusAddress(
 {
     ULONG candidate;
 
-    if (RequestedAddress > 0 &&
+    if (RequestedAddress > 0 && RequestedAddress <= XUSB_MAX_USB_ADDRESS &&
         !XusbIsBusAddressInUse(Parent, (ULONG)RequestedAddress)) {
         return RequestedAddress;
     }
 
-    for (candidate = 1; candidate <= MAXLONG; ++candidate) {
+    for (candidate = 1; candidate <= XUSB_MAX_USB_ADDRESS; ++candidate) {
         if (!XusbIsBusAddressInUse(Parent, candidate)) {
             return (LONG)candidate;
         }
@@ -920,6 +1125,200 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
     }
     if (code == IOCTL_INTERNAL_USB_GET_HUB_NAME && parent->Role == XusbRoleRootHub) {
         status = XusbReturnHubName(parent, Irp, &information);
+        IoReleaseRemoveLock(&parent->RemoveLock, Irp);
+        XusbCompleteIrp(Irp, status, information);
+        return status;
+    }
+    if (parent->Role == XusbRoleRootHub &&
+        (code == IOCTL_USB_GET_NODE_INFORMATION ||
+            code == IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION ||
+            code == IOCTL_USB_GET_HUB_CAPABILITIES ||
+            code == IOCTL_USB_GET_HUB_CAPABILITIES_EX ||
+            code == IOCTL_USB_GET_NODE_CONNECTION_NAME ||
+            code == IOCTL_USB_GET_NODE_CONNECTION_DRIVERKEY_NAME ||
+            code == IOCTL_USB_GET_NODE_CONNECTION_ATTRIBUTES ||
+            code == IOCTL_USB_GET_NODE_CONNECTION_INFORMATION ||
+            code == IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX)) {
+        PVOID buffer = Irp->AssociatedIrp.SystemBuffer;
+        if (code == IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION) {
+            status = XusbHandleRootHubDescriptorRequest(
+                parent,
+                Irp,
+                inputBytes,
+                outputBytes,
+                &information);
+        } else if (code == IOCTL_USB_GET_NODE_CONNECTION_DRIVERKEY_NAME) {
+            status = XusbHandleRootHubDriverKeyName(
+                parent,
+                Irp,
+                inputBytes,
+                outputBytes,
+                &information);
+        } else if (code == IOCTL_USB_GET_NODE_CONNECTION_NAME) {
+            if (buffer == NULL || inputBytes < sizeof(ULONG) ||
+                outputBytes < FIELD_OFFSET(USB_NODE_CONNECTION_NAME, NodeName) + sizeof(WCHAR)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PUSB_NODE_CONNECTION_NAME connectionName =
+                    (PUSB_NODE_CONNECTION_NAME)buffer;
+                if (connectionName->ConnectionIndex != 1) {
+                    status = STATUS_INVALID_PARAMETER;
+                } else {
+                    connectionName->ActualLength = 0;
+                    connectionName->NodeName[0] = UNICODE_NULL;
+                    information = FIELD_OFFSET(USB_NODE_CONNECTION_NAME, NodeName) + sizeof(WCHAR);
+                    status = STATUS_SUCCESS;
+                }
+            }
+        } else if (buffer == NULL) {
+            status = STATUS_INVALID_PARAMETER;
+        } else if (code == IOCTL_USB_GET_NODE_INFORMATION) {
+            if (inputBytes < sizeof(USB_NODE_INFORMATION) ||
+                outputBytes < sizeof(USB_NODE_INFORMATION)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PUSB_NODE_INFORMATION node = (PUSB_NODE_INFORMATION)buffer;
+                if (node->NodeType != UsbHub) {
+                    status = STATUS_INVALID_PARAMETER;
+                } else {
+                    RtlZeroMemory(node, sizeof(*node));
+                    node->NodeType = UsbHub;
+                    node->u.HubInformation.HubDescriptor.bDescriptorLength = 9;
+                    node->u.HubInformation.HubDescriptor.bDescriptorType =
+                        USB_20_HUB_DESCRIPTOR_TYPE;
+                    node->u.HubInformation.HubDescriptor.bNumberOfPorts = 1;
+                    node->u.HubInformation.HubDescriptor.wHubCharacteristics = 0x0009;
+                    node->u.HubInformation.HubDescriptor.bPowerOnToPowerGood = 1;
+                    node->u.HubInformation.HubDescriptor.bRemoveAndPowerMask[0] = 0x01;
+                    node->u.HubInformation.HubDescriptor.bRemoveAndPowerMask[1] = 0x03;
+                    node->u.HubInformation.HubIsBusPowered = FALSE;
+                    information = sizeof(*node);
+                    status = STATUS_SUCCESS;
+                }
+            }
+        } else if (code == IOCTL_USB_GET_HUB_CAPABILITIES) {
+            if (outputBytes < sizeof(USB_HUB_CAPABILITIES)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                USB_HUB_CAPABILITIES capabilities = { 0 };
+                capabilities.HubIs2xCapable = 1;
+                RtlCopyMemory(buffer, &capabilities, sizeof(capabilities));
+                information = sizeof(capabilities);
+                status = STATUS_SUCCESS;
+            }
+        } else if (code == IOCTL_USB_GET_HUB_CAPABILITIES_EX) {
+            if (outputBytes < sizeof(USB_HUB_CAPABILITIES_EX)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                USB_HUB_CAPABILITIES_EX capabilities = { 0 };
+                capabilities.CapabilityFlags.HubIsHighSpeedCapable = 1;
+                capabilities.CapabilityFlags.HubIsHighSpeed = 1;
+                capabilities.CapabilityFlags.HubIsRoot = 1;
+                RtlCopyMemory(buffer, &capabilities, sizeof(capabilities));
+                information = sizeof(capabilities);
+                status = STATUS_SUCCESS;
+            }
+        } else if (code == IOCTL_USB_GET_NODE_CONNECTION_ATTRIBUTES) {
+            if (inputBytes < sizeof(USB_NODE_CONNECTION_ATTRIBUTES) ||
+                outputBytes < sizeof(USB_NODE_CONNECTION_ATTRIBUTES)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PUSB_NODE_CONNECTION_ATTRIBUTES attributes =
+                    (PUSB_NODE_CONNECTION_ATTRIBUTES)buffer;
+                ULONG index = attributes->ConnectionIndex;
+                BOOLEAN connected = FALSE;
+                PLIST_ENTRY entry;
+                if (index != 1) {
+                    status = STATUS_INVALID_PARAMETER;
+                } else {
+                    ExAcquireFastMutex(&parent->ChildMutex);
+                    for (entry = parent->Children.Flink;
+                        entry != &parent->Children;
+                        entry = entry->Flink) {
+                        PXUSB_CHILD_EXTENSION child = CONTAINING_RECORD(
+                            entry, XUSB_CHILD_EXTENSION, Link);
+                        if (child->Present && !child->Removed && !child->Internal) {
+                            connected = TRUE;
+                            break;
+                        }
+                    }
+                    ExReleaseFastMutex(&parent->ChildMutex);
+                    attributes->ConnectionStatus = connected
+                        ? DeviceConnected
+                        : NoDeviceConnected;
+                    attributes->PortAttributes = 0;
+                    information = sizeof(*attributes);
+                    status = STATUS_SUCCESS;
+                }
+            }
+        } else {
+            ULONG index;
+            BOOLEAN connected = FALSE;
+            USHORT deviceAddress = 0;
+            USB_DEVICE_DESCRIPTOR descriptor = { 0 };
+            UCHAR configurationValue = 0;
+            PLIST_ENTRY entry;
+            ULONG requiredBytes = code == IOCTL_USB_GET_NODE_CONNECTION_INFORMATION
+                ? FIELD_OFFSET(USB_NODE_CONNECTION_INFORMATION, PipeList)
+                : FIELD_OFFSET(USB_NODE_CONNECTION_INFORMATION_EX, PipeList);
+
+            if (inputBytes < sizeof(ULONG) || outputBytes < requiredBytes) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                index = *(PULONG)buffer;
+                if (index != 1) {
+                    status = STATUS_INVALID_PARAMETER;
+                } else {
+                    ExAcquireFastMutex(&parent->ChildMutex);
+                    for (entry = parent->Children.Flink;
+                        entry != &parent->Children;
+                        entry = entry->Flink) {
+                        PXUSB_CHILD_EXTENSION child = CONTAINING_RECORD(
+                            entry, XUSB_CHILD_EXTENSION, Link);
+                        if (child->Present && !child->Removed && !child->Internal) {
+                            ExAcquireFastMutex(&child->ConfigurationMutex);
+                            if (child->DeviceDescriptorValid) {
+                                descriptor = child->DeviceDescriptor;
+                            }
+                            configurationValue = child->CurrentConfigurationValue;
+                            deviceAddress = (USHORT)child->BusAddress;
+                            connected = TRUE;
+                            ExReleaseFastMutex(&child->ConfigurationMutex);
+                            break;
+                        }
+                    }
+                    ExReleaseFastMutex(&parent->ChildMutex);
+                    if (code == IOCTL_USB_GET_NODE_CONNECTION_INFORMATION) {
+                        PUSB_NODE_CONNECTION_INFORMATION connection =
+                            (PUSB_NODE_CONNECTION_INFORMATION)buffer;
+                        connection->DeviceDescriptor = descriptor;
+                        connection->CurrentConfigurationValue = configurationValue;
+                        connection->LowSpeed = FALSE;
+                        connection->DeviceIsHub = FALSE;
+                        connection->DeviceAddress = deviceAddress;
+                        connection->NumberOfOpenPipes = 0;
+                        connection->ConnectionStatus = connected
+                            ? DeviceConnected
+                            : NoDeviceConnected;
+                        information = requiredBytes;
+                    } else {
+                        PUSB_NODE_CONNECTION_INFORMATION_EX connection =
+                            (PUSB_NODE_CONNECTION_INFORMATION_EX)buffer;
+                        connection->DeviceDescriptor = descriptor;
+                        connection->CurrentConfigurationValue = configurationValue;
+                        connection->Speed = connected ? UsbHighSpeed : UsbLowSpeed;
+                        connection->DeviceIsHub = FALSE;
+                        connection->DeviceAddress = deviceAddress;
+                        connection->NumberOfOpenPipes = 0;
+                        connection->ConnectionStatus = connected
+                            ? DeviceConnected
+                            : NoDeviceConnected;
+                        information = requiredBytes;
+                    }
+                    status = STATUS_SUCCESS;
+                }
+            }
+        }
         IoReleaseRemoveLock(&parent->RemoveLock, Irp);
         XusbCompleteIrp(Irp, status, information);
         return status;
