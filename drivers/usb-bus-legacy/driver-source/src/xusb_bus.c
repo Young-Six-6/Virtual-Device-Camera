@@ -108,7 +108,7 @@ static NTSTATUS XusbHandleRootHubDescriptorRequest(
         if (status == STATUS_TIMEOUT) {
             (VOID)IoCancelIrp(requestIrp);
             KeWaitForSingleObject(&completionEvent, Executive, KernelMode, FALSE, NULL);
-            status = STATUS_IO_TIMEOUT;
+            status = NT_SUCCESS(ioStatus.Status) ? ioStatus.Status : STATUS_IO_TIMEOUT;
         } else {
             status = ioStatus.Status;
         }
@@ -1248,17 +1248,12 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
                 PUSB_NODE_CONNECTION_INFORMATION_EX_V2 connectionV2 =
                     (PUSB_NODE_CONNECTION_INFORMATION_EX_V2)buffer;
                 if (connectionV2->ConnectionIndex != 1 ||
-                    connectionV2->Length < sizeof(*connectionV2)) {
+                    connectionV2->Length < sizeof(*connectionV2) ||
+                    !connectionV2->SupportedUsbProtocols.Usb300) {
                     status = STATUS_INVALID_PARAMETER;
                 } else {
-                    ULONG requestedProtocols = connectionV2->SupportedUsbProtocols.ul;
-                    RtlZeroMemory(&connectionV2->SupportedUsbProtocols, sizeof(connectionV2->SupportedUsbProtocols));
-                    if ((requestedProtocols & 0x1) != 0) {
-                        connectionV2->SupportedUsbProtocols.Usb110 = 1;
-                    }
-                    if ((requestedProtocols & 0x2) != 0) {
-                        connectionV2->SupportedUsbProtocols.Usb200 = 1;
-                    }
+                    /* The request requires Usb300; this port reports USB 1.x/2.0 support. */
+                    connectionV2->SupportedUsbProtocols.ul = 0x3;
                     RtlZeroMemory(&connectionV2->Flags, sizeof(connectionV2->Flags));
                     information = sizeof(*connectionV2);
                     status = STATUS_SUCCESS;
@@ -1301,6 +1296,8 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
             ULONG index;
             BOOLEAN connected = FALSE;
             USHORT deviceAddress = 0;
+            PXUSB_PIPE_ENTRY pipes = NULL;
+            ULONG pipeCount = 0;
             USB_DEVICE_DESCRIPTOR descriptor = { 0 };
             UCHAR configurationValue = 0;
             PLIST_ENTRY entry;
@@ -1308,13 +1305,21 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
                 ? FIELD_OFFSET(USB_NODE_CONNECTION_INFORMATION, PipeList)
                 : FIELD_OFFSET(USB_NODE_CONNECTION_INFORMATION_EX, PipeList);
 
-            if (inputBytes < sizeof(ULONG) || outputBytes < requiredBytes) {
+            if (inputBytes < requiredBytes || outputBytes < requiredBytes) {
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
                 index = *(PULONG)buffer;
                 if (index != 1) {
                     status = STATUS_INVALID_PARAMETER;
                 } else {
+                    pipes = ExAllocatePool2(
+                        POOL_FLAG_NON_PAGED,
+                        XUSB_MAX_PIPES * sizeof(*pipes),
+                        'pUXV');
+                    if (pipes == NULL) {
+                        status = STATUS_INSUFFICIENT_RESOURCES;
+                    } else {
+                    RtlZeroMemory(pipes, XUSB_MAX_PIPES * sizeof(*pipes));
                     ExAcquireFastMutex(&parent->ChildMutex);
                     for (entry = parent->Children.Flink;
                         entry != &parent->Children;
@@ -1328,6 +1333,16 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
                             }
                             configurationValue = child->CurrentConfigurationValue;
                             deviceAddress = (USHORT)child->BusAddress;
+                            {
+                                KIRQL oldIrql;
+                                KeAcquireSpinLock(&child->TransactionLock, &oldIrql);
+                                pipeCount = child->PipeCount;
+                                if (pipeCount > XUSB_MAX_PIPES) {
+                                    pipeCount = XUSB_MAX_PIPES;
+                                }
+                                RtlCopyMemory(pipes, child->Pipes, pipeCount * sizeof(pipes[0]));
+                                KeReleaseSpinLock(&child->TransactionLock, oldIrql);
+                            }
                             connected = TRUE;
                             ExReleaseFastMutex(&child->ConfigurationMutex);
                             break;
@@ -1342,11 +1357,10 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
                         connection->LowSpeed = FALSE;
                         connection->DeviceIsHub = FALSE;
                         connection->DeviceAddress = deviceAddress;
-                        connection->NumberOfOpenPipes = 0;
+                        connection->NumberOfOpenPipes = pipeCount;
                         connection->ConnectionStatus = connected
                             ? DeviceConnected
                             : NoDeviceConnected;
-                        information = requiredBytes;
                     } else {
                         PUSB_NODE_CONNECTION_INFORMATION_EX connection =
                             (PUSB_NODE_CONNECTION_INFORMATION_EX)buffer;
@@ -1355,13 +1369,44 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
                         connection->Speed = connected ? UsbHighSpeed : UsbLowSpeed;
                         connection->DeviceIsHub = FALSE;
                         connection->DeviceAddress = deviceAddress;
-                        connection->NumberOfOpenPipes = 0;
+                        connection->NumberOfOpenPipes = pipeCount;
                         connection->ConnectionStatus = connected
                             ? DeviceConnected
                             : NoDeviceConnected;
-                        information = requiredBytes;
                     }
-                    status = STATUS_SUCCESS;
+                    if (pipeCount >
+                        (MAXULONG - requiredBytes) / sizeof(USB_PIPE_INFO)) {
+                        status = STATUS_INTEGER_OVERFLOW;
+                    } else {
+                        ULONG fullLength = requiredBytes + pipeCount * sizeof(USB_PIPE_INFO);
+                        ULONG entriesToCopy = outputBytes < fullLength
+                            ? (outputBytes - requiredBytes) / sizeof(USB_PIPE_INFO)
+                            : pipeCount;
+                        PUSB_PIPE_INFO pipeList = code == IOCTL_USB_GET_NODE_CONNECTION_INFORMATION
+                            ? ((PUSB_NODE_CONNECTION_INFORMATION)buffer)->PipeList
+                            : ((PUSB_NODE_CONNECTION_INFORMATION_EX)buffer)->PipeList;
+                        for (ULONG pipeIndex = 0; pipeIndex < entriesToCopy; ++pipeIndex) {
+                            pipeList[pipeIndex].EndpointDescriptor.bLength =
+                                sizeof(USB_ENDPOINT_DESCRIPTOR);
+                            pipeList[pipeIndex].EndpointDescriptor.bDescriptorType =
+                                USB_ENDPOINT_DESCRIPTOR_TYPE;
+                            pipeList[pipeIndex].EndpointDescriptor.bEndpointAddress =
+                                pipes[pipeIndex].EndpointAddress;
+                            pipeList[pipeIndex].EndpointDescriptor.bmAttributes =
+                                pipes[pipeIndex].PipeType;
+                            pipeList[pipeIndex].EndpointDescriptor.wMaxPacketSize =
+                                pipes[pipeIndex].MaximumPacketSize;
+                            pipeList[pipeIndex].EndpointDescriptor.bInterval =
+                                pipes[pipeIndex].Interval;
+                            pipeList[pipeIndex].ScheduleOffset = 0;
+                        }
+                        information = requiredBytes + entriesToCopy * sizeof(USB_PIPE_INFO);
+                        status = entriesToCopy == pipeCount
+                            ? STATUS_SUCCESS
+                            : STATUS_BUFFER_TOO_SMALL;
+                    }
+                    ExFreePoolWithTag(pipes, 'pUXV');
+                    }
                 }
             }
         }
