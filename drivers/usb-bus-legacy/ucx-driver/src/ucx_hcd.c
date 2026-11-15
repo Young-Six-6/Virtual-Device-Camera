@@ -159,7 +159,8 @@ static VOID VhcdFinalizeSlotIfQuiescent(_In_ LONG SlotIndex);
 static VOID VhcdUsbDeviceCleanup(_In_ WDFOBJECT Object);
 static VOID VhcdCancelSlotTransactions(_In_ LONG SlotIndex, _In_ UCHAR EndpointAddress, _In_ BOOLEAN AllEndpoints);
 static VOID VhcdCancelEndpointTransfers(_In_ UCXENDPOINT Endpoint);
-static NTSTATUS VhcdQueuePortResetNotification(_In_ LONG SlotIndex, _In_ LONG ResetType);
+static NTSTATUS VhcdQueuePortResetNotification(_In_ LONG SlotIndex, _In_ LONG ResetType,
+                                               _In_ BOOLEAN AllowPoweredOffPort);
 /* UCX URB queue requests must complete on a separate DPC, even on fast failures. */
 static VOID VhcdCompleteRequestDpc(_In_ PKDPC Dpc, _In_opt_ PVOID DeferredContext,
                                    _In_opt_ PVOID SystemArgument1, _In_opt_ PVOID SystemArgument2);
@@ -401,9 +402,20 @@ VOID VhcdEvtUsbDeviceDisable(UCXCONTROLLER C, WDFREQUEST R) { UNREFERENCED_PARAM
 VOID VhcdEvtUsbDeviceReset(UCXCONTROLLER C, WDFREQUEST R)
 {
     PUSBDEVICE_RESET request = (PUSBDEVICE_RESET)VhcdRequestArgument1(R);
+    PVHCD_USBDEVICE_CONTEXT deviceContext;
+    NTSTATUS status;
     UNREFERENCED_PARAMETER(C);
-    if (request == NULL || request->Size < sizeof(*request)) { WdfRequestComplete(R, STATUS_INVALID_PARAMETER); return; }
-    WdfRequestComplete(R, STATUS_SUCCESS);
+    if (request == NULL || request->Size < sizeof(*request) || request->UsbDevice == WDF_NO_HANDLE) {
+        WdfRequestComplete(R, STATUS_INVALID_PARAMETER);
+        return;
+    }
+    deviceContext = VhcdGetUsbDeviceContext(request->UsbDevice);
+    if (deviceContext == NULL || deviceContext->SlotIndex >= VHCD_MAX_PORTS) {
+        WdfRequestComplete(R, STATUS_INVALID_DEVICE_STATE);
+        return;
+    }
+    status = VhcdQueuePortResetNotification((LONG)deviceContext->SlotIndex, 1, FALSE);
+    WdfRequestComplete(R, status);
 }
 VOID VhcdEvtUsbDeviceAddress(UCXCONTROLLER C, WDFREQUEST R)
 {
@@ -535,7 +547,7 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
         else supported = FALSE;
         WdfSpinLockRelease(gSlotLock);
         if (resetRequested && value == 4) {
-            NTSTATUS resetStatus = VhcdQueuePortResetNotification(i, 1);
+            NTSTATUS resetStatus = VhcdQueuePortResetNotification(i, 1, FALSE);
             if (NT_SUCCESS(resetStatus)) {
                 WdfSpinLockAcquire(gSlotLock);
                 if (gSlots[i].Allocated && gSlots[i].Present && !gPortPowerOff[i]) {
@@ -559,7 +571,15 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
         urb->UrbControlTransfer.TransferBufferLength = 0;
         if (!supported && urb->UrbHeader.Status == USBD_STATUS_SUCCESS)
             urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
-        if (resetRequested && value == 8) VhcdCancelSlotTransactions(i, 0, TRUE);
+        if (resetRequested && value == 8) {
+            NTSTATUS notificationStatus;
+            VhcdCancelSlotTransactions(i, 0, TRUE);
+            notificationStatus = VhcdQueuePortResetNotification(i, 1, TRUE);
+            if (!NT_SUCCESS(notificationStatus))
+                urb->UrbHeader.Status = notificationStatus == STATUS_DEVICE_NOT_CONNECTED
+                    ? USBD_STATUS_DEVICE_GONE
+                    : USBD_STATUS_INSUFFICIENT_RESOURCES;
+        }
     } else {
         urb->UrbHeader.Status = USBD_STATUS_INVALID_URB_FUNCTION;
     }
@@ -679,7 +699,8 @@ static VOID VhcdQueueTransactionCancellation(PVHCD_TRANSACTION Transaction)
     KeInsertQueueDpc(&Transaction->CancelDpc, NULL, NULL);
 }
 
-static NTSTATUS VhcdQueuePortResetNotification(LONG SlotIndex, LONG ResetType)
+static NTSTATUS VhcdQueuePortResetNotification(LONG SlotIndex, LONG ResetType,
+                                                BOOLEAN AllowPoweredOffPort)
 {
     PVHCD_TRANSACTION transaction;
     PKSEMAPHORE semaphore;
@@ -707,7 +728,8 @@ static NTSTATUS VhcdQueuePortResetNotification(LONG SlotIndex, LONG ResetType)
     inner->Data.Reset.Type = ResetType;
 
     WdfSpinLockAcquire(gSlotLock);
-    if (!gSlots[SlotIndex].Allocated || !gSlots[SlotIndex].Present || gPortPowerOff[SlotIndex]) {
+    if (!gSlots[SlotIndex].Allocated || !gSlots[SlotIndex].Present ||
+        (gPortPowerOff[SlotIndex] && !AllowPoweredOffPort)) {
         WdfSpinLockRelease(gSlotLock);
         ExFreePoolWithTag(transaction, VHCD_TX_SIGNATURE);
         return STATUS_DEVICE_NOT_CONNECTED;

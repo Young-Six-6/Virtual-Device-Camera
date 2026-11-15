@@ -46,7 +46,9 @@ a disconnect/reconnect, which may provide the needed cycle semantics without emi
 wire reset type 2. The exact Windows hub-to-UCX callback sequence remains unverified.
 The root hub advertises individual port power switching and tracks `PORT_POWER`
 independently of virtual-device slot allocation. Clearing power hides the connection
-and cancels outstanding transactions; restoring power reports a fresh connection.
+and cancels outstanding transactions. The HCD sends the unchanged user-mode camera a
+wire reset notification so it clears its current video-frame position; restoring power
+reports a fresh connection. UCX device-reset callbacks also send the wire reset notice.
 This models the root-hub request but does not prove Windows maps the legacy cycle-port
 IOCTL to that sequence.
 The frozen ABI carries a 40-byte operation record and payload rather than an arbitrary

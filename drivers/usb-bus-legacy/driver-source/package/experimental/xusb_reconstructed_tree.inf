@@ -1,5 +1,6 @@
-; Experimental USB-tree role. It creates an internal virtual Host Controller,
-; whose protocol is not complete in this WDM reconstruction.
+; Role-3 USB-tree enumerator for the UCX replacement package. Its legacy WDM
+; host-controller protocol is incomplete; the packaged UCX role-2 driver supplies
+; the host-controller behavior for this deployment path.
 
 [Version]
 Signature = "$Windows NT$"

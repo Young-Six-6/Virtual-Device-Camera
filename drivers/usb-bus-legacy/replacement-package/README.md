@@ -23,9 +23,10 @@ semantics, but the exact Windows hub-to-UCX callback sequence has not been verif
 
 The root hub advertises individual port power switching and tracks `PORT_POWER`
 state independently of virtual-device slot allocation. Clearing port power hides
-the connection and cancels outstanding transactions; setting it again reports a
-fresh connection. This models the root-hub feature request itself, but does not
-establish that Windows maps the legacy internal cycle-port IOCTL to this sequence.
+the connection and cancels outstanding transactions. The user-mode camera receives a
+reset notification to clear its current frame position; setting power again reports a
+fresh connection. This models the root-hub feature request itself, but does not establish
+that Windows maps the legacy internal cycle-port IOCTL to this sequence.
 
 ## Build and stage
 
