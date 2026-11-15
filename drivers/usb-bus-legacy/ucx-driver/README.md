@@ -43,6 +43,11 @@ The reconstructed WDM source also maps `IOCTL_INTERNAL_USB_CYCLE_PORT` to wire r
 type 2. The UCX implementation currently emits type 1 for a root-port reset, but has no
 verified path that distinguishes and emits the legacy cycle operation. Full cycle-port
 compatibility is therefore not established.
+The root hub advertises individual port power switching and tracks `PORT_POWER`
+independently of virtual-device slot allocation. Clearing power hides the connection
+and cancels outstanding transactions; restoring power reports a fresh connection.
+This models the root-hub request but does not prove Windows maps the legacy cycle-port
+IOCTL to that sequence.
 The frozen ABI carries a 40-byte operation record and payload rather than an arbitrary
 raw URB, so unsupported URB types cannot be passed through unchanged.
 

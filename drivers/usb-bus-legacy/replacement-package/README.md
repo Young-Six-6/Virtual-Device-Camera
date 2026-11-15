@@ -20,6 +20,12 @@ Legacy `IOCTL_INTERNAL_USB_CYCLE_PORT` behavior is not yet proven in the UCX pat
 the new HCD emits the wire-level port-reset operation but does not yet distinguish a
 full port cycle from an ordinary reset.
 
+The root hub advertises individual port power switching and tracks `PORT_POWER`
+state independently of virtual-device slot allocation. Clearing port power hides
+the connection and cancels outstanding transactions; setting it again reports a
+fresh connection. This models the root-hub feature request itself, but does not
+establish that Windows maps the legacy internal cycle-port IOCTL to this sequence.
+
 ## Build and stage
 
 Run from an x64 Windows development machine with Visual Studio C++ tools, the
