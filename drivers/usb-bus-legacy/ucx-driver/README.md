@@ -39,10 +39,11 @@ wire types 1–6. The unchanged UVC handler intentionally stalls or ignores oper
 does not implement (including bulk data and Microsoft OS feature descriptors), matching
 the old user-mode behavior. No driver installation or Windows USB/UVC end-to-end runtime
 validation has been run.
-The reconstructed WDM source also maps `IOCTL_INTERNAL_USB_CYCLE_PORT` to wire reset
-type 2. The UCX implementation currently emits type 1 for a root-port reset, but has no
-verified path that distinguishes and emits the legacy cycle operation. Full cycle-port
-compatibility is therefore not established.
+The reconstructed WDM source maps `IOCTL_INTERNAL_USB_CYCLE_PORT` to wire reset type 2.
+That IOCTL targets the USB hub PDO; UCX-based operation is expected to expose the port
+state through root-hub callbacks instead. The new root hub models port-power off/on as
+a disconnect/reconnect, which may provide the needed cycle semantics without emitting
+wire reset type 2. The exact Windows hub-to-UCX callback sequence remains unverified.
 The root hub advertises individual port power switching and tracks `PORT_POWER`
 independently of virtual-device slot allocation. Clearing power hides the connection
 and cancels outstanding transactions; restoring power reports a fresh connection.

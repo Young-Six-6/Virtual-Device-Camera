@@ -81,6 +81,11 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VHCD_USER_IO_CONTEXT, VhcdGetUserIoContext)
 
 typedef struct _VHCD_TRANSFER_CONTEXT {
     PVOID Transaction;
+    KDPC CompletionDpc;
+    WDFREQUEST CompletionRequest;
+    PURB CompletionUrb;
+    NTSTATUS CompletionStatus;
+    USBD_STATUS CompletionUsbStatus;
 } VHCD_TRANSFER_CONTEXT, *PVHCD_TRANSFER_CONTEXT;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VHCD_TRANSFER_CONTEXT, VhcdGetTransferContext)
 
@@ -136,12 +141,6 @@ static WDFSPINLOCK gSlotLock;
 static ULONGLONG gTransactionBytes;
 static ULONG gTransactionCount;
 
-typedef struct _VHCD_CANCEL_DPC {
-    KDPC Dpc;
-    WDFREQUEST Request;
-    PURB Urb;
-} VHCD_CANCEL_DPC, *PVHCD_CANCEL_DPC;
-
 DRIVER_INITIALIZE DriverEntry;
 EVT_WDF_DRIVER_DEVICE_ADD VhcdEvtDeviceAdd;
 EVT_WDF_IO_IN_CALLER_CONTEXT VhcdEvtIoInCallerContext;
@@ -161,6 +160,11 @@ static VOID VhcdUsbDeviceCleanup(_In_ WDFOBJECT Object);
 static VOID VhcdCancelSlotTransactions(_In_ LONG SlotIndex, _In_ UCHAR EndpointAddress, _In_ BOOLEAN AllEndpoints);
 static VOID VhcdCancelEndpointTransfers(_In_ UCXENDPOINT Endpoint);
 static NTSTATUS VhcdQueuePortResetNotification(_In_ LONG SlotIndex, _In_ LONG ResetType);
+/* UCX URB queue requests must complete on a separate DPC, even on fast failures. */
+static VOID VhcdCompleteRequestDpc(_In_ PKDPC Dpc, _In_opt_ PVOID DeferredContext,
+                                   _In_opt_ PVOID SystemArgument1, _In_opt_ PVOID SystemArgument2);
+static VOID VhcdCompleteRequestDeferred(_In_ WDFREQUEST Request, _In_opt_ PURB Urb,
+                                        _In_ NTSTATUS RequestStatus, _In_ USBD_STATUS UsbStatus);
 EVT_UCX_CONTROLLER_USBDEVICE_ADD VhcdEvtControllerUsbDeviceAdd;
 EVT_UCX_ROOTHUB_CONTROL_URB VhcdEvtRootHubControlUrb;
 EVT_UCX_ROOTHUB_INTERRUPT_TX VhcdEvtRootHubInterruptTx;
@@ -832,8 +836,11 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
     BOOLEAN isRead = FALSE, isIso = FALSE;
     USHORT function = Urb->UrbHeader.Function;
     PVHCD_TRANSACTION transaction;
+    PVHCD_TRANSFER_CONTEXT requestContext = VhcdGetTransferContext(Request);
     PKSEMAPHORE signalSemaphore = NULL;
     *OutTransaction = NULL;
+    if (requestContext == NULL) return STATUS_INVALID_DEVICE_STATE;
+    requestContext->Transaction = NULL;
     if (slot < 0 || slot >= VHCD_MAX_PORTS) return STATUS_INVALID_DEVICE_STATE;
 
     switch (function) {
@@ -1149,15 +1156,7 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
             RtlCopyMemory((PUCHAR)inner + sizeof(*inner) + metadataLength, transaction->TransferBuffer, transferLength);
         }
     }
-    {
-        WDF_OBJECT_ATTRIBUTES attributes;
-        PVHCD_TRANSFER_CONTEXT requestContext;
-        NTSTATUS contextStatus;
-        WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, VHCD_TRANSFER_CONTEXT);
-        contextStatus = WdfObjectAllocateContext(Request, &attributes, (PVOID*)&requestContext);
-        if (!NT_SUCCESS(contextStatus)) { ExFreePoolWithTag(transaction, VHCD_TX_SIGNATURE); return contextStatus; }
-        requestContext->Transaction = transaction;
-    }
+    requestContext->Transaction = transaction;
     WdfSpinLockAcquire(gSlotLock);
     if (!gSlots[slot].Allocated || !gSlots[slot].Present || gPortPowerOff[slot]) {
         WdfSpinLockRelease(gSlotLock); VhcdGetTransferContext(Request)->Transaction = NULL; ExFreePoolWithTag(transaction, VHCD_TX_SIGNATURE); return STATUS_DEVICE_NOT_CONNECTED;
@@ -1228,6 +1227,35 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
     return STATUS_SUCCESS;
 }
 
+static VOID VhcdCompleteRequestDpc(_In_ PKDPC Dpc, _In_opt_ PVOID DeferredContext,
+                                  _In_opt_ PVOID SystemArgument1, _In_opt_ PVOID SystemArgument2)
+{
+    PVHCD_TRANSFER_CONTEXT context = (PVHCD_TRANSFER_CONTEXT)DeferredContext;
+    WDFREQUEST request = context->CompletionRequest;
+    PURB urb = context->CompletionUrb;
+    NTSTATUS requestStatus = context->CompletionStatus;
+    USBD_STATUS usbStatus = context->CompletionUsbStatus;
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArgument1);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+    context->CompletionRequest = NULL;
+    context->CompletionUrb = NULL;
+    if (urb != NULL) urb->UrbHeader.Status = usbStatus;
+    WdfRequestComplete(request, requestStatus);
+}
+
+static VOID VhcdCompleteRequestDeferred(_In_ WDFREQUEST Request, _In_opt_ PURB Urb,
+                                        _In_ NTSTATUS RequestStatus, _In_ USBD_STATUS UsbStatus)
+{
+    PVHCD_TRANSFER_CONTEXT context = VhcdGetTransferContext(Request);
+    context->CompletionRequest = Request;
+    context->CompletionUrb = Urb;
+    context->CompletionStatus = RequestStatus;
+    context->CompletionUsbStatus = UsbStatus;
+    KeInitializeDpc(&context->CompletionDpc, VhcdCompleteRequestDpc, context);
+    KeInsertQueueDpc(&context->CompletionDpc, NULL, NULL);
+}
+
 VOID VhcdEvtEndpointIoInternalDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, size_t OutputLength, size_t InputLength, ULONG IoControlCode)
 {
     WDF_REQUEST_PARAMETERS parameters;
@@ -1239,54 +1267,38 @@ VOID VhcdEvtEndpointIoInternalDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, 
         WdfRequestGetParameters(Request, &parameters);
         urb = (PURB)parameters.Parameters.Others.Arg1;
     }
-    if (urb == NULL) { WdfRequestComplete(Request, STATUS_INVALID_DEVICE_REQUEST); return; }
+    if (urb == NULL) {
+        VhcdCompleteRequestDeferred(Request, NULL, STATUS_INVALID_DEVICE_REQUEST,
+                                    USBD_STATUS_INVALID_URB_FUNCTION);
+        return;
+    }
     {
         PVHCD_TRANSACTION transaction = NULL;
         NTSTATUS status = VhcdMapUrb(Queue, Request, urb, &transaction);
+        USBD_STATUS usbStatus;
         if (NT_SUCCESS(status)) return;
-        urb->UrbHeader.Status = status == STATUS_NOT_SUPPORTED ? USBD_STATUS_NOT_SUPPORTED :
+        usbStatus = status == STATUS_NOT_SUPPORTED ? USBD_STATUS_NOT_SUPPORTED :
             (status == STATUS_DEVICE_NOT_CONNECTED ? USBD_STATUS_DEVICE_GONE :
              (status == STATUS_BUFFER_TOO_SMALL ? USBD_STATUS_BUFFER_TOO_SMALL : USBD_STATUS_INVALID_PARAMETER));
-        WdfRequestComplete(Request, STATUS_SUCCESS);
+        VhcdCompleteRequestDeferred(Request, urb, STATUS_SUCCESS, usbStatus);
     }
-}
-
-static VOID VhcdCancelDpc(_In_ PKDPC Dpc, _In_opt_ PVOID DeferredContext,
-                           _In_opt_ PVOID SystemArgument1, _In_opt_ PVOID SystemArgument2)
-{
-    PVHCD_CANCEL_DPC context = (PVHCD_CANCEL_DPC)DeferredContext;
-    UNREFERENCED_PARAMETER(Dpc);
-    UNREFERENCED_PARAMETER(SystemArgument1);
-    UNREFERENCED_PARAMETER(SystemArgument2);
-    if (context->Urb != NULL) context->Urb->UrbHeader.Status = USBD_STATUS_CANCELED;
-    WdfRequestComplete(context->Request, STATUS_CANCELLED);
-    ExFreePoolWithTag(context, 'cUXV');
 }
 
 VOID VhcdEvtIoCanceledOnQueue(WDFQUEUE Queue, WDFREQUEST Request)
 {
-    PVHCD_CANCEL_DPC context;
     WDF_REQUEST_PARAMETERS parameters;
     PIO_STACK_LOCATION stack;
+    PURB urb = NULL;
     UNREFERENCED_PARAMETER(Queue);
-    context = (PVHCD_CANCEL_DPC)ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(*context), 'cUXV');
-    if (context == NULL) {
-        // Allocation failure is exceptional; WDF completion is still legal at
-        // DISPATCH_LEVEL, but no URB fields are touched on this fallback.
-        WdfRequestComplete(Request, STATUS_CANCELLED);
-        return;
-    }
-    RtlZeroMemory(context, sizeof(*context));
-    context->Request = Request;
+    /* The request context is preallocated by WDF, so cancellation needs no pool allocation. */
     stack = IoGetCurrentIrpStackLocation(WdfRequestWdmGetIrp(Request));
     if (stack->MajorFunction == IRP_MJ_INTERNAL_DEVICE_CONTROL &&
         stack->Parameters.DeviceIoControl.IoControlCode == IOCTL_INTERNAL_USB_SUBMIT_URB) {
         WDF_REQUEST_PARAMETERS_INIT(&parameters);
         WdfRequestGetParameters(Request, &parameters);
-        context->Urb = (PURB)parameters.Parameters.Others.Arg1;
+        urb = (PURB)parameters.Parameters.Others.Arg1;
     }
-    KeInitializeDpc(&context->Dpc, VhcdCancelDpc, context);
-    KeInsertQueueDpc(&context->Dpc, NULL, NULL);
+    VhcdCompleteRequestDeferred(Request, urb, STATUS_CANCELLED, USBD_STATUS_CANCELED);
 }
 
 VOID VhcdEvtIoInCallerContext(WDFDEVICE Device, WDFREQUEST Request)
@@ -1668,6 +1680,7 @@ NTSTATUS VhcdEvtDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
     WDF_IO_QUEUE_CONFIG queueConfig;
     WDF_FILEOBJECT_CONFIG fileConfig;
     WDF_OBJECT_ATTRIBUTES fileAttributes;
+    WDF_OBJECT_ATTRIBUTES requestAttributes;
     UCX_CONTROLLER_CONFIG controllerConfig;
     UCX_ROOTHUB_CONFIG rootHubConfig;
     UNICODE_STRING sddl = RTL_CONSTANT_STRING(L"D:P(A;;GA;;;SY)(A;;GRGWGX;;;BA)(A;;GRGWGX;;;WD)(A;;GRGWGX;;;RC)");
@@ -1682,6 +1695,8 @@ NTSTATUS VhcdEvtDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
     WDF_FILEOBJECT_CONFIG_INIT(&fileConfig, VhcdEvtFileCreate, VhcdEvtFileClose, VhcdEvtFileCleanup);
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&fileAttributes, VHCD_FILE_CONTEXT);
     WdfDeviceInitSetFileObjectConfig(DeviceInit, &fileConfig, &fileAttributes);
+    WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&requestAttributes, VHCD_TRANSFER_CONTEXT);
+    WdfDeviceInitSetRequestAttributes(DeviceInit, &requestAttributes);
     WdfDeviceInitSetIoInCallerContextCallback(DeviceInit, VhcdEvtIoInCallerContext);
     status = WdfDeviceCreate(&DeviceInit, WDF_NO_OBJECT_ATTRIBUTES, &device);
     if (!NT_SUCCESS(status)) return status;
