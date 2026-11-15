@@ -1,0 +1,54 @@
+; Reconstructed UCX 1.1 host-controller driver for the role-2 PDO emitted by
+; the legacy role-3 USB-tree enumerator. Windows 10 2004 (build 19041)+ only.
+
+[Version]
+Signature = "$Windows NT$"
+Class = USB
+ClassGuid = {36FC9E60-C465-11CF-8056-444553540000}
+Provider = %ProviderName%
+DriverVer = 11/15/2026,2.0.0.0
+CatalogFile.NTamd64 = xusb_ucx_hcd.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[SourceDisksFiles]
+VirtualCameraUcxHcd.sys = 1
+
+[Manufacturer]
+%ProviderName% = Models,NTamd64.10.0...19041
+
+[Models.NTamd64.10.0...19041]
+%DeviceDesc% = UcxHcd_Install, PCI\VEN_37FA&DEV_FE09&SUBSYS_9976A077&REV_88
+
+[UcxHcd_Install.NT]
+CopyFiles = DriverCopy
+
+[UcxHcd_Install.NT.Services]
+AddService = ucx_hcd,0x00000002,UcxHcd_Service
+
+[UcxHcd_Install.NT.Wdf]
+KmdfService = ucx_hcd,UcxHcd_Wdf
+
+[UcxHcd_Wdf]
+KmdfLibraryVersion = 1.31
+
+[DriverCopy]
+VirtualCameraUcxHcd.sys
+
+[UcxHcd_Service]
+DisplayName = %ServiceDesc%
+ServiceType = 1
+StartType = 3
+ErrorControl = 1
+ServiceBinary = %12%\VirtualCameraUcxHcd.sys
+
+[Strings]
+ProviderName = "Virtual Device Camera Project"
+DiskName = "Virtual Device Camera reconstructed role-3/UCX package"
+DeviceDesc = "Virtual USB host controller (UCX reconstruction)"
+ServiceDesc = "Virtual USB host controller UCX client (reconstruction)"
