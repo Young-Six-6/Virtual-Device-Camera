@@ -1181,13 +1181,22 @@ NTSTATUS XusbDispatchChildPnp(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp
         child->DevicePowerState = PowerDeviceD0;
         powerState.DeviceState = child->DevicePowerState;
         PoSetPowerState(DeviceObject, DevicePowerState, powerState);
+        XusbStartPnpTransactions(child);
         break;
         }
     case IRP_MN_QUERY_STOP_DEVICE:
-    case IRP_MN_CANCEL_STOP_DEVICE:
-    case IRP_MN_STOP_DEVICE:
     case IRP_MN_QUERY_REMOVE_DEVICE:
+        XusbQuiescePnpTransactions(child);
+        break;
+
+    case IRP_MN_CANCEL_STOP_DEVICE:
     case IRP_MN_CANCEL_REMOVE_DEVICE:
+        XusbCancelPnpQuiesce(child);
+        break;
+
+    case IRP_MN_STOP_DEVICE:
+        XusbStopPnpTransactions(child);
+        XusbReleaseChildConfiguration(child);
         break;
 
     case IRP_MN_SURPRISE_REMOVAL: {

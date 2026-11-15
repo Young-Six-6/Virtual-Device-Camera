@@ -21,9 +21,9 @@ DefaultDestDir = 12
 xusb_driver.sys = 1
 
 [Manufacturer]
-%ProviderName% = Models,NTamd64
+%ProviderName% = Models,NTamd64.10.0...19041
 
-[Models.NTamd64]
+[Models.NTamd64.10.0...19041]
 %HostControllerDesc% = HostController_Install, PCI\VEN_37FA&DEV_FE09&SUBSYS_9976A077&REV_88
 
 [HostController_Install.NT]

@@ -21,11 +21,23 @@ if (-not $msbuild -or -not (Test-Path -LiteralPath $msbuild)) {
     throw 'MSBuild was not found. Install Visual Studio with the C++ build tools.'
 }
 
-$wdkInclude = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Include\10.0.28000.0\km\ntddk.h'
-$wdkLib = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Lib\10.0.28000.0\km\x64\ntoskrnl.lib'
-if (-not (Test-Path -LiteralPath $wdkInclude) -or -not (Test-Path -LiteralPath $wdkLib)) {
-    throw 'WDK 10.0.28000.0 headers or x64 kernel libraries are missing. Install the matching WDK.'
+$kitsRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
+$includeRoot = Join-Path $kitsRoot 'Include'
+$libraryRoot = Join-Path $kitsRoot 'Lib'
+$minimumWdkVersion = [version]'10.0.19041.0'
+$wdkVersion = Get-ChildItem -LiteralPath $includeRoot -Directory -ErrorAction Stop |
+    Where-Object {
+        $_.Name -match '^\d+(\.\d+){2,3}$' -and
+        [version]$_.Name -ge $minimumWdkVersion -and
+        (Test-Path -LiteralPath (Join-Path $_.FullName 'km\ntddk.h')) -and
+        (Test-Path -LiteralPath (Join-Path $libraryRoot "$($_.Name)\km\x64\ntoskrnl.lib"))
+    } |
+    Sort-Object { [version]$_.Name } -Descending |
+    Select-Object -First 1
+if ($null -eq $wdkVersion) {
+    throw 'A WDK 10.0.19041.0 or newer with x64 kernel headers and libraries was not found.'
 }
+Write-Output "Using WDK $($wdkVersion.Name)."
 
 if ($Clean) {
     $sourceRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
@@ -46,7 +58,7 @@ if ($Clean) {
     }
 }
 
-& $msbuild $project /m "/p:Configuration=$Configuration" "/p:Platform=$Platform" /v:minimal
+& $msbuild $project /m "/p:Configuration=$Configuration" "/p:Platform=$Platform" "/p:WindowsTargetPlatformVersion=$($wdkVersion.Name)" /v:minimal
 if ($LASTEXITCODE -ne 0) {
     throw "MSBuild failed with exit code $LASTEXITCODE"
 }

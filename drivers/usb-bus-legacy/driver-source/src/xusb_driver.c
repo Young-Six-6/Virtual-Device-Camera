@@ -631,13 +631,19 @@ NTSTATUS XusbDispatchPower(
         if (stack->MinorFunction == IRP_MN_SET_POWER &&
             stack->Parameters.Power.Type == DevicePowerState) {
             DEVICE_POWER_STATE newState = stack->Parameters.Power.State.DeviceState;
-            if (newState < PowerDeviceD0 || newState > PowerDeviceD3) {
+            if (newState != PowerDeviceD0 && newState != PowerDeviceD3) {
                 childStatus = STATUS_INVALID_PARAMETER;
             } else {
                 POWER_STATE powerState;
+                if (newState == PowerDeviceD3) {
+                    XusbQuiescePowerTransactions(child);
+                }
                 child->DevicePowerState = newState;
                 powerState.DeviceState = newState;
                 PoSetPowerState(DeviceObject, DevicePowerState, powerState);
+                if (newState == PowerDeviceD0) {
+                    XusbResumePowerTransactions(child);
+                }
             }
         } else if (stack->MinorFunction != IRP_MN_QUERY_POWER &&
             stack->MinorFunction != IRP_MN_SET_POWER) {

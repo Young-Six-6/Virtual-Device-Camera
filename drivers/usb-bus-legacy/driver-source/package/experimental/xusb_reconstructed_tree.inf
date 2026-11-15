@@ -20,9 +20,9 @@ DefaultDestDir = 12
 xusb_driver.sys = 1
 
 [Manufacturer]
-%ProviderName% = Models,NTamd64
+%ProviderName% = Models,NTamd64.10.0...19041
 
-[Models.NTamd64]
+[Models.NTamd64.10.0...19041]
 %UsbTreeDesc% = UsbTree_Install, root\*xusb_tree
 
 [UsbTree_Install.NT]

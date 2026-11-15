@@ -19,9 +19,9 @@ DefaultDestDir = 12
 xusb_driver.sys = 1
 
 [Manufacturer]
-%ProviderName% = Models,NTamd64
+%ProviderName% = Models,NTamd64.10.0...19041
 
-[Models.NTamd64]
+[Models.NTamd64.10.0...19041]
 %RootHubDesc% = RootHub_Install, vFxsUSB\vRootHUB&Virtual&Fanxiushu
 
 [RootHub_Install.NT]

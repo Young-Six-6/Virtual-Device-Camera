@@ -8,7 +8,7 @@
     <ProjectGuid>{1DF4D68A-8DB0-4D13-B71A-9C322FA9D9F1}</ProjectGuid>
     <Keyword>Driver</Keyword>
     <RootNamespace>XusbReconstructed</RootNamespace>
-    <WindowsTargetPlatformVersion>10.0.28000.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == ''">10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">

@@ -1230,6 +1230,7 @@ NTSTATUS XusbQueueUsbRequest(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
     PXUSB_TRANSACTION transaction = NULL;
     KIRQL oldIrql;
     NTSTATUS status;
+    NTSTATUS rejectedStatus;
 
     status = IoAcquireRemoveLock(&child->RemoveLock, Irp);
     if (!NT_SUCCESS(status)) {
@@ -1334,17 +1335,23 @@ NTSTATUS XusbQueueUsbRequest(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
     }
     }
     KeAcquireSpinLock(&child->TransactionLock, &oldIrql);
-    if (child->TransactionStopping != 0 || child->Semaphore == NULL) {
+    if (child->TransactionStopping != 0 || child->TransactionQuiesced != 0 ||
+        child->Semaphore == NULL) {
+        rejectedStatus = child->TransactionStopping != 0
+            ? STATUS_DEVICE_NOT_CONNECTED
+            : STATUS_DEVICE_NOT_READY;
         KeReleaseSpinLock(&child->TransactionLock, oldIrql);
         if (urb != NULL) {
-            urb->UrbHeader.Status = USBD_STATUS_DEVICE_GONE;
+            urb->UrbHeader.Status = rejectedStatus == STATUS_DEVICE_NOT_CONNECTED
+                ? USBD_STATUS_DEVICE_GONE
+                : USBD_STATUS_CANCELED;
         }
         IoReleaseRemoveLock(&child->RemoveLock, Irp);
-        Irp->IoStatus.Status = STATUS_DEVICE_NOT_CONNECTED;
+        Irp->IoStatus.Status = rejectedStatus;
         Irp->IoStatus.Information = 0;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         XusbReleaseTransaction(transaction);
-        return STATUS_DEVICE_NOT_CONNECTED;
+        return rejectedStatus;
     }
     transaction->Semaphore = child->Semaphore;
     ObReferenceObject(transaction->Semaphore);
@@ -1356,12 +1363,18 @@ NTSTATUS XusbQueueUsbRequest(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
     }
     IoMarkIrpPending(Irp);
     IoCsqInsertIrp(&child->TransactionCsq, Irp, &transaction->CsqContext);
-    if (InterlockedCompareExchange(&child->TransactionStopping, 0, 0) != 0) {
+    if (InterlockedCompareExchange(&child->TransactionStopping, 0, 0) != 0 ||
+        InterlockedCompareExchange(&child->TransactionQuiesced, 0, 0) != 0) {
+        rejectedStatus = InterlockedCompareExchange(&child->TransactionStopping, 0, 0) != 0
+            ? STATUS_DEVICE_NOT_CONNECTED
+            : STATUS_DEVICE_NOT_READY;
         if (IoCsqRemoveIrp(&child->TransactionCsq, &transaction->CsqContext) == Irp) {
             if (urb != NULL) {
-                urb->UrbHeader.Status = USBD_STATUS_DEVICE_GONE;
+                urb->UrbHeader.Status = rejectedStatus == STATUS_DEVICE_NOT_CONNECTED
+                    ? USBD_STATUS_DEVICE_GONE
+                    : USBD_STATUS_CANCELED;
             }
-            XusbCompleteUsbIrp(transaction, STATUS_DEVICE_NOT_CONNECTED);
+            XusbCompleteUsbIrp(transaction, rejectedStatus);
             XusbReleaseTransaction(transaction);
             XusbReleaseTransaction(transaction);
             return STATUS_PENDING;
@@ -1412,16 +1425,21 @@ NTSTATUS XusbBeginUsbTransaction(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP 
     }
     InterlockedIncrement(&transaction->References); // The queue owns one reference again after reinsert.
     IoCsqInsertIrp(&child->TransactionCsq, queuedIrp, &transaction->CsqContext);
-    if (InterlockedCompareExchange(&child->TransactionStopping, 0, 0) != 0) {
+    if (InterlockedCompareExchange(&child->TransactionStopping, 0, 0) != 0 ||
+        InterlockedCompareExchange(&child->TransactionQuiesced, 0, 0) != 0) {
+        status = InterlockedCompareExchange(&child->TransactionStopping, 0, 0) != 0
+            ? STATUS_DEVICE_NOT_CONNECTED
+            : STATUS_DEVICE_NOT_READY;
         if (IoCsqRemoveIrp(&child->TransactionCsq, &transaction->CsqContext) == queuedIrp) {
             if (transaction->Urb != NULL) {
-                transaction->Urb->UrbHeader.Status = USBD_STATUS_DEVICE_GONE;
+                transaction->Urb->UrbHeader.Status = status == STATUS_DEVICE_NOT_CONNECTED
+                    ? USBD_STATUS_DEVICE_GONE
+                    : USBD_STATUS_CANCELED;
             }
-            XusbCompleteUsbIrp(transaction, STATUS_DEVICE_NOT_CONNECTED);
+            XusbCompleteUsbIrp(transaction, status);
             XusbReleaseTransaction(transaction);
         }
         XusbReleaseTransaction(transaction);
-        status = STATUS_DEVICE_NOT_CONNECTED;
         goto Complete;
     }
     RtlCopyMemory(&header, transaction->Buffer, sizeof(header));
@@ -1803,26 +1821,136 @@ Complete:
     return status;
 }
 
+static VOID XusbCancelQueuedTransactions(
+    _Inout_ PXUSB_CHILD_EXTENSION Child,
+    _In_ NTSTATUS CompletionStatus,
+    _In_ USBD_STATUS UrbStatus)
+{
+    PIRP irp;
+
+    while ((irp = IoCsqRemoveNextIrp(&Child->TransactionCsq, NULL)) != NULL) {
+        PXUSB_TRANSACTION transaction = XusbGetTransaction(irp);
+        if (transaction != NULL) {
+            if (transaction->Urb != NULL) {
+                transaction->Urb->UrbHeader.Status = UrbStatus;
+            }
+            XusbCompleteUsbIrp(transaction, CompletionStatus);
+            XusbReleaseTransaction(transaction);
+        }
+    }
+}
+
 VOID XusbStopTransactions(_Inout_ PXUSB_CHILD_EXTENSION Child)
 {
     KIRQL oldIrql;
     KeAcquireSpinLock(&Child->TransactionLock, &oldIrql);
     InterlockedExchange(&Child->TransactionStopping, 1);
+    InterlockedExchange(&Child->TransactionQuiesced, 1);
     KeReleaseSpinLock(&Child->TransactionLock, oldIrql);
 }
 
 VOID XusbCancelTransactions(_Inout_ PXUSB_CHILD_EXTENSION Child)
 {
-    PIRP irp;
     XusbStopTransactions(Child);
-    while ((irp = IoCsqRemoveNextIrp(&Child->TransactionCsq, NULL)) != NULL) {
-        PXUSB_TRANSACTION transaction = XusbGetTransaction(irp);
-        if (transaction != NULL) {
-            if (transaction->Urb != NULL) {
-                transaction->Urb->UrbHeader.Status = USBD_STATUS_CANCELED;
-            }
-            XusbCompleteUsbIrp(transaction, STATUS_DEVICE_NOT_CONNECTED);
-            XusbReleaseTransaction(transaction);
+    XusbCancelQueuedTransactions(Child, STATUS_DEVICE_NOT_CONNECTED, USBD_STATUS_CANCELED);
+}
+
+VOID XusbQuiescePnpTransactions(_Inout_ PXUSB_CHILD_EXTENSION Child)
+{
+    KIRQL oldIrql;
+    BOOLEAN cancelQueued = FALSE;
+
+    KeAcquireSpinLock(&Child->TransactionLock, &oldIrql);
+    if (Child->TransactionStopping == 0) {
+        InterlockedExchange(&Child->PnpQuiescePending, 1);
+        if (Child->TransactionQuiesced == 0) {
+            InterlockedExchange(&Child->TransactionQuiesced, 1);
+            cancelQueued = TRUE;
         }
     }
+    KeReleaseSpinLock(&Child->TransactionLock, oldIrql);
+
+    if (cancelQueued) {
+        XusbCancelQueuedTransactions(Child, STATUS_DEVICE_NOT_READY, USBD_STATUS_CANCELED);
+    }
+}
+
+VOID XusbCancelPnpQuiesce(_Inout_ PXUSB_CHILD_EXTENSION Child)
+{
+    KIRQL oldIrql;
+
+    KeAcquireSpinLock(&Child->TransactionLock, &oldIrql);
+    InterlockedExchange(&Child->PnpQuiescePending, 0);
+    if (Child->TransactionStopping == 0 && Child->PnpStopped == 0 &&
+        Child->PowerQuiesced == 0) {
+        InterlockedExchange(&Child->TransactionQuiesced, 0);
+    }
+    KeReleaseSpinLock(&Child->TransactionLock, oldIrql);
+}
+
+VOID XusbQuiescePowerTransactions(_Inout_ PXUSB_CHILD_EXTENSION Child)
+{
+    KIRQL oldIrql;
+    BOOLEAN cancelQueued = FALSE;
+
+    KeAcquireSpinLock(&Child->TransactionLock, &oldIrql);
+    if (Child->TransactionStopping == 0) {
+        InterlockedExchange(&Child->PowerQuiesced, 1);
+        if (Child->TransactionQuiesced == 0) {
+            InterlockedExchange(&Child->TransactionQuiesced, 1);
+            cancelQueued = TRUE;
+        }
+    }
+    KeReleaseSpinLock(&Child->TransactionLock, oldIrql);
+
+    if (cancelQueued) {
+        XusbCancelQueuedTransactions(Child, STATUS_DEVICE_NOT_READY, USBD_STATUS_CANCELED);
+    }
+}
+
+VOID XusbResumePowerTransactions(_Inout_ PXUSB_CHILD_EXTENSION Child)
+{
+    KIRQL oldIrql;
+
+    KeAcquireSpinLock(&Child->TransactionLock, &oldIrql);
+    InterlockedExchange(&Child->PowerQuiesced, 0);
+    if (Child->TransactionStopping == 0 && Child->PnpStopped == 0 &&
+        Child->PnpQuiescePending == 0) {
+        InterlockedExchange(&Child->TransactionQuiesced, 0);
+    }
+    KeReleaseSpinLock(&Child->TransactionLock, oldIrql);
+}
+
+VOID XusbStopPnpTransactions(_Inout_ PXUSB_CHILD_EXTENSION Child)
+{
+    KIRQL oldIrql;
+    BOOLEAN cancelQueued = FALSE;
+
+    KeAcquireSpinLock(&Child->TransactionLock, &oldIrql);
+    InterlockedExchange(&Child->PnpQuiescePending, 0);
+    if (Child->TransactionStopping == 0) {
+        InterlockedExchange(&Child->PnpStopped, 1);
+        if (Child->TransactionQuiesced == 0) {
+            InterlockedExchange(&Child->TransactionQuiesced, 1);
+            cancelQueued = TRUE;
+        }
+    }
+    KeReleaseSpinLock(&Child->TransactionLock, oldIrql);
+
+    if (cancelQueued) {
+        XusbCancelQueuedTransactions(Child, STATUS_DEVICE_NOT_READY, USBD_STATUS_CANCELED);
+    }
+}
+
+VOID XusbStartPnpTransactions(_Inout_ PXUSB_CHILD_EXTENSION Child)
+{
+    KIRQL oldIrql;
+
+    KeAcquireSpinLock(&Child->TransactionLock, &oldIrql);
+    InterlockedExchange(&Child->PnpStopped, 0);
+    InterlockedExchange(&Child->PnpQuiescePending, 0);
+    if (Child->TransactionStopping == 0 && Child->PowerQuiesced == 0) {
+        InterlockedExchange(&Child->TransactionQuiesced, 0);
+    }
+    KeReleaseSpinLock(&Child->TransactionLock, oldIrql);
 }

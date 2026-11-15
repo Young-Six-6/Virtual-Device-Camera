@@ -2,6 +2,7 @@
 param(
     [ValidateSet('Debug', 'Release')]
     [string] $Configuration = 'Release',
+    [string[]] $OsTargets,
     [switch] $IncludeExperimentalRoles,
     [switch] $Clean
 )
@@ -54,7 +55,30 @@ if (-not $inf2cat) {
     throw 'Inf2Cat.exe was not found. Install the Windows Driver Kit.'
 }
 
-& $inf2cat "/driver:$packageRoot" /os:10_X64
+$availableOsIdentifiers = (& $inf2cat /? | Out-String)
+if ($OsTargets -and $OsTargets.Count -gt 0) {
+    foreach ($osTarget in $OsTargets) {
+        if ($osTarget -notmatch '^[A-Za-z0-9_]+$' -or
+            $availableOsIdentifiers -notmatch "(?i)(?<![A-Za-z0-9_])$([regex]::Escape($osTarget))(?![A-Za-z0-9_])") {
+            throw "Inf2Cat does not advertise the requested OS target '$osTarget'."
+        }
+    }
+    $selectedOsTargets = $OsTargets
+} else {
+    $windows11TargetCandidates = @('10_25H2_X64', '10_GE_X64', '10_NI_X64', '10_CO_X64')
+    $latestWindows11Target = $windows11TargetCandidates |
+        Where-Object {
+            $availableOsIdentifiers -match "(?i)(?<![A-Za-z0-9_])$([regex]::Escape($_))(?![A-Za-z0-9_])"
+        } |
+        Select-Object -First 1
+    $selectedOsTargets = @('10_VB_X64')
+    if ($latestWindows11Target) {
+        $selectedOsTargets += $latestWindows11Target
+    }
+}
+$osTargetList = $selectedOsTargets -join ','
+Write-Output "Checking catalog signability for: $osTargetList"
+& $inf2cat "/driver:$packageRoot" "/os:$osTargetList"
 if ($LASTEXITCODE -ne 0) {
     throw "Inf2Cat failed with exit code $LASTEXITCODE"
 }

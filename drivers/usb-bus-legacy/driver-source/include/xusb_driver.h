@@ -68,6 +68,10 @@ typedef struct _XUSB_CHILD_EXTENSION {
     LONG BusAddress;
     BOOLEAN Present;
     BOOLEAN Removed;
+    /* PnP and power reasons are combined into TransactionQuiesced; removal is terminal. */
+    volatile LONG PnpStopped;
+    volatile LONG PnpQuiescePending;
+    volatile LONG PowerQuiesced;
     DEVICE_POWER_STATE DevicePowerState;
     UNICODE_STRING DeviceId;
     UNICODE_STRING HardwareIds;
@@ -81,6 +85,7 @@ typedef struct _XUSB_CHILD_EXTENSION {
     volatile LONG64 NextTransactionId;
     volatile LONG NextSequence;
     volatile LONG TransactionStopping;
+    volatile LONG TransactionQuiesced;
     volatile LONG TransactionCount;
     volatile LONG64 TransactionBytes;
     FAST_MUTEX ConfigurationMutex;
@@ -115,4 +120,10 @@ NTSTATUS XusbBeginUsbTransaction(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP 
 NTSTATUS XusbEndUsbTransaction(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp);
 VOID XusbCancelTransactions(_Inout_ PXUSB_CHILD_EXTENSION Child);
 VOID XusbStopTransactions(_Inout_ PXUSB_CHILD_EXTENSION Child);
+VOID XusbQuiescePnpTransactions(_Inout_ PXUSB_CHILD_EXTENSION Child);
+VOID XusbCancelPnpQuiesce(_Inout_ PXUSB_CHILD_EXTENSION Child);
+VOID XusbQuiescePowerTransactions(_Inout_ PXUSB_CHILD_EXTENSION Child);
+VOID XusbResumePowerTransactions(_Inout_ PXUSB_CHILD_EXTENSION Child);
+VOID XusbStopPnpTransactions(_Inout_ PXUSB_CHILD_EXTENSION Child);
+VOID XusbStartPnpTransactions(_Inout_ PXUSB_CHILD_EXTENSION Child);
 VOID XusbReleaseChildConfiguration(_Inout_ PXUSB_CHILD_EXTENSION Child);
