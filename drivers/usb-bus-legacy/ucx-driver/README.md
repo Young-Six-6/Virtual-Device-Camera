@@ -39,6 +39,10 @@ wire types 1–6. The unchanged UVC handler intentionally stalls or ignores oper
 does not implement (including bulk data and Microsoft OS feature descriptors), matching
 the old user-mode behavior. No driver installation or Windows USB/UVC end-to-end runtime
 validation has been run.
+The reconstructed WDM source also maps `IOCTL_INTERNAL_USB_CYCLE_PORT` to wire reset
+type 2. The UCX implementation currently emits type 1 for a root-port reset, but has no
+verified path that distinguishes and emits the legacy cycle operation. Full cycle-port
+compatibility is therefore not established.
 The frozen ABI carries a 40-byte operation record and payload rather than an arbitrary
 raw URB, so unsupported URB types cannot be passed through unchanged.
 

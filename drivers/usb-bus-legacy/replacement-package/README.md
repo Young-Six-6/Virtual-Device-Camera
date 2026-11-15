@@ -16,6 +16,9 @@ that USB descriptors enumerate or camera streaming works. The deploy script only
 reports device-node presence and service binding; no live Windows USB/UVC
 end-to-end validation has been performed. The unchanged UVC handler continues to
 reject transfer kinds it does not implement, as it did with the old driver.
+Legacy `IOCTL_INTERNAL_USB_CYCLE_PORT` behavior is not yet proven in the UCX path:
+the new HCD emits the wire-level port-reset operation but does not yet distinguish a
+full port cycle from an ordinary reset.
 
 ## Build and stage
 
