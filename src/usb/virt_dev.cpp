@@ -26,14 +26,23 @@ struct Device {
     size_t payload_capacity = 0;
 
     bool ioctl(DWORD code, void* input, DWORD input_bytes, void* output, DWORD output_bytes, DWORD& bytes) {
-        if (WaitForSingleObject(stop.get(), 0) == WAIT_OBJECT_0) return false;
+        if (WaitForSingleObject(stop.get(), 0) == WAIT_OBJECT_0) {
+            SetLastError(ERROR_OPERATION_ABORTED);
+            return false;
+        }
         vcam::unique_handle event(CreateEvent(NULL, TRUE, FALSE, NULL));
         if (!event) return false;
         OVERLAPPED operation = {};
         operation.hEvent = event.get();
         if (DeviceIoControl(file.get(), code, input, input_bytes, output, output_bytes, &bytes, &operation)) return true;
-        if (GetLastError() != ERROR_IO_PENDING) return false;
-        return vcam::finish_io(file.get(), operation, stop.get(), bytes);
+        DWORD error = GetLastError();
+        if (error == ERROR_IO_PENDING) {
+            if (vcam::finish_io(file.get(), operation, stop.get(), bytes)) return true;
+            error = GetLastError();
+        }
+        event.reset();
+        SetLastError(error);
+        return false;
     }
 };
 bool copy_id(WCHAR* output, const std::string& text, bool multi) {
@@ -215,40 +224,49 @@ int virt_usb_replug(void* handle) {
 usbtx_header_t* virt_usb_begin(void* handle) {
     auto* device = static_cast<Device*>(handle);
     if (!device || !device->plugged || device->active) return nullptr;
-    HANDLE events[] = {device->stop.get(), device->semaphore.get()};
-    if (WaitForMultipleObjects(2, events, FALSE, INFINITE) != WAIT_OBJECT_0+1) return nullptr;
     try {
-        DWORD bytes = 0;
-        bool complete = false;
-        for (int attempt = 0; attempt < 2; ++attempt) {
-            std::fill(device->buffer.begin(), device->buffer.end(), 0);
-            complete = device->ioctl(IOCTL_BEGIN_TRANS_USB_DATA, NULL, 0, device->buffer.data(),
-                static_cast<DWORD>(device->buffer.size()), bytes);
-            if (complete) break;
-            if (GetLastError() != ERROR_MORE_DATA || bytes != sizeof(ioctl_usbtx_header_t)) return nullptr;
-            const auto* header = reinterpret_cast<const ioctl_usbtx_header_t*>(device->buffer.data());
-            if (header->data_length < 0 || size_t(header->data_length) > maximum_payload) return nullptr;
-            device->buffer.resize(sizeof(*header) + size_t(header->data_length));
+        for (;;) {
+            HANDLE events[] = {device->stop.get(), device->semaphore.get()};
+            if (WaitForMultipleObjects(2, events, FALSE, INFINITE) != WAIT_OBJECT_0+1) return nullptr;
+            DWORD bytes = 0;
+            bool complete = false;
+            bool stale_signal = false;
+            for (int attempt = 0; attempt < 2; ++attempt) {
+                std::fill(device->buffer.begin(), device->buffer.end(), 0);
+                complete = device->ioctl(IOCTL_BEGIN_TRANS_USB_DATA, NULL, 0, device->buffer.data(),
+                    static_cast<DWORD>(device->buffer.size()), bytes);
+                if (complete) break;
+                const DWORD error = GetLastError();
+                if (error == ERROR_NO_MORE_ITEMS || error == ERROR_NOT_FOUND) {
+                    stale_signal = true;
+                    break;
+                }
+                if (error != ERROR_MORE_DATA || bytes != sizeof(ioctl_usbtx_header_t)) return nullptr;
+                const auto* header = reinterpret_cast<const ioctl_usbtx_header_t*>(device->buffer.data());
+                if (header->data_length < 0 || size_t(header->data_length) > maximum_payload) return nullptr;
+                device->buffer.resize(sizeof(*header) + size_t(header->data_length));
+            }
+            if (stale_signal) continue;
+            if (!complete || bytes < sizeof(ioctl_usbtx_header_t) || bytes > device->buffer.size()) return nullptr;
+            auto* raw = reinterpret_cast<ioctl_usbtx_header_t*>(device->buffer.data());
+            if (raw->data_length < 0 || size_t(raw->data_length) > maximum_payload) return nullptr;
+            const size_t declared = static_cast<size_t>(raw->data_length);
+            const size_t received = bytes - sizeof(*raw);
+            auto* request = reinterpret_cast<usbtx_header_t*>(device->buffer.data() + request_offset);
+            if (!is_device_read(*request) && declared > received) return nullptr;
+            if (request->type == 3 && request->transfer.type == 3) {
+                if (received < ISO_PACKET_HDR_SIZE) return nullptr;
+                const auto* iso = reinterpret_cast<const iso_packet_hdr*>(request->data);
+                if (iso->number_packets > (received - ISO_PACKET_HDR_SIZE) / sizeof(iso_packet)) return nullptr;
+            }
+            if (device->buffer.size() < sizeof(*raw)+declared) device->buffer.resize(sizeof(*raw)+declared);
+            request = reinterpret_cast<usbtx_header_t*>(device->buffer.data()+request_offset);
+            request->data_length = static_cast<int>(declared);
+            request->result = -1;
+            device->payload_capacity = declared;
+            device->active = true;
+            return request;
         }
-        if (!complete || bytes < sizeof(ioctl_usbtx_header_t) || bytes > device->buffer.size()) return nullptr;
-        auto* raw = reinterpret_cast<ioctl_usbtx_header_t*>(device->buffer.data());
-        if (raw->data_length < 0 || size_t(raw->data_length) > maximum_payload) return nullptr;
-        const size_t declared = static_cast<size_t>(raw->data_length);
-        const size_t received = bytes - sizeof(*raw);
-        auto* request = reinterpret_cast<usbtx_header_t*>(device->buffer.data() + request_offset);
-        if (!is_device_read(*request) && declared > received) return nullptr;
-        if (request->type == 3 && request->transfer.type == 3) {
-            if (received < ISO_PACKET_HDR_SIZE) return nullptr;
-            const auto* iso = reinterpret_cast<const iso_packet_hdr*>(request->data);
-            if (iso->number_packets > (received - ISO_PACKET_HDR_SIZE) / sizeof(iso_packet)) return nullptr;
-        }
-        if (device->buffer.size() < sizeof(*raw)+declared) device->buffer.resize(sizeof(*raw)+declared);
-        request = reinterpret_cast<usbtx_header_t*>(device->buffer.data()+request_offset);
-        request->data_length = static_cast<int>(declared);
-        request->result = -1;
-        device->payload_capacity = declared;
-        device->active = true;
-        return request;
     }
     catch (...) { return nullptr; }
 }
@@ -261,8 +279,13 @@ int virt_usb_end(void* handle, usbtx_header_t* request) {
     raw->result = request->result;
     raw->data_length = request->data_length;
     DWORD bytes = 0;
-    return device->ioctl(IOCTL_END_TRANS_USB_DATA, raw, static_cast<DWORD>(sizeof(*raw)+raw->data_length),
-        NULL, 0, bytes) ? 0 : -1;
+    if (device->ioctl(IOCTL_END_TRANS_USB_DATA, raw, static_cast<DWORD>(sizeof(*raw)+raw->data_length),
+        NULL, 0, bytes)) return 0;
+    if (GetLastError() == ERROR_NOT_FOUND) {
+        request->result = -1;
+        return 1;
+    }
+    return -1;
 }
 
 namespace vcam {
@@ -275,7 +298,11 @@ public:
     bool unplug() override { return virt_usb_unplug(device_) == 0; }
     bool replug() override { return virt_usb_replug(device_) == 0; }
     usbtx_header_t* begin() override { return virt_usb_begin(device_); }
-    bool end(usbtx_header_t* value) override { return virt_usb_end(device_, value) == 0; }
+    UsbEndResult end(usbtx_header_t* value) override {
+        const int result = virt_usb_end(device_, value);
+        return result == 0 ? UsbEndResult::completed :
+            (result == 1 ? UsbEndResult::canceled : UsbEndResult::failed);
+    }
     size_t capacity() const override { return virt_usb_capacity(device_); }
     void interrupt() noexcept override { virt_usb_interrupt(device_); }
     void resume() noexcept override { virt_usb_resume(device_); }

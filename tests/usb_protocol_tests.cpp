@@ -224,6 +224,7 @@ struct FakeState {
     std::condition_variable changed;
     bool stopped = false, plugged = false, destroyed = false;
     int plugs = 0, unplugs = 0, fail_plug = -1, cycles = 0;
+    bool cancel_next_end = false;
     std::deque<Packet> requests, responses;
 };
 class FakeTransport final : public vcam::UsbTransport {
@@ -252,10 +253,17 @@ public:
         active_ = std::make_unique<Packet>(std::move(state_->requests.front()));
         state_->requests.pop_front(); return &active_->header();
     }
-    bool end(usbtx_header_t*) override {
+    vcam::UsbEndResult end(usbtx_header_t*) override {
         std::lock_guard<std::mutex> lock(state_->mutex);
         require(active_->intact(), "Worker overran fake transaction");
-        state_->responses.push_back(std::move(*active_)); active_.reset(); state_->changed.notify_all(); return true;
+        if (state_->cancel_next_end) {
+            state_->cancel_next_end = false;
+            active_.reset();
+            state_->changed.notify_all();
+            return vcam::UsbEndResult::canceled;
+        }
+        state_->responses.push_back(std::move(*active_)); active_.reset(); state_->changed.notify_all();
+        return vcam::UsbEndResult::completed;
     }
     size_t capacity() const override { return active_ ? active_->capacity : 0; }
     void interrupt() noexcept override { std::lock_guard<std::mutex> lock(state_->mutex); state_->stopped = true; state_->changed.notify_all(); }
@@ -300,6 +308,26 @@ void lifecycle_tests() {
         require(state->destroyed && !state->plugged, "Transport released before shutdown completed");
     }
     require(GetTickCount64()-started < 10000, "Worker shutdown did not cancel waits promptly");
+    {
+        auto state = std::make_shared<FakeState>();
+        vcam::CameraSession session(configuration(), {640,480}, std::make_unique<FakeTransport>(state));
+        require(session.start(), "Cancellation recovery camera start failed");
+        Packet canceled_cycle(0);
+        canceled_cycle.header().type = 4;
+        canceled_cycle.header().reset.type = 2;
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->cancel_next_end = true;
+            state->requests.push_back(std::move(canceled_cycle));
+            state->requests.push_back(descriptor());
+            state->changed.notify_all();
+        }
+        auto response = round_trip(state, descriptor());
+        require(descriptor_size(response.header()) == vcam::Resolution{640,480} && session.running(),
+            "Canceled USB transaction stopped the camera worker");
+        std::lock_guard<std::mutex> lock(state->mutex);
+        require(state->cycles == 0, "Canceled cycle request unexpectedly replugged the camera");
+    }
     auto state = std::make_shared<FakeState>();
     vcam::CameraSession session(configuration(), {640,480}, std::make_unique<FakeTransport>(state));
     require(session.start(), "Control camera start failed");

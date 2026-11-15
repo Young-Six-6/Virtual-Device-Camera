@@ -102,8 +102,9 @@ void CameraSession::run() noexcept {
                 std::lock_guard<std::mutex> lock(frame_mutex_);
                 device_->handle(*request, transport_->capacity());
             }
-            if (!transport_->end(request)) break;
-            if (cycle) {
+            const UsbEndResult end_result = transport_->end(request);
+            if (end_result == UsbEndResult::failed) break;
+            if (cycle && end_result == UsbEndResult::completed) {
                 if (!transport_->replug()) break;
                 std::lock_guard<std::mutex> lock(frame_mutex_);
                 if (!device_->set_resolution(device_->resolution())) break;
