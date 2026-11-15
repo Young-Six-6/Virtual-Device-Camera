@@ -1728,6 +1728,7 @@ NTSTATUS XusbEndUsbTransaction(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Ir
                 RtlCopyMemory(&descriptor, response->Data, sizeof(descriptor));
                 if (descriptor.bLength >= sizeof(descriptor) &&
                     descriptor.bDescriptorType == USB_DEVICE_DESCRIPTOR_TYPE) {
+                    /* Hub connection queries use only a descriptor validated from a completed URB. */
                     ExAcquireFastMutex(&child->ConfigurationMutex);
                     child->DeviceDescriptor = descriptor;
                     child->DeviceDescriptorValid = TRUE;

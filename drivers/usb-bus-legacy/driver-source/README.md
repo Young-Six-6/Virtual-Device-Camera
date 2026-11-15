@@ -17,7 +17,7 @@
 
 用户态在 PDO_ADD 中把上次返回的 BusAddress 作为建议值传回。新驱动会在该地址空闲时复用它，从而让同一摄像头断开/重连保持相同的 PnP instance ID；若地址仍被占用则重新分配。地址分配遵循 USB 地址范围 1–127。当前 ABI 没有设备序列号/稳定唯一 ID，驱动不伪造硬件 ContainerID，让 PnP 依据可移除设备能力生成容器 ID。
 
-原二进制的四个角色均有对应源码分支和硬件 ID 识别，但这不代表四角色都能替代旧驱动。Host Controller 还不是完整 Usbport/UCX HCD；USB-tree 依赖该未完成角色。Root Hub 目前实现单端口节点描述符、能力、连接状态、设备描述符转发和 DriverKeyName 查询；EX_V2 连接信息、扩展状态和完整端口/电源行为仍未完整重建。因此默认包绑定 USB-only role 0，并包含用于更新旧应用控制接口提供者的 Root Hub role 1；Host Controller 和 USB-tree 隔离在实验包。当前用户态 handler 还未实现 bulk/interrupt 与 Microsoft OS feature descriptor 的完整处理。
+原二进制的四个角色均有对应源码分支和硬件 ID 识别，但这不代表四角色都能替代旧驱动。Host Controller 还不是完整 Usbport/UCX HCD；USB-tree 依赖该未完成角色。Root Hub 目前实现单端口节点描述符、能力、连接状态、设备描述符转发、DriverKeyName 查询及基础 EX/EX_V2 信息；扩展状态和完整端口/电源行为仍未完整重建。因此默认包绑定 USB-only role 0，并包含用于更新旧应用控制接口提供者的 Root Hub role 1；Host Controller 和 USB-tree 隔离在实验包。当前用户态 handler 还未实现 bulk/interrupt 与 Microsoft OS feature descriptor 的完整处理。
 
 ## 安装包与构建
 

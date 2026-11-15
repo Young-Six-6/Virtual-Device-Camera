@@ -95,6 +95,7 @@ static NTSTATUS XusbHandleRootHubDescriptorRequest(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     IoGetNextIrpStackLocation(requestIrp)->Parameters.Others.Argument1 = &urb;
+    /* Bound the synchronous proxy wait so an idle user-mode bridge cannot hang Hub queries forever. */
     status = IoCallDriver(childStack, requestIrp);
     if (status == STATUS_PENDING) {
         timeout.QuadPart = -5LL * 10 * 1000 * 1000;
@@ -1129,6 +1130,7 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
         XusbCompleteIrp(Irp, status, information);
         return status;
     }
+    /* The reconstructed legacy Root Hub exposes one virtual downstream port. */
     if (parent->Role == XusbRoleRootHub &&
         (code == IOCTL_USB_GET_NODE_INFORMATION ||
             code == IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION ||
@@ -1137,6 +1139,8 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
             code == IOCTL_USB_GET_NODE_CONNECTION_NAME ||
             code == IOCTL_USB_GET_NODE_CONNECTION_DRIVERKEY_NAME ||
             code == IOCTL_USB_GET_NODE_CONNECTION_ATTRIBUTES ||
+            code == IOCTL_USB_GET_HUB_INFORMATION_EX ||
+            code == IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2 ||
             code == IOCTL_USB_GET_NODE_CONNECTION_INFORMATION ||
             code == IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX)) {
         PVOID buffer = Irp->AssociatedIrp.SystemBuffer;
@@ -1217,6 +1221,48 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
                 RtlCopyMemory(buffer, &capabilities, sizeof(capabilities));
                 information = sizeof(capabilities);
                 status = STATUS_SUCCESS;
+            }
+        } else if (code == IOCTL_USB_GET_HUB_INFORMATION_EX) {
+            if (outputBytes < sizeof(USB_HUB_INFORMATION_EX)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PUSB_HUB_INFORMATION_EX informationEx = (PUSB_HUB_INFORMATION_EX)buffer;
+                RtlZeroMemory(informationEx, sizeof(*informationEx));
+                informationEx->HubType = UsbRootHub;
+                informationEx->HighestPortNumber = 1;
+                informationEx->u.UsbHubDescriptor.bDescriptorLength = 9;
+                informationEx->u.UsbHubDescriptor.bDescriptorType = USB_20_HUB_DESCRIPTOR_TYPE;
+                informationEx->u.UsbHubDescriptor.bNumberOfPorts = 1;
+                informationEx->u.UsbHubDescriptor.wHubCharacteristics = 0x0009;
+                informationEx->u.UsbHubDescriptor.bPowerOnToPowerGood = 1;
+                informationEx->u.UsbHubDescriptor.bRemoveAndPowerMask[0] = 0x01;
+                informationEx->u.UsbHubDescriptor.bRemoveAndPowerMask[1] = 0x03;
+                information = sizeof(*informationEx);
+                status = STATUS_SUCCESS;
+            }
+        } else if (code == IOCTL_USB_GET_NODE_CONNECTION_INFORMATION_EX_V2) {
+            if (inputBytes < sizeof(USB_NODE_CONNECTION_INFORMATION_EX_V2) ||
+                outputBytes < sizeof(USB_NODE_CONNECTION_INFORMATION_EX_V2)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+            } else {
+                PUSB_NODE_CONNECTION_INFORMATION_EX_V2 connectionV2 =
+                    (PUSB_NODE_CONNECTION_INFORMATION_EX_V2)buffer;
+                if (connectionV2->ConnectionIndex != 1 ||
+                    connectionV2->Length < sizeof(*connectionV2)) {
+                    status = STATUS_INVALID_PARAMETER;
+                } else {
+                    ULONG requestedProtocols = connectionV2->SupportedUsbProtocols.ul;
+                    RtlZeroMemory(&connectionV2->SupportedUsbProtocols, sizeof(connectionV2->SupportedUsbProtocols));
+                    if ((requestedProtocols & 0x1) != 0) {
+                        connectionV2->SupportedUsbProtocols.Usb110 = 1;
+                    }
+                    if ((requestedProtocols & 0x2) != 0) {
+                        connectionV2->SupportedUsbProtocols.Usb200 = 1;
+                    }
+                    RtlZeroMemory(&connectionV2->Flags, sizeof(connectionV2->Flags));
+                    information = sizeof(*connectionV2);
+                    status = STATUS_SUCCESS;
+                }
             }
         } else if (code == IOCTL_USB_GET_NODE_CONNECTION_ATTRIBUTES) {
             if (inputBytes < sizeof(USB_NODE_CONNECTION_ATTRIBUTES) ||
