@@ -119,6 +119,52 @@ void protocol_tests() {
             require(packet.intact() && hdr.result == 0 && size_t(hdr.data_length) <= length, "Streaming reply overflowed");
         }
     }
+    for (int status_type = 1; status_type <= 7; ++status_type) {
+        Packet packet(4);
+        auto& hdr = packet.header();
+        hdr.type = 5;
+        hdr.status.type = status_type;
+        hdr.status.index = 1;
+        device.handle(hdr, packet.capacity);
+        const size_t expected = status_type == 5 || status_type == 6 ? 1 : 2;
+        require(packet.intact() && hdr.result == 0 && size_t(hdr.data_length) == expected,
+            "Status/configuration/interface/frame-number response mismatch");
+    }
+    for (int feature_type : {1, 2}) for (int recipient = 1; recipient <= 4; ++recipient) {
+        Packet packet(0);
+        auto& hdr = packet.header();
+        hdr.type = 6;
+        hdr.feature.type = feature_type;
+        hdr.feature.subtype = recipient;
+        hdr.feature.index = 1;
+        hdr.feature.value = 1;
+        device.handle(hdr, packet.capacity);
+        require(packet.intact() && hdr.result == 0 && hdr.data_length == 0,
+            "Set/clear feature transaction failed");
+    }
+    for (int reset_type : {1, 2, 3, 4}) {
+        Packet packet(0);
+        auto& hdr = packet.header();
+        hdr.type = 4;
+        hdr.reset.type = reset_type;
+        hdr.reset.ep_address = 0x82;
+        device.handle(hdr, packet.capacity);
+        require(packet.intact() && hdr.result == 0 && hdr.data_length == 0,
+            "Reset/abort/port-cycle transaction failed");
+    }
+    {
+        Packet packet(16);
+        auto& hdr = packet.header();
+        hdr.type = 2;
+        hdr.vendor.type = 1; // UVC class request
+        hdr.vendor.index = 1;
+        hdr.vendor.value = 0x0200;
+        hdr.vendor.request = UVC_GET_INFO;
+        hdr.vendor.is_read = 1;
+        device.handle(hdr, packet.capacity);
+        require(packet.intact() && hdr.result == 0 && hdr.data_length == 1,
+            "Direct class-request wire mapping failed");
+    }
     for (int index : {0,1,2,255}) {
         Packet packet(sizeof(vcam::StreamControl));
         auto& hdr = packet.header();
@@ -391,7 +437,7 @@ int main(int argc, char** argv) {
         cancellation_test();
         GetProcessHandleCount(GetCurrentProcess(), &after);
         require(after <= before+4, "Camera/control lifecycle leaked Windows handles");
-        puts("PASS: descriptors, negotiation, ISO framing, 20000 malformed requests, lifecycle/replug rollback, and real control pipe.");
+        puts("PASS: descriptors, UVC negotiation, wire types 2/4/5/6, ISO framing, 20000 malformed requests, lifecycle/replug rollback, and real control pipe.");
         return 0;
     }
     catch (const std::exception& error) { fprintf(stderr, "FAIL: %s\n", error.what()); return 1; }

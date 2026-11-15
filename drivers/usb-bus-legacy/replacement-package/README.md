@@ -9,13 +9,13 @@ This is a separate experimental deployment workflow. It combines:
   hardware ID created by role 3 (`VirtualCameraUcxHcd.sys`). The INF targets
   Windows 10 version 2004 (build 19041) or newer and KMDF 1.31.
 
-The UCX HCD now implements the root-hub, USB-device, control/isochronous transfer,
-and frozen BEGIN/END transaction paths used by the current UVC application. It is
-a replacement candidate, but successful staging or PnP binding does not prove
+The UCX HCD implements the root-hub, USB-device and frozen BEGIN/END transaction
+paths, including the URB families accepted by the reconstructed WDM protocol. It
+is a replacement candidate, but successful staging or PnP binding does not prove
 that USB descriptors enumerate or camera streaming works. The deploy script only
 reports device-node presence and service binding; no live Windows USB/UVC
-end-to-end validation has been performed. Bulk/interrupt and several standalone
-URB types remain outside both this bridge and the current user-mode UVC handler.
+end-to-end validation has been performed. The unchanged UVC handler continues to
+reject transfer kinds it does not implement, as it did with the old driver.
 
 ## Build and stage
 

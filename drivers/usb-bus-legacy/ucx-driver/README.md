@@ -27,17 +27,18 @@ compatibility target is based on Microsoft's UCX versioning guidance.
   them for the slot lifetime, and delays removal notification until the slot's root-hub
   change is acknowledged and USB-device/transfer references drain.
 - Bridges the frozen BEGIN/END transaction ABI for control, isochronous, configuration,
-  and interface-selection requests. Transactions are cancellable and bounded to 32 MiB
-  each, with per-slot and controller aggregate limits.
+  interface selection, descriptors, class/vendor controls, status/configuration queries,
+  feature requests, pipe abort/reset, and bulk/interrupt requests. Transactions are
+  cancellable and bounded to 32 MiB each, with per-slot and controller aggregate limits.
 
 ## Limits and validation status
 
 This builds as a Release x64 driver, but remains an unvalidated replacement candidate.
-Bulk/interrupt URBs, standalone class/vendor/status/feature URBs, Microsoft OS feature
-descriptor URBs, and several other USB management operations are rejected. The existing
-user-mode UVC handler also lacks bulk/interrupt and Microsoft OS feature descriptor
-handlers. No driver installation or Windows USB/UVC end-to-end runtime validation has
-been run.
+The HCD maps the URB families accepted by the reconstructed WDM protocol into frozen
+wire types 1–6. The unchanged UVC handler intentionally stalls or ignores operations it
+does not implement (including bulk data and Microsoft OS feature descriptors), matching
+the old user-mode behavior. No driver installation or Windows USB/UVC end-to-end runtime
+validation has been run.
 The frozen ABI carries a 40-byte operation record and payload rather than an arbitrary
 raw URB, so unsupported URB types cannot be passed through unchanged.
 

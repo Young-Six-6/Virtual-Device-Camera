@@ -57,12 +57,14 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VHCD_USBDEVICE_CONTEXT, VhcdGetUsbDeviceConte
 typedef struct _VHCD_QUEUE_CONTEXT {
     ULONG SlotIndex;
     UCHAR EndpointAddress;
+    UCHAR PipeType;
 } VHCD_QUEUE_CONTEXT, *PVHCD_QUEUE_CONTEXT;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VHCD_QUEUE_CONTEXT, VhcdGetQueueContext)
 
 typedef struct _VHCD_ENDPOINT_CONTEXT {
     ULONG SlotIndex;
     UCHAR EndpointAddress;
+    UCHAR PipeType;
 } VHCD_ENDPOINT_CONTEXT, *PVHCD_ENDPOINT_CONTEXT;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VHCD_ENDPOINT_CONTEXT, VhcdGetEndpointContext)
 
@@ -148,10 +150,14 @@ EVT_WDF_DEVICE_FILE_CREATE VhcdEvtFileCreate;
 EVT_WDF_FILE_CLEANUP VhcdEvtFileCleanup;
 EVT_WDF_FILE_CLOSE VhcdEvtFileClose;
 EVT_WDF_OBJECT_CONTEXT_CLEANUP VhcdUserIoContextCleanup;
+EVT_UCX_CONTROLLER_QUERY_USB_CAPABILITY VhcdEvtControllerQueryUsbCapability;
+EVT_UCX_CONTROLLER_GET_CURRENT_FRAMENUMBER VhcdEvtControllerGetCurrentFrameNumber;
+EVT_UCX_CONTROLLER_RESET VhcdEvtControllerReset;
 static VOID VhcdFinalizeSlotIfQuiescent(_In_ LONG SlotIndex);
 static VOID VhcdUsbDeviceCleanup(_In_ WDFOBJECT Object);
 static VOID VhcdCancelSlotTransactions(_In_ LONG SlotIndex, _In_ UCHAR EndpointAddress, _In_ BOOLEAN AllEndpoints);
 static VOID VhcdCancelEndpointTransfers(_In_ UCXENDPOINT Endpoint);
+static NTSTATUS VhcdQueuePortResetNotification(_In_ LONG SlotIndex, _In_ LONG ResetType);
 EVT_UCX_CONTROLLER_USBDEVICE_ADD VhcdEvtControllerUsbDeviceAdd;
 EVT_UCX_ROOTHUB_CONTROL_URB VhcdEvtRootHubControlUrb;
 EVT_UCX_ROOTHUB_INTERRUPT_TX VhcdEvtRootHubInterruptTx;
@@ -264,7 +270,7 @@ VOID VhcdUserIoContextCleanup(WDFOBJECT Object)
     if (context->AddSemaphore != NULL) ObDereferenceObject(context->AddSemaphore);
 }
 
-static NTSTATUS VhcdCreateEndpoint(UCXUSBDEVICE UsbDevice, PUCXENDPOINT_INIT EndpointInit, BOOLEAN IsDefault, UCHAR EndpointAddress, UCXENDPOINT* Endpoint)
+static NTSTATUS VhcdCreateEndpoint(UCXUSBDEVICE UsbDevice, PUCXENDPOINT_INIT EndpointInit, BOOLEAN IsDefault, UCHAR EndpointAddress, UCHAR PipeType, UCXENDPOINT* Endpoint)
 {
     WDF_IO_QUEUE_CONFIG q;
     WDF_OBJECT_ATTRIBUTES a;
@@ -282,6 +288,7 @@ static NTSTATUS VhcdCreateEndpoint(UCXUSBDEVICE UsbDevice, PUCXENDPOINT_INIT End
     if (!NT_SUCCESS(status)) return status;
     VhcdGetQueueContext(queue)->SlotIndex = VhcdGetUsbDeviceContext(UsbDevice)->SlotIndex;
     VhcdGetQueueContext(queue)->EndpointAddress = EndpointAddress;
+    VhcdGetQueueContext(queue)->PipeType = PipeType;
     if (IsDefault) {
         UCX_DEFAULT_ENDPOINT_EVENT_CALLBACKS_INIT(&defaultCallbacks, VhcdEvtEndpointPurge, VhcdEvtEndpointStart, VhcdEvtEndpointAbort, VhcdEvtEndpointOkToCancelTransfers, VhcdEvtDefaultEndpointUpdate);
         UcxDefaultEndpointInitSetEventCallbacks(EndpointInit, &defaultCallbacks);
@@ -294,6 +301,7 @@ static NTSTATUS VhcdCreateEndpoint(UCXUSBDEVICE UsbDevice, PUCXENDPOINT_INIT End
     if (!NT_SUCCESS(status)) { WdfObjectDelete(queue); return status; }
     VhcdGetEndpointContext(*Endpoint)->SlotIndex = VhcdGetUsbDeviceContext(UsbDevice)->SlotIndex;
     VhcdGetEndpointContext(*Endpoint)->EndpointAddress = EndpointAddress;
+    VhcdGetEndpointContext(*Endpoint)->PipeType = PipeType;
     UcxEndpointSetWdfIoQueue(*Endpoint, queue);
     return STATUS_SUCCESS;
 }
@@ -303,16 +311,17 @@ NTSTATUS VhcdEvtUsbDeviceDefaultEndpointAdd(UCXCONTROLLER Controller, UCXUSBDEVI
     UCXENDPOINT endpoint;
     UNREFERENCED_PARAMETER(Controller);
     UNREFERENCED_PARAMETER(MaxPacketSize);
-    return VhcdCreateEndpoint(UsbDevice, EndpointInit, TRUE, 0, &endpoint);
+    return VhcdCreateEndpoint(UsbDevice, EndpointInit, TRUE, 0, UsbdPipeTypeControl, &endpoint);
 }
 NTSTATUS VhcdEvtUsbDeviceEndpointAdd(UCXCONTROLLER Controller, UCXUSBDEVICE UsbDevice, PUSB_ENDPOINT_DESCRIPTOR Descriptor, ULONG DescriptorLength, PUSB_SUPERSPEED_ENDPOINT_COMPANION_DESCRIPTOR Companion, PUCXENDPOINT_INIT EndpointInit)
 {
     UCXENDPOINT endpoint;
+    if (Descriptor == NULL || DescriptorLength < sizeof(*Descriptor) || Descriptor->bLength < sizeof(*Descriptor))
+        return STATUS_INVALID_PARAMETER;
     UNREFERENCED_PARAMETER(Controller);
-    UNREFERENCED_PARAMETER(Descriptor);
-    UNREFERENCED_PARAMETER(DescriptorLength);
     UNREFERENCED_PARAMETER(Companion);
-    return VhcdCreateEndpoint(UsbDevice, EndpointInit, FALSE, Descriptor != NULL ? Descriptor->bEndpointAddress : 0, &endpoint);
+    UCHAR pipeType = (UCHAR)(Descriptor->bmAttributes & 0x03);
+    return VhcdCreateEndpoint(UsbDevice, EndpointInit, FALSE, Descriptor->bEndpointAddress, pipeType, &endpoint);
 }
 NTSTATUS VhcdEvtControllerUsbDeviceAdd(UCXCONTROLLER Controller, PUCXUSBDEVICE_INFO DeviceInfo, PUCXUSBDEVICE_INIT UsbDeviceInit)
 {
@@ -477,14 +486,33 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
         LONG i = (LONG)index - 1;
         BOOLEAN changed = FALSE;
         BOOLEAN supported = TRUE;
+        BOOLEAN resetRequested = FALSE;
         WdfSpinLockAcquire(gSlotLock);
         if (value == 8 && (setup[1] == USB_REQUEST_SET_FEATURE || setup[1] == USB_REQUEST_CLEAR_FEATURE)) { /* PORT_POWER */ }
-        else if (value == 4 && setup[1] == USB_REQUEST_SET_FEATURE) { gSlots[i].Enabled = gSlots[i].Present; gSlots[i].ResetChanged = TRUE; changed = TRUE; }
+        else if (value == 4 && setup[1] == USB_REQUEST_SET_FEATURE) { resetRequested = TRUE; }
         else if (value == 16 && setup[1] == USB_REQUEST_CLEAR_FEATURE) { gSlots[i].ConnectionChanged = FALSE; }
         else if (value == 17 && setup[1] == USB_REQUEST_CLEAR_FEATURE) { gSlots[i].Enabled = FALSE; }
         else if (value == 20 && setup[1] == USB_REQUEST_CLEAR_FEATURE) { gSlots[i].ResetChanged = FALSE; }
         else supported = FALSE;
         WdfSpinLockRelease(gSlotLock);
+        if (resetRequested) {
+            NTSTATUS resetStatus = VhcdQueuePortResetNotification(i, 1);
+            if (NT_SUCCESS(resetStatus)) {
+                WdfSpinLockAcquire(gSlotLock);
+                if (gSlots[i].Allocated && gSlots[i].Present) {
+                    gSlots[i].Enabled = TRUE;
+                    gSlots[i].ResetChanged = TRUE;
+                    changed = TRUE;
+                } else {
+                    resetStatus = STATUS_DEVICE_NOT_CONNECTED;
+                }
+                WdfSpinLockRelease(gSlotLock);
+            }
+            if (!NT_SUCCESS(resetStatus)) {
+                supported = FALSE;
+                urb->UrbHeader.Status = USBD_STATUS_INSUFFICIENT_RESOURCES;
+            }
+        }
         if (value == 16 && setup[1] == USB_REQUEST_CLEAR_FEATURE) VhcdFinalizeSlotIfQuiescent(i);
         if (changed && gRootHub != WDF_NO_HANDLE) UcxRootHubPortChanged(gRootHub);
         urb->UrbControlTransfer.TransferBufferLength = 0;
@@ -576,7 +604,7 @@ static VOID VhcdFinishTransfer(PVHCD_TRANSACTION Transaction, NTSTATUS Status, U
     LONG slot = Transaction->SlotIndex;
     if (InterlockedExchange(&Transaction->OwnerFinished, 1) != 0) return;
     if (Transaction->Urb != NULL) Transaction->Urb->UrbHeader.Status = UsbStatus;
-    WdfRequestComplete(Transaction->Request, Status);
+    if (Transaction->Request != NULL) WdfRequestComplete(Transaction->Request, Status);
     WdfSpinLockAcquire(gSlotLock);
     if (slot >= 0 && slot < VHCD_MAX_PORTS && gSlots[slot].TransferRefs > 0)
         --gSlots[slot].TransferRefs;
@@ -606,6 +634,64 @@ static VOID VhcdQueueTransactionCancellation(PVHCD_TRANSACTION Transaction)
     if (InterlockedCompareExchange(&Transaction->CancelCompletionQueued, 1, 0) != 0) return;
     KeInitializeDpc(&Transaction->CancelDpc, VhcdTransactionCancelDpc, Transaction);
     KeInsertQueueDpc(&Transaction->CancelDpc, NULL, NULL);
+}
+
+static NTSTATUS VhcdQueuePortResetNotification(LONG SlotIndex, LONG ResetType)
+{
+    PVHCD_TRANSACTION transaction;
+    PKSEMAPHORE semaphore;
+    ULONG allocationBytes = sizeof(*transaction) + sizeof(ioctl_usbtx_header_t);
+    ioctl_usbtx_header_t* outer;
+    PVHCD_WIRE_REQUEST inner;
+    if (SlotIndex < 0 || SlotIndex >= VHCD_MAX_PORTS) return STATUS_INVALID_PARAMETER;
+    transaction = (PVHCD_TRANSACTION)ExAllocatePool2(POOL_FLAG_NON_PAGED, allocationBytes, VHCD_TX_SIGNATURE);
+    if (transaction == NULL) return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(transaction, allocationBytes);
+    transaction->Signature = VHCD_TX_SIGNATURE;
+    transaction->SlotIndex = SlotIndex;
+    transaction->EndpointAddress = 0;
+    transaction->AllocationBytes = allocationBytes;
+    transaction->PayloadCapacity = 0;
+    transaction->References = 1; /* Owned until END or port teardown. */
+    transaction->CancelableReady = TRUE;
+    outer = (ioctl_usbtx_header_t*)transaction->Buffer;
+    inner = (PVHCD_WIRE_REQUEST)((PUCHAR)transaction->Buffer + FIELD_OFFSET(ioctl_usbtx_header_t, type));
+    outer->data_length = 0;
+    outer->result = -1;
+    inner->Type = 4;
+    inner->Result = -1;
+    inner->DataLength = 0;
+    inner->Data.Reset.Type = ResetType;
+
+    WdfSpinLockAcquire(gSlotLock);
+    if (!gSlots[SlotIndex].Allocated || !gSlots[SlotIndex].Present ||
+        gSlots[SlotIndex].TransactionCount >= VHCD_MAX_SLOT_TRANSACTIONS ||
+        gSlots[SlotIndex].TransactionBytes > VHCD_MAX_SLOT_TRANSACTION_BYTES ||
+        allocationBytes > VHCD_MAX_SLOT_TRANSACTION_BYTES - gSlots[SlotIndex].TransactionBytes ||
+        gTransactionCount >= VHCD_MAX_CONTROLLER_TRANSACTIONS ||
+        gTransactionBytes > VHCD_MAX_CONTROLLER_TRANSACTION_BYTES ||
+        allocationBytes > VHCD_MAX_CONTROLLER_TRANSACTION_BYTES - gTransactionBytes) {
+        WdfSpinLockRelease(gSlotLock);
+        ExFreePoolWithTag(transaction, VHCD_TX_SIGNATURE);
+        return STATUS_DEVICE_NOT_CONNECTED;
+    }
+    transaction->Id = ++gSlots[SlotIndex].NextTransactionId;
+    transaction->Sequence = ++gSlots[SlotIndex].NextSequence;
+    outer->inter_handle = transaction->Id;
+    outer->inter_seqno = transaction->Sequence;
+    InsertTailList(&gSlots[SlotIndex].Transactions, &transaction->Link);
+    transaction->Linked = TRUE;
+    ++gSlots[SlotIndex].TransferRefs;
+    gSlots[SlotIndex].TransactionBytes += allocationBytes;
+    ++gSlots[SlotIndex].TransactionCount;
+    gTransactionBytes += allocationBytes;
+    ++gTransactionCount;
+    semaphore = gSlots[SlotIndex].Semaphore;
+    ObReferenceObject(semaphore);
+    KeReleaseSemaphore(semaphore, IO_NO_INCREMENT, 1, FALSE);
+    WdfSpinLockRelease(gSlotLock);
+    ObDereferenceObject(semaphore);
+    return STATUS_SUCCESS;
 }
 
 VOID VhcdEvtTransferCanceled(WDFREQUEST Request)
@@ -651,7 +737,7 @@ static VOID VhcdCancelSlotTransactions(LONG SlotIndex, UCHAR EndpointAddress, BO
         WdfSpinLockRelease(gSlotLock);
         if (transaction == NULL) break;
         if (ready) {
-            (VOID)WdfRequestUnmarkCancelable(transaction->Request);
+            if (transaction->Request != NULL) (VOID)WdfRequestUnmarkCancelable(transaction->Request);
             VhcdQueueTransactionCancellation(transaction);
         }
         VhcdTxRelease(transaction);
@@ -664,6 +750,33 @@ static VOID VhcdCancelEndpointTransfers(UCXENDPOINT Endpoint)
     if (context != NULL) VhcdCancelSlotTransactions((LONG)context->SlotIndex, context->EndpointAddress, FALSE);
 }
 
+NTSTATUS VhcdEvtControllerQueryUsbCapability(UCXCONTROLLER Controller, PGUID CapabilityType,
+                                              ULONG OutputBufferLength, PVOID OutputBuffer, PULONG ResultLength)
+{
+    UNREFERENCED_PARAMETER(Controller);
+    UNREFERENCED_PARAMETER(CapabilityType);
+    UNREFERENCED_PARAMETER(OutputBufferLength);
+    UNREFERENCED_PARAMETER(OutputBuffer);
+    if (ResultLength == NULL) return STATUS_INVALID_PARAMETER;
+    *ResultLength = 0;
+    return STATUS_NOT_SUPPORTED;
+}
+
+NTSTATUS VhcdEvtControllerGetCurrentFrameNumber(UCXCONTROLLER Controller, PULONG FrameNumber)
+{
+    UNREFERENCED_PARAMETER(Controller);
+    if (FrameNumber == NULL) return STATUS_INVALID_PARAMETER;
+    *FrameNumber = (ULONG)(KeQueryInterruptTime() / 10000ULL);
+    return STATUS_SUCCESS;
+}
+
+VOID VhcdEvtControllerReset(UCXCONTROLLER Controller)
+{
+    UCX_CONTROLLER_RESET_COMPLETE_INFO resetInfo;
+    UCX_CONTROLLER_RESET_COMPLETE_INFO_INIT(&resetInfo, UcxControllerStatePreserved, TRUE);
+    UcxControllerResetComplete(Controller, &resetInfo);
+}
+
 static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PURB Urb,
                            _Out_ PVHCD_TRANSACTION* OutTransaction)
 {
@@ -674,28 +787,120 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
     PMDL transferMdl = NULL;
     ULONG transferFlags = 0;
     BOOLEAN isRead = FALSE, isIso = FALSE;
+    USHORT function = Urb->UrbHeader.Function;
     PVHCD_TRANSACTION transaction;
     PKSEMAPHORE signalSemaphore = NULL;
     *OutTransaction = NULL;
     if (slot < 0 || slot >= VHCD_MAX_PORTS) return STATUS_INVALID_DEVICE_STATE;
 
-    switch (Urb->UrbHeader.Function) {
+    switch (function) {
     case URB_FUNCTION_CONTROL_TRANSFER:
+        if (Urb->UrbHeader.Length < sizeof(Urb->UrbControlTransfer) || queueContext->PipeType != UsbdPipeTypeControl) return STATUS_INVALID_PARAMETER;
         transferLength = Urb->UrbControlTransfer.TransferBufferLength;
         transferBuffer = (PUCHAR)Urb->UrbControlTransfer.TransferBuffer;
         transferMdl = Urb->UrbControlTransfer.TransferBufferMDL;
         transferFlags = Urb->UrbControlTransfer.TransferFlags;
         break;
     case URB_FUNCTION_CONTROL_TRANSFER_EX:
+        if (Urb->UrbHeader.Length < sizeof(Urb->UrbControlTransferEx) || queueContext->PipeType != UsbdPipeTypeControl) return STATUS_INVALID_PARAMETER;
         transferLength = Urb->UrbControlTransferEx.TransferBufferLength;
         transferBuffer = (PUCHAR)Urb->UrbControlTransferEx.TransferBuffer;
         transferMdl = Urb->UrbControlTransferEx.TransferBufferMDL;
         transferFlags = Urb->UrbControlTransferEx.TransferFlags;
         break;
+    case URB_FUNCTION_GET_DESCRIPTOR_FROM_DEVICE:
+    case URB_FUNCTION_SET_DESCRIPTOR_TO_DEVICE:
+    case URB_FUNCTION_GET_DESCRIPTOR_FROM_ENDPOINT:
+    case URB_FUNCTION_SET_DESCRIPTOR_TO_ENDPOINT:
+    case URB_FUNCTION_GET_DESCRIPTOR_FROM_INTERFACE:
+    case URB_FUNCTION_SET_DESCRIPTOR_TO_INTERFACE:
+        if (Urb->UrbHeader.Length < sizeof(Urb->UrbControlDescriptorRequest) || queueContext->PipeType != UsbdPipeTypeControl) return STATUS_INVALID_PARAMETER;
+        transferLength = Urb->UrbControlDescriptorRequest.TransferBufferLength;
+        transferBuffer = (PUCHAR)Urb->UrbControlDescriptorRequest.TransferBuffer;
+        transferMdl = Urb->UrbControlDescriptorRequest.TransferBufferMDL;
+        isRead = function == URB_FUNCTION_GET_DESCRIPTOR_FROM_DEVICE || function == URB_FUNCTION_GET_DESCRIPTOR_FROM_ENDPOINT || function == URB_FUNCTION_GET_DESCRIPTOR_FROM_INTERFACE;
+        break;
+    case URB_FUNCTION_VENDOR_DEVICE:
+    case URB_FUNCTION_VENDOR_INTERFACE:
+    case URB_FUNCTION_VENDOR_ENDPOINT:
+    case URB_FUNCTION_VENDOR_OTHER:
+    case URB_FUNCTION_CLASS_DEVICE:
+    case URB_FUNCTION_CLASS_INTERFACE:
+    case URB_FUNCTION_CLASS_ENDPOINT:
+    case URB_FUNCTION_CLASS_OTHER:
+        if (Urb->UrbHeader.Length < sizeof(Urb->UrbControlVendorClassRequest) || queueContext->PipeType != UsbdPipeTypeControl) return STATUS_INVALID_PARAMETER;
+        transferLength = Urb->UrbControlVendorClassRequest.TransferBufferLength;
+        transferBuffer = (PUCHAR)Urb->UrbControlVendorClassRequest.TransferBuffer;
+        transferMdl = Urb->UrbControlVendorClassRequest.TransferBufferMDL;
+        transferFlags = Urb->UrbControlVendorClassRequest.TransferFlags;
+        break;
+    case URB_FUNCTION_GET_STATUS_FROM_DEVICE:
+    case URB_FUNCTION_GET_STATUS_FROM_INTERFACE:
+    case URB_FUNCTION_GET_STATUS_FROM_ENDPOINT:
+    case URB_FUNCTION_GET_STATUS_FROM_OTHER:
+        if (Urb->UrbHeader.Length < sizeof(Urb->UrbControlGetStatusRequest) || queueContext->PipeType != UsbdPipeTypeControl) return STATUS_INVALID_PARAMETER;
+        transferLength = Urb->UrbControlGetStatusRequest.TransferBufferLength;
+        if (transferLength < sizeof(USHORT)) return STATUS_BUFFER_TOO_SMALL;
+        transferBuffer = (PUCHAR)Urb->UrbControlGetStatusRequest.TransferBuffer;
+        transferMdl = Urb->UrbControlGetStatusRequest.TransferBufferMDL;
+        isRead = TRUE;
+        break;
+    case URB_FUNCTION_GET_CONFIGURATION:
+        if (Urb->UrbHeader.Length < sizeof(Urb->UrbControlGetConfigurationRequest) || queueContext->PipeType != UsbdPipeTypeControl) return STATUS_INVALID_PARAMETER;
+        transferLength = Urb->UrbControlGetConfigurationRequest.TransferBufferLength;
+        if (transferLength < sizeof(UCHAR)) return STATUS_BUFFER_TOO_SMALL;
+        transferBuffer = (PUCHAR)Urb->UrbControlGetConfigurationRequest.TransferBuffer;
+        transferMdl = Urb->UrbControlGetConfigurationRequest.TransferBufferMDL;
+        isRead = TRUE;
+        break;
+    case URB_FUNCTION_GET_INTERFACE:
+        if (Urb->UrbHeader.Length < sizeof(Urb->UrbControlGetInterfaceRequest) || queueContext->PipeType != UsbdPipeTypeControl) return STATUS_INVALID_PARAMETER;
+        transferLength = Urb->UrbControlGetInterfaceRequest.TransferBufferLength;
+        if (transferLength < sizeof(UCHAR)) return STATUS_BUFFER_TOO_SMALL;
+        transferBuffer = (PUCHAR)Urb->UrbControlGetInterfaceRequest.TransferBuffer;
+        transferMdl = Urb->UrbControlGetInterfaceRequest.TransferBufferMDL;
+        isRead = TRUE;
+        break;
+    case URB_FUNCTION_GET_MS_FEATURE_DESCRIPTOR:
+        if (Urb->UrbHeader.Length < sizeof(Urb->UrbOSFeatureDescriptorRequest) || queueContext->PipeType != UsbdPipeTypeControl) return STATUS_INVALID_PARAMETER;
+        transferLength = Urb->UrbOSFeatureDescriptorRequest.TransferBufferLength;
+        if (transferLength < sizeof(UCHAR)) return STATUS_BUFFER_TOO_SMALL;
+        transferBuffer = (PUCHAR)Urb->UrbOSFeatureDescriptorRequest.TransferBuffer;
+        transferMdl = Urb->UrbOSFeatureDescriptorRequest.TransferBufferMDL;
+        isRead = TRUE;
+        break;
+    case URB_FUNCTION_GET_CURRENT_FRAME_NUMBER:
+        if (Urb->UrbHeader.Length < sizeof(Urb->UrbGetCurrentFrameNumber) || queueContext->PipeType != UsbdPipeTypeControl) return STATUS_INVALID_PARAMETER;
+        transferLength = sizeof(Urb->UrbGetCurrentFrameNumber.FrameNumber);
+        transferBuffer = (PUCHAR)&Urb->UrbGetCurrentFrameNumber.FrameNumber;
+        isRead = TRUE;
+        break;
+    case URB_FUNCTION_SET_FEATURE_TO_DEVICE:
+    case URB_FUNCTION_SET_FEATURE_TO_INTERFACE:
+    case URB_FUNCTION_SET_FEATURE_TO_ENDPOINT:
+    case URB_FUNCTION_SET_FEATURE_TO_OTHER:
+    case URB_FUNCTION_CLEAR_FEATURE_TO_DEVICE:
+    case URB_FUNCTION_CLEAR_FEATURE_TO_INTERFACE:
+    case URB_FUNCTION_CLEAR_FEATURE_TO_ENDPOINT:
+    case URB_FUNCTION_CLEAR_FEATURE_TO_OTHER:
+        if (Urb->UrbHeader.Length < sizeof(Urb->UrbControlFeatureRequest) || queueContext->PipeType != UsbdPipeTypeControl) return STATUS_INVALID_PARAMETER;
+        break;
+    case URB_FUNCTION_ABORT_PIPE:
+    case URB_FUNCTION_SYNC_RESET_PIPE_AND_CLEAR_STALL:
+        if (Urb->UrbHeader.Length < sizeof(Urb->UrbPipeRequest) || queueContext->PipeType == UsbdPipeTypeControl) return STATUS_INVALID_PARAMETER;
+        VhcdCancelSlotTransactions(slot, queueContext->EndpointAddress, FALSE);
+        break;
+    case URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER:
+        if (Urb->UrbHeader.Length < sizeof(Urb->UrbBulkOrInterruptTransfer) || (queueContext->PipeType != UsbdPipeTypeBulk && queueContext->PipeType != UsbdPipeTypeInterrupt)) return STATUS_INVALID_PARAMETER;
+        transferLength = Urb->UrbBulkOrInterruptTransfer.TransferBufferLength;
+        transferBuffer = (PUCHAR)Urb->UrbBulkOrInterruptTransfer.TransferBuffer;
+        transferMdl = Urb->UrbBulkOrInterruptTransfer.TransferBufferMDL;
+        transferFlags = Urb->UrbBulkOrInterruptTransfer.TransferFlags;
+        break;
     case URB_FUNCTION_ISOCH_TRANSFER: {
         ULONG count = Urb->UrbIsochronousTransfer.NumberOfPackets;
         ULONG headerLength = FIELD_OFFSET(iso_packet_hdr_t, packets);
-        if (count == 0 || count > 1024 || Urb->UrbHeader.Length < FIELD_OFFSET(struct _URB_ISOCH_TRANSFER, IsoPacket) + count * sizeof(USBD_ISO_PACKET_DESCRIPTOR)) return STATUS_INVALID_PARAMETER;
+        if (queueContext->PipeType != UsbdPipeTypeIsochronous || count == 0 || count > 1024 || Urb->UrbHeader.Length < FIELD_OFFSET(struct _URB_ISOCH_TRANSFER, IsoPacket) + count * sizeof(USBD_ISO_PACKET_DESCRIPTOR)) return STATUS_INVALID_PARAMETER;
         if (count > (MAXULONG - headerLength) / sizeof(iso_packet_t)) return STATUS_INVALID_PARAMETER;
         metadataLength = headerLength + count * sizeof(iso_packet_t);
         transferLength = Urb->UrbIsochronousTransfer.TransferBufferLength;
@@ -706,12 +911,28 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
         break;
     }
     case URB_FUNCTION_SELECT_CONFIGURATION:
+        if (Urb->UrbHeader.Length < FIELD_OFFSET(struct _URB_SELECT_CONFIGURATION, Interface) || queueContext->PipeType != UsbdPipeTypeControl) return STATUS_INVALID_PARAMETER;
+        break;
     case URB_FUNCTION_SELECT_INTERFACE:
+        if (Urb->UrbHeader.Length < FIELD_OFFSET(struct _URB_SELECT_INTERFACE, Interface) + FIELD_OFFSET(USBD_INTERFACE_INFORMATION, Pipes) || queueContext->PipeType != UsbdPipeTypeControl) return STATUS_INVALID_PARAMETER;
         break;
     default:
         return STATUS_NOT_SUPPORTED;
     }
-    isRead = (transferFlags & USBD_TRANSFER_DIRECTION_IN) != 0;
+    if (function == URB_FUNCTION_CONTROL_TRANSFER || function == URB_FUNCTION_CONTROL_TRANSFER_EX ||
+        function == URB_FUNCTION_VENDOR_DEVICE || function == URB_FUNCTION_VENDOR_INTERFACE ||
+        function == URB_FUNCTION_VENDOR_ENDPOINT || function == URB_FUNCTION_VENDOR_OTHER ||
+        function == URB_FUNCTION_CLASS_DEVICE || function == URB_FUNCTION_CLASS_INTERFACE ||
+        function == URB_FUNCTION_CLASS_ENDPOINT || function == URB_FUNCTION_CLASS_OTHER ||
+        function == URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER || function == URB_FUNCTION_ISOCH_TRANSFER)
+        isRead = (transferFlags & USBD_TRANSFER_DIRECTION_IN) != 0;
+    if (isIso) {
+        ULONG index;
+        for (index = 0; index < Urb->UrbIsochronousTransfer.NumberOfPackets; ++index) {
+            const USBD_ISO_PACKET_DESCRIPTOR* packet = &Urb->UrbIsochronousTransfer.IsoPacket[index];
+            if (packet->Offset > transferLength || packet->Length > transferLength - packet->Offset) return STATUS_INVALID_PARAMETER;
+        }
+    }
     if (transferLength > VHCD_MAX_TRANSACTION_BYTES || metadataLength > MAXULONG - transferLength) return STATUS_INVALID_PARAMETER;
     payloadLength = transferLength + metadataLength;
     if (payloadLength > VHCD_MAX_TRANSACTION_BYTES) return STATUS_INVALID_PARAMETER;
@@ -741,16 +962,21 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
         outer->result = -1;
         inner->Result = -1;
         inner->DataLength = (LONG)payloadLength;
-        if (Urb->UrbHeader.Function == URB_FUNCTION_CONTROL_TRANSFER || Urb->UrbHeader.Function == URB_FUNCTION_CONTROL_TRANSFER_EX) {
-            PUCHAR setup = Urb->UrbHeader.Function == URB_FUNCTION_CONTROL_TRANSFER ? Urb->UrbControlTransfer.SetupPacket : Urb->UrbControlTransferEx.SetupPacket;
+        switch (function) {
+        case URB_FUNCTION_CONTROL_TRANSFER:
+        case URB_FUNCTION_CONTROL_TRANSFER_EX: {
+            PUCHAR setup = function == URB_FUNCTION_CONTROL_TRANSFER
+                ? Urb->UrbControlTransfer.SetupPacket : Urb->UrbControlTransferEx.SetupPacket;
             inner->Type = 3;
             inner->Data.Transfer.Type = 1;
-            inner->Data.Transfer.EpAddress = queueContext->EndpointAddress;
+            inner->Data.Transfer.EpAddress = 0;
             inner->Data.Transfer.IsRead = isRead ? 1 : 0;
             RtlCopyMemory(inner->Data.Transfer.SetupPacket, setup, sizeof(inner->Data.Transfer.SetupPacket));
-            inner->Data.Transfer.Timeout = 5000;
-            if (!isRead && transferLength != 0) RtlCopyMemory((PUCHAR)inner + sizeof(*inner), transaction->TransferBuffer, transferLength);
-        } else if (isIso) {
+            inner->Data.Transfer.Timeout = function == URB_FUNCTION_CONTROL_TRANSFER_EX
+                ? Urb->UrbControlTransferEx.Timeout : 5000;
+            break;
+        }
+        case URB_FUNCTION_ISOCH_TRANSFER: {
             iso_packet_hdr_t* iso = (iso_packet_hdr_t*)((PUCHAR)inner + sizeof(*inner));
             ULONG i;
             inner->Type = 3;
@@ -765,16 +991,119 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
             for (i = 0; i < iso->number_packets; ++i) {
                 iso->packets[i].offset = Urb->UrbIsochronousTransfer.IsoPacket[i].Offset;
                 iso->packets[i].length = Urb->UrbIsochronousTransfer.IsoPacket[i].Length;
-                iso->packets[i].status = 0;
+                iso->packets[i].status = Urb->UrbIsochronousTransfer.IsoPacket[i].Status;
             }
-            if (!isRead && transferLength != 0) RtlCopyMemory((PUCHAR)iso + metadataLength, transaction->TransferBuffer, transferLength);
-        } else if (Urb->UrbHeader.Function == URB_FUNCTION_SELECT_CONFIGURATION) {
-            LONG value = Urb->UrbSelectConfiguration.ConfigurationDescriptor != NULL ? Urb->UrbSelectConfiguration.ConfigurationDescriptor->bConfigurationValue : -1;
+            break;
+        }
+        case URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER:
+            inner->Type = 3;
+            inner->Data.Transfer.Type = 2;
+            inner->Data.Transfer.EpAddress = queueContext->EndpointAddress;
+            inner->Data.Transfer.IsRead = isRead ? 1 : 0;
+            break;
+        case URB_FUNCTION_GET_DESCRIPTOR_FROM_DEVICE:
+        case URB_FUNCTION_SET_DESCRIPTOR_TO_DEVICE:
+        case URB_FUNCTION_GET_DESCRIPTOR_FROM_ENDPOINT:
+        case URB_FUNCTION_SET_DESCRIPTOR_TO_ENDPOINT:
+        case URB_FUNCTION_GET_DESCRIPTOR_FROM_INTERFACE:
+        case URB_FUNCTION_SET_DESCRIPTOR_TO_INTERFACE:
+            inner->Type = 1;
+            inner->Data.Descriptor.Type = (function == URB_FUNCTION_GET_DESCRIPTOR_FROM_DEVICE || function == URB_FUNCTION_SET_DESCRIPTOR_TO_DEVICE) ? 1 :
+                ((function == URB_FUNCTION_GET_DESCRIPTOR_FROM_INTERFACE || function == URB_FUNCTION_SET_DESCRIPTOR_TO_INTERFACE) ? 3 : 4);
+            inner->Data.Descriptor.Subtype = Urb->UrbControlDescriptorRequest.DescriptorType;
+            inner->Data.Descriptor.IsRead = isRead ? 1 : 0;
+            inner->Data.Descriptor.Index = Urb->UrbControlDescriptorRequest.Index;
+            inner->Data.Descriptor.Value = Urb->UrbControlDescriptorRequest.LanguageId;
+            break;
+        case URB_FUNCTION_GET_MS_FEATURE_DESCRIPTOR:
+            inner->Type = 1;
+            inner->Data.Descriptor.Type = 5;
+            inner->Data.Descriptor.Subtype = 0;
+            inner->Data.Descriptor.IsRead = 1;
+            inner->Data.Descriptor.Index = ((LONG)Urb->UrbOSFeatureDescriptorRequest.Recipient << 8) | Urb->UrbOSFeatureDescriptorRequest.InterfaceNumber;
+            inner->Data.Descriptor.Value = Urb->UrbOSFeatureDescriptorRequest.MS_FeatureDescriptorIndex;
+            break;
+        case URB_FUNCTION_VENDOR_DEVICE:
+        case URB_FUNCTION_VENDOR_INTERFACE:
+        case URB_FUNCTION_VENDOR_ENDPOINT:
+        case URB_FUNCTION_VENDOR_OTHER:
+        case URB_FUNCTION_CLASS_DEVICE:
+        case URB_FUNCTION_CLASS_INTERFACE:
+        case URB_FUNCTION_CLASS_ENDPOINT:
+        case URB_FUNCTION_CLASS_OTHER:
+            inner->Type = 2;
+            inner->Data.Vendor.Type = (function == URB_FUNCTION_CLASS_DEVICE || function == URB_FUNCTION_CLASS_INTERFACE ||
+                function == URB_FUNCTION_CLASS_ENDPOINT || function == URB_FUNCTION_CLASS_OTHER) ? 1 : 2;
+            inner->Data.Vendor.Subtype = (function == URB_FUNCTION_VENDOR_DEVICE || function == URB_FUNCTION_CLASS_DEVICE) ? 1 :
+                ((function == URB_FUNCTION_VENDOR_INTERFACE || function == URB_FUNCTION_CLASS_INTERFACE) ? 2 :
+                 ((function == URB_FUNCTION_VENDOR_ENDPOINT || function == URB_FUNCTION_CLASS_ENDPOINT) ? 3 : 4));
+            inner->Data.Vendor.IsRead = isRead ? 1 : 0;
+            inner->Data.Vendor.Request = Urb->UrbControlVendorClassRequest.Request;
+            inner->Data.Vendor.Index = Urb->UrbControlVendorClassRequest.Index;
+            inner->Data.Vendor.Value = Urb->UrbControlVendorClassRequest.Value;
+            break;
+        case URB_FUNCTION_GET_STATUS_FROM_DEVICE:
+        case URB_FUNCTION_GET_STATUS_FROM_INTERFACE:
+        case URB_FUNCTION_GET_STATUS_FROM_ENDPOINT:
+        case URB_FUNCTION_GET_STATUS_FROM_OTHER:
+        case URB_FUNCTION_GET_CONFIGURATION:
+        case URB_FUNCTION_GET_INTERFACE:
+        case URB_FUNCTION_GET_CURRENT_FRAME_NUMBER:
+            inner->Type = 5;
+            inner->Data.Status.Type = function == URB_FUNCTION_GET_STATUS_FROM_DEVICE ? 1 :
+                (function == URB_FUNCTION_GET_STATUS_FROM_INTERFACE ? 2 :
+                 (function == URB_FUNCTION_GET_STATUS_FROM_ENDPOINT ? 3 :
+                  (function == URB_FUNCTION_GET_STATUS_FROM_OTHER ? 4 :
+                   (function == URB_FUNCTION_GET_CONFIGURATION ? 5 :
+                    (function == URB_FUNCTION_GET_INTERFACE ? 6 : 7)))));
+            inner->Data.Status.Index = function == URB_FUNCTION_GET_STATUS_FROM_INTERFACE ||
+                function == URB_FUNCTION_GET_STATUS_FROM_ENDPOINT || function == URB_FUNCTION_GET_STATUS_FROM_OTHER
+                ? Urb->UrbControlGetStatusRequest.Index :
+                (function == URB_FUNCTION_GET_INTERFACE ? Urb->UrbControlGetInterfaceRequest.Interface : 0);
+            break;
+        case URB_FUNCTION_SET_FEATURE_TO_DEVICE:
+        case URB_FUNCTION_SET_FEATURE_TO_INTERFACE:
+        case URB_FUNCTION_SET_FEATURE_TO_ENDPOINT:
+        case URB_FUNCTION_SET_FEATURE_TO_OTHER:
+        case URB_FUNCTION_CLEAR_FEATURE_TO_DEVICE:
+        case URB_FUNCTION_CLEAR_FEATURE_TO_INTERFACE:
+        case URB_FUNCTION_CLEAR_FEATURE_TO_ENDPOINT:
+        case URB_FUNCTION_CLEAR_FEATURE_TO_OTHER:
+            inner->Type = 6;
+            inner->Data.Feature.Type = function == URB_FUNCTION_CLEAR_FEATURE_TO_DEVICE || function == URB_FUNCTION_CLEAR_FEATURE_TO_INTERFACE ||
+                function == URB_FUNCTION_CLEAR_FEATURE_TO_ENDPOINT || function == URB_FUNCTION_CLEAR_FEATURE_TO_OTHER ? 2 : 1;
+            inner->Data.Feature.Subtype = function == URB_FUNCTION_SET_FEATURE_TO_DEVICE || function == URB_FUNCTION_CLEAR_FEATURE_TO_DEVICE ? 1 :
+                (function == URB_FUNCTION_SET_FEATURE_TO_INTERFACE || function == URB_FUNCTION_CLEAR_FEATURE_TO_INTERFACE ? 2 :
+                 (function == URB_FUNCTION_SET_FEATURE_TO_ENDPOINT || function == URB_FUNCTION_CLEAR_FEATURE_TO_ENDPOINT ? 3 : 4));
+            inner->Data.Feature.Index = Urb->UrbControlFeatureRequest.Index;
+            inner->Data.Feature.Value = Urb->UrbControlFeatureRequest.FeatureSelector;
+            break;
+        case URB_FUNCTION_ABORT_PIPE:
+        case URB_FUNCTION_SYNC_RESET_PIPE_AND_CLEAR_STALL:
+            inner->Type = 4;
+            inner->Data.Reset.Type = function == URB_FUNCTION_ABORT_PIPE ? 4 : 3;
+            inner->Data.Reset.EpAddress = queueContext->EndpointAddress;
+            break;
+        case URB_FUNCTION_SELECT_CONFIGURATION: {
+            LONG value = -1;
+            if (Urb->UrbSelectConfiguration.ConfigurationDescriptor != NULL) {
+                __try { value = Urb->UrbSelectConfiguration.ConfigurationDescriptor->bConfigurationValue; }
+                __except (EXCEPTION_EXECUTE_HANDLER) { ExFreePoolWithTag(transaction, VHCD_TX_SIGNATURE); return GetExceptionCode(); }
+            }
             inner->Type = 1; inner->Data.Descriptor.Type = 2; inner->Data.Descriptor.Subtype = 1; inner->Data.Descriptor.Index = -1; inner->Data.Descriptor.Value = value; inner->DataLength = 0;
-        } else {
+            break;
+        }
+        case URB_FUNCTION_SELECT_INTERFACE:
             inner->Type = 1; inner->Data.Descriptor.Type = 2; inner->Data.Descriptor.Subtype = 2;
             inner->Data.Descriptor.Index = Urb->UrbSelectInterface.Interface.InterfaceNumber;
             inner->Data.Descriptor.Value = Urb->UrbSelectInterface.Interface.AlternateSetting; inner->DataLength = 0;
+            break;
+        default:
+            ExFreePoolWithTag(transaction, VHCD_TX_SIGNATURE);
+            return STATUS_NOT_SUPPORTED;
+        }
+        if (!isRead && transferLength != 0) {
+            RtlCopyMemory((PUCHAR)inner + sizeof(*inner) + metadataLength, transaction->TransferBuffer, transferLength);
         }
     }
     {
@@ -813,6 +1142,7 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
     signalSemaphore = gSlots[slot].Semaphore;
     ObReferenceObject(signalSemaphore);
     WdfSpinLockRelease(gSlotLock);
+    Urb->UrbHeader.Status = USBD_STATUS_PENDING;
     {
         NTSTATUS status = WdfRequestMarkCancelableEx(Request, VhcdEvtTransferCanceled);
         if (!NT_SUCCESS(status)) {
@@ -871,7 +1201,9 @@ VOID VhcdEvtEndpointIoInternalDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, 
         PVHCD_TRANSACTION transaction = NULL;
         NTSTATUS status = VhcdMapUrb(Queue, Request, urb, &transaction);
         if (NT_SUCCESS(status)) return;
-        urb->UrbHeader.Status = status == STATUS_NOT_SUPPORTED ? USBD_STATUS_NOT_SUPPORTED : USBD_STATUS_INVALID_PARAMETER;
+        urb->UrbHeader.Status = status == STATUS_NOT_SUPPORTED ? USBD_STATUS_NOT_SUPPORTED :
+            (status == STATUS_DEVICE_NOT_CONNECTED ? USBD_STATUS_DEVICE_GONE :
+             (status == STATUS_BUFFER_TOO_SMALL ? USBD_STATUS_BUFFER_TOO_SMALL : USBD_STATUS_INVALID_PARAMETER));
         WdfRequestComplete(Request, STATUS_SUCCESS);
     }
 }
@@ -1003,14 +1335,17 @@ static NTSTATUS VhcdCompleteIsoResponse(_Inout_ PVHCD_TRANSACTION Transaction, _
     for (i = 0; i < packetCount; ++i) {
         ULONG offset = response->packets[i].offset;
         ULONG length = response->packets[i].length;
-        if (offset > dataBytes || length > dataBytes - offset) return STATUS_INVALID_PARAMETER;
+        USBD_ISO_PACKET_DESCRIPTOR* original = &urb->UrbIsochronousTransfer.IsoPacket[i];
+        if (offset != original->Offset || offset > dataBytes || length > dataBytes - offset ||
+            offset > Transaction->TransferLength || length > Transaction->TransferLength - offset)
+            return STATUS_INVALID_PARAMETER;
         if (offset + length > used) used = offset + length;
-        urb->UrbIsochronousTransfer.IsoPacket[i].Offset = offset;
-        urb->UrbIsochronousTransfer.IsoPacket[i].Length = length;
-        urb->UrbIsochronousTransfer.IsoPacket[i].Status = response->packets[i].status;
+        original->Length = length;
+        original->Status = response->packets[i].status == 0 ? USBD_STATUS_SUCCESS : (USBD_STATUS)0x80000000;
     }
     if (Transaction->IsRead && used != 0)
         RtlCopyMemory(Transaction->TransferBuffer, (PUCHAR)response + Transaction->MetadataLength, used);
+    urb->UrbIsochronousTransfer.StartFrame = response->start_frame;
     urb->UrbIsochronousTransfer.ErrorCount = response->error_count;
     urb->UrbIsochronousTransfer.TransferBufferLength = used;
     return STATUS_SUCCESS;
@@ -1022,16 +1357,66 @@ static NTSTATUS VhcdApplyResponse(_Inout_ PVHCD_TRANSACTION Transaction, _In_ PV
         ResponseBytes < sizeof(ioctl_usbtx_header_t) + (ULONG)Inner->DataLength)
         return STATUS_INVALID_PARAMETER;
     if (Inner->Result != 0) return STATUS_UNSUCCESSFUL;
+    if (Transaction->Urb == NULL)
+        return Inner->DataLength == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
     if (Transaction->Isochronous) return VhcdCompleteIsoResponse(Transaction, Inner);
     if ((ULONG)Inner->DataLength > Transaction->TransferLength) return STATUS_INVALID_PARAMETER;
-    if (Transaction->IsRead && Inner->DataLength != 0) {
-        RtlCopyMemory(Transaction->TransferBuffer, (PUCHAR)Inner + sizeof(*Inner), (ULONG)Inner->DataLength);
+    if (Transaction->Urb->UrbHeader.Function == URB_FUNCTION_GET_CURRENT_FRAME_NUMBER) {
+        if (Inner->DataLength == sizeof(USHORT)) {
+            USHORT frame;
+            RtlCopyMemory(&frame, (PUCHAR)Inner + sizeof(*Inner), sizeof(frame));
+            Transaction->Urb->UrbGetCurrentFrameNumber.FrameNumber = frame;
+            return STATUS_SUCCESS;
+        }
+        if (Inner->DataLength == sizeof(ULONG)) {
+            RtlCopyMemory(&Transaction->Urb->UrbGetCurrentFrameNumber.FrameNumber, (PUCHAR)Inner + sizeof(*Inner), sizeof(ULONG));
+            return STATUS_SUCCESS;
+        }
+        return STATUS_INVALID_PARAMETER;
     }
+    if (Transaction->IsRead && Inner->DataLength != 0)
+        RtlCopyMemory(Transaction->TransferBuffer, (PUCHAR)Inner + sizeof(*Inner), (ULONG)Inner->DataLength);
     switch (Transaction->Urb->UrbHeader.Function) {
     case URB_FUNCTION_CONTROL_TRANSFER: Transaction->Urb->UrbControlTransfer.TransferBufferLength = (ULONG)Inner->DataLength; break;
     case URB_FUNCTION_CONTROL_TRANSFER_EX: Transaction->Urb->UrbControlTransferEx.TransferBufferLength = (ULONG)Inner->DataLength; break;
+    case URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER: Transaction->Urb->UrbBulkOrInterruptTransfer.TransferBufferLength = (ULONG)Inner->DataLength; break;
+    case URB_FUNCTION_GET_DESCRIPTOR_FROM_DEVICE:
+    case URB_FUNCTION_SET_DESCRIPTOR_TO_DEVICE:
+    case URB_FUNCTION_GET_DESCRIPTOR_FROM_ENDPOINT:
+    case URB_FUNCTION_SET_DESCRIPTOR_TO_ENDPOINT:
+    case URB_FUNCTION_GET_DESCRIPTOR_FROM_INTERFACE:
+    case URB_FUNCTION_SET_DESCRIPTOR_TO_INTERFACE: Transaction->Urb->UrbControlDescriptorRequest.TransferBufferLength = (ULONG)Inner->DataLength; break;
+    case URB_FUNCTION_VENDOR_DEVICE:
+    case URB_FUNCTION_VENDOR_INTERFACE:
+    case URB_FUNCTION_VENDOR_ENDPOINT:
+    case URB_FUNCTION_VENDOR_OTHER:
+    case URB_FUNCTION_CLASS_DEVICE:
+    case URB_FUNCTION_CLASS_INTERFACE:
+    case URB_FUNCTION_CLASS_ENDPOINT:
+    case URB_FUNCTION_CLASS_OTHER: Transaction->Urb->UrbControlVendorClassRequest.TransferBufferLength = (ULONG)Inner->DataLength; break;
+    case URB_FUNCTION_GET_STATUS_FROM_DEVICE:
+    case URB_FUNCTION_GET_STATUS_FROM_INTERFACE:
+    case URB_FUNCTION_GET_STATUS_FROM_ENDPOINT:
+    case URB_FUNCTION_GET_STATUS_FROM_OTHER: Transaction->Urb->UrbControlGetStatusRequest.TransferBufferLength = (ULONG)Inner->DataLength; break;
+    case URB_FUNCTION_GET_CONFIGURATION: Transaction->Urb->UrbControlGetConfigurationRequest.TransferBufferLength = (ULONG)Inner->DataLength; break;
+    case URB_FUNCTION_GET_INTERFACE: Transaction->Urb->UrbControlGetInterfaceRequest.TransferBufferLength = (ULONG)Inner->DataLength; break;
+    case URB_FUNCTION_GET_MS_FEATURE_DESCRIPTOR: Transaction->Urb->UrbOSFeatureDescriptorRequest.TransferBufferLength = (ULONG)Inner->DataLength; break;
+    case URB_FUNCTION_SET_FEATURE_TO_DEVICE:
+    case URB_FUNCTION_SET_FEATURE_TO_INTERFACE:
+    case URB_FUNCTION_SET_FEATURE_TO_ENDPOINT:
+    case URB_FUNCTION_SET_FEATURE_TO_OTHER:
+    case URB_FUNCTION_CLEAR_FEATURE_TO_DEVICE:
+    case URB_FUNCTION_CLEAR_FEATURE_TO_INTERFACE:
+    case URB_FUNCTION_CLEAR_FEATURE_TO_ENDPOINT:
+    case URB_FUNCTION_CLEAR_FEATURE_TO_OTHER:
+    case URB_FUNCTION_ABORT_PIPE:
+    case URB_FUNCTION_SYNC_RESET_PIPE_AND_CLEAR_STALL:
+    case URB_FUNCTION_SELECT_CONFIGURATION:
+    case URB_FUNCTION_SELECT_INTERFACE:
+        if (Inner->DataLength != 0) return STATUS_INVALID_PARAMETER;
+        break;
     case URB_FUNCTION_ISOCH_TRANSFER: break;
-    default: break;
+    default: return STATUS_NOT_SUPPORTED;
     }
     return STATUS_SUCCESS;
 }
@@ -1119,7 +1504,9 @@ static VOID VhcdEndTransaction(WDFREQUEST Request, size_t InputLength)
     }
     WdfSpinLockRelease(gSlotLock);
     if (transaction == NULL) { WdfRequestComplete(Request, STATUS_NOT_FOUND); return; }
-    status = WdfRequestUnmarkCancelable(transaction->Request);
+    status = transaction->Request != NULL
+        ? WdfRequestUnmarkCancelable(transaction->Request)
+        : STATUS_SUCCESS;
     if (status == STATUS_CANCELLED) {
         VhcdQueueTransactionCancellation(transaction);
         VhcdTxRelease(transaction);
@@ -1265,6 +1652,9 @@ NTSTATUS VhcdEvtDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
     if (!NT_SUCCESS(status)) return status;
     UCX_CONTROLLER_CONFIG_INIT(&controllerConfig, "Virtual Device Camera UCX HCD");
     controllerConfig.EvtControllerUsbDeviceAdd = VhcdEvtControllerUsbDeviceAdd;
+    controllerConfig.EvtControllerQueryUsbCapability = VhcdEvtControllerQueryUsbCapability;
+    controllerConfig.EvtControllerGetCurrentFrameNumber = VhcdEvtControllerGetCurrentFrameNumber;
+    controllerConfig.EvtControllerReset = VhcdEvtControllerReset;
     status = UcxControllerCreate(device, &controllerConfig, WDF_NO_OBJECT_ATTRIBUTES, &gController);
     if (!NT_SUCCESS(status)) return status;
     UCX_ROOTHUB_CONFIG_INIT_WITH_CONTROL_URB_HANDLER(&rootHubConfig, VhcdEvtRootHubControlUrb, VhcdEvtRootHubInterruptTx, VhcdEvtRootHubGetInfo, VhcdEvtRootHubGet20PortInfo, VhcdEvtRootHubGet30PortInfo);
