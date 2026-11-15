@@ -472,7 +472,7 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
             ULONG hubStatus = 0;
             if (length < sizeof(hubStatus) || data == NULL) urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
             else { RtlCopyMemory(data, &hubStatus, sizeof(hubStatus)); urb->UrbControlTransfer.TransferBufferLength = sizeof(hubStatus); }
-        } else if ((setup[0] & 0x1f) == 3 && index != 0) {
+        } else if ((setup[0] & 0x1f) == 3 && index != 0 && index <= VHCD_MAX_PORTS) {
             VhcdReadPort(index, &statusWord, &changeWord);
             if (length < sizeof(ULONG) || data == NULL) urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
             else { ULONG portStatus = statusWord | ((ULONG)changeWord << 16); RtlCopyMemory(data, &portStatus, sizeof(portStatus)); urb->UrbControlTransfer.TransferBufferLength = sizeof(portStatus); }
@@ -510,13 +510,16 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
             }
             if (!NT_SUCCESS(resetStatus)) {
                 supported = FALSE;
-                urb->UrbHeader.Status = USBD_STATUS_INSUFFICIENT_RESOURCES;
+                urb->UrbHeader.Status = resetStatus == STATUS_DEVICE_NOT_CONNECTED
+                    ? USBD_STATUS_DEVICE_GONE
+                    : USBD_STATUS_INSUFFICIENT_RESOURCES;
             }
         }
         if (value == 16 && setup[1] == USB_REQUEST_CLEAR_FEATURE) VhcdFinalizeSlotIfQuiescent(i);
         if (changed && gRootHub != WDF_NO_HANDLE) UcxRootHubPortChanged(gRootHub);
         urb->UrbControlTransfer.TransferBufferLength = 0;
-        if (!supported) urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
+        if (!supported && urb->UrbHeader.Status == USBD_STATUS_SUCCESS)
+            urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
     } else {
         urb->UrbHeader.Status = USBD_STATUS_INVALID_URB_FUNCTION;
     }
@@ -664,8 +667,12 @@ static NTSTATUS VhcdQueuePortResetNotification(LONG SlotIndex, LONG ResetType)
     inner->Data.Reset.Type = ResetType;
 
     WdfSpinLockAcquire(gSlotLock);
-    if (!gSlots[SlotIndex].Allocated || !gSlots[SlotIndex].Present ||
-        gSlots[SlotIndex].TransactionCount >= VHCD_MAX_SLOT_TRANSACTIONS ||
+    if (!gSlots[SlotIndex].Allocated || !gSlots[SlotIndex].Present) {
+        WdfSpinLockRelease(gSlotLock);
+        ExFreePoolWithTag(transaction, VHCD_TX_SIGNATURE);
+        return STATUS_DEVICE_NOT_CONNECTED;
+    }
+    if (gSlots[SlotIndex].TransactionCount >= VHCD_MAX_SLOT_TRANSACTIONS ||
         gSlots[SlotIndex].TransactionBytes > VHCD_MAX_SLOT_TRANSACTION_BYTES ||
         allocationBytes > VHCD_MAX_SLOT_TRANSACTION_BYTES - gSlots[SlotIndex].TransactionBytes ||
         gTransactionCount >= VHCD_MAX_CONTROLLER_TRANSACTIONS ||
@@ -673,7 +680,7 @@ static NTSTATUS VhcdQueuePortResetNotification(LONG SlotIndex, LONG ResetType)
         allocationBytes > VHCD_MAX_CONTROLLER_TRANSACTION_BYTES - gTransactionBytes) {
         WdfSpinLockRelease(gSlotLock);
         ExFreePoolWithTag(transaction, VHCD_TX_SIGNATURE);
-        return STATUS_DEVICE_NOT_CONNECTED;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
     transaction->Id = ++gSlots[SlotIndex].NextTransactionId;
     transaction->Sequence = ++gSlots[SlotIndex].NextSequence;
@@ -1343,8 +1350,16 @@ static NTSTATUS VhcdCompleteIsoResponse(_Inout_ PVHCD_TRANSACTION Transaction, _
         original->Length = length;
         original->Status = response->packets[i].status == 0 ? USBD_STATUS_SUCCESS : (USBD_STATUS)0x80000000;
     }
-    if (Transaction->IsRead && used != 0)
-        RtlCopyMemory(Transaction->TransferBuffer, (PUCHAR)response + Transaction->MetadataLength, used);
+    if (Transaction->IsRead) {
+        for (i = 0; i < packetCount; ++i) {
+            ULONG offset = response->packets[i].offset;
+            ULONG length = response->packets[i].length;
+            if (length != 0) {
+                RtlCopyMemory(Transaction->TransferBuffer + offset,
+                    (PUCHAR)response + Transaction->MetadataLength + offset, length);
+            }
+        }
+    }
     urb->UrbIsochronousTransfer.StartFrame = response->start_frame;
     urb->UrbIsochronousTransfer.ErrorCount = response->error_count;
     urb->UrbIsochronousTransfer.TransferBufferLength = used;
