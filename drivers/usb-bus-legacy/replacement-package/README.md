@@ -38,8 +38,10 @@ matching WDK/SDK and UCX 1.1 headers/libraries installed:
 ```
 
 The script builds both projects, stages the two SYS files and two INFs under
-`build/x64/Release`, then creates both catalogs with Inf2Cat. Build output is
-unsigned. Sign both `.cat` files with the intended publisher certificate after
+`build/x64/Release`, validates the INFs with InfVerif against Windows driver
+rules for build 19041, then creates both catalogs with Inf2Cat. Both kernel
+projects run WDK static analysis, and compiler warnings fail the build. Build
+output is unsigned. Sign both `.cat` files with the intended publisher certificate after
 catalog creation. Keep the private signing key out of the repository and
 package. For development signing, configure and trust a test certificate on a
 dedicated test machine according to the applicable Windows driver-signing

@@ -156,14 +156,14 @@ EVT_UCX_CONTROLLER_QUERY_USB_CAPABILITY VhcdEvtControllerQueryUsbCapability;
 EVT_UCX_CONTROLLER_GET_CURRENT_FRAMENUMBER VhcdEvtControllerGetCurrentFrameNumber;
 EVT_UCX_CONTROLLER_RESET VhcdEvtControllerReset;
 static VOID VhcdFinalizeSlotIfQuiescent(_In_ LONG SlotIndex);
-static VOID VhcdUsbDeviceCleanup(_In_ WDFOBJECT Object);
+static EVT_WDF_OBJECT_CONTEXT_CLEANUP VhcdUsbDeviceCleanup;
 static VOID VhcdCancelSlotTransactions(_In_ LONG SlotIndex, _In_ UCHAR EndpointAddress, _In_ BOOLEAN AllEndpoints);
 static VOID VhcdCancelEndpointTransfers(_In_ UCXENDPOINT Endpoint);
 static NTSTATUS VhcdQueuePortResetNotification(_In_ LONG SlotIndex, _In_ LONG ResetType,
                                                _In_ BOOLEAN AllowPoweredOffPort);
 /* UCX URB queue requests must complete on a separate DPC, even on fast failures. */
-static VOID VhcdCompleteRequestDpc(_In_ PKDPC Dpc, _In_opt_ PVOID DeferredContext,
-                                   _In_opt_ PVOID SystemArgument1, _In_opt_ PVOID SystemArgument2);
+static KDEFERRED_ROUTINE VhcdTransactionCancelDpc;
+static KDEFERRED_ROUTINE VhcdCompleteRequestDpc;
 static VOID VhcdCompleteRequestDeferred(_In_ WDFREQUEST Request, _In_opt_ PURB Urb,
                                         _In_ NTSTATUS RequestStatus, _In_ USBD_STATUS UsbStatus);
 EVT_UCX_CONTROLLER_USBDEVICE_ADD VhcdEvtControllerUsbDeviceAdd;
@@ -186,6 +186,9 @@ EVT_UCX_ENDPOINT_START VhcdEvtEndpointStart;
 EVT_UCX_ENDPOINT_ABORT VhcdEvtEndpointAbort;
 EVT_UCX_ENDPOINT_OK_TO_CANCEL_TRANSFERS VhcdEvtEndpointOkToCancelTransfers;
 EVT_UCX_ENDPOINT_RESET VhcdEvtEndpointReset;
+EVT_UCX_ENDPOINT_STATIC_STREAMS_ADD VhcdEvtEndpointStaticStreamsAdd;
+EVT_UCX_ENDPOINT_STATIC_STREAMS_ENABLE VhcdEvtEndpointStaticStreamsEnable;
+EVT_UCX_ENDPOINT_STATIC_STREAMS_DISABLE VhcdEvtEndpointStaticStreamsDisable;
 EVT_UCX_DEFAULT_ENDPOINT_UPDATE VhcdEvtDefaultEndpointUpdate;
 
 VOID VhcdEvtEndpointPurge(UCXCONTROLLER C, UCXENDPOINT E) { UNREFERENCED_PARAMETER(C); VhcdCancelEndpointTransfers(E); }
@@ -193,6 +196,25 @@ VOID VhcdEvtEndpointStart(UCXCONTROLLER C, UCXENDPOINT E) { UNREFERENCED_PARAMET
 VOID VhcdEvtEndpointAbort(UCXCONTROLLER C, UCXENDPOINT E) { UNREFERENCED_PARAMETER(C); VhcdCancelEndpointTransfers(E); }
 VOID VhcdEvtEndpointOkToCancelTransfers(UCXENDPOINT E) { UNREFERENCED_PARAMETER(E); }
 VOID VhcdEvtEndpointReset(UCXCONTROLLER C, UCXENDPOINT E, WDFREQUEST R) { UNREFERENCED_PARAMETER(C); VhcdCancelEndpointTransfers(E); WdfRequestComplete(R, STATUS_SUCCESS); }
+NTSTATUS VhcdEvtEndpointStaticStreamsAdd(UCXENDPOINT E, ULONG NumberOfStreams, PUCXSSTREAMS_INIT Init)
+{
+    UNREFERENCED_PARAMETER(E);
+    UNREFERENCED_PARAMETER(NumberOfStreams);
+    UNREFERENCED_PARAMETER(Init);
+    return STATUS_NOT_SUPPORTED;
+}
+VOID VhcdEvtEndpointStaticStreamsEnable(UCXENDPOINT E, UCXSSTREAMS Streams, WDFREQUEST R)
+{
+    UNREFERENCED_PARAMETER(E);
+    UNREFERENCED_PARAMETER(Streams);
+    WdfRequestComplete(R, STATUS_NOT_SUPPORTED);
+}
+VOID VhcdEvtEndpointStaticStreamsDisable(UCXENDPOINT E, UCXSSTREAMS Streams, WDFREQUEST R)
+{
+    UNREFERENCED_PARAMETER(E);
+    UNREFERENCED_PARAMETER(Streams);
+    WdfRequestComplete(R, STATUS_NOT_SUPPORTED);
+}
 VOID VhcdEvtDefaultEndpointUpdate(UCXCONTROLLER C, WDFREQUEST R) { UNREFERENCED_PARAMETER(C); WdfRequestComplete(R, STATUS_SUCCESS); }
 
 static VOID VhcdReleaseSlot(_In_ LONG SlotIndex, _In_ BOOLEAN SignalRemoval)
@@ -233,7 +255,7 @@ static VOID VhcdFinalizeSlotIfQuiescent(_In_ LONG SlotIndex)
     if (semaphore != NULL) ObDereferenceObject(semaphore);
 }
 
-static VOID VhcdUsbDeviceCleanup(WDFOBJECT Object)
+static VOID VhcdUsbDeviceCleanup(_In_ WDFOBJECT Object)
 {
     PVHCD_USBDEVICE_CONTEXT context = VhcdGetUsbDeviceContext((UCXUSBDEVICE)Object);
     LONG slot = (LONG)context->SlotIndex;
@@ -301,7 +323,7 @@ static NTSTATUS VhcdCreateEndpoint(UCXUSBDEVICE UsbDevice, PUCXENDPOINT_INIT End
         UCX_DEFAULT_ENDPOINT_EVENT_CALLBACKS_INIT(&defaultCallbacks, VhcdEvtEndpointPurge, VhcdEvtEndpointStart, VhcdEvtEndpointAbort, VhcdEvtEndpointOkToCancelTransfers, VhcdEvtDefaultEndpointUpdate);
         UcxDefaultEndpointInitSetEventCallbacks(EndpointInit, &defaultCallbacks);
     } else {
-        UCX_ENDPOINT_EVENT_CALLBACKS_INIT(&callbacks, VhcdEvtEndpointPurge, VhcdEvtEndpointStart, VhcdEvtEndpointAbort, VhcdEvtEndpointReset, VhcdEvtEndpointOkToCancelTransfers, NULL, NULL, NULL);
+        UCX_ENDPOINT_EVENT_CALLBACKS_INIT(&callbacks, VhcdEvtEndpointPurge, VhcdEvtEndpointStart, VhcdEvtEndpointAbort, VhcdEvtEndpointReset, VhcdEvtEndpointOkToCancelTransfers, VhcdEvtEndpointStaticStreamsAdd, VhcdEvtEndpointStaticStreamsEnable, VhcdEvtEndpointStaticStreamsDisable);
         UcxEndpointInitSetEventCallbacks(EndpointInit, &callbacks);
     }
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&endpointAttributes, VHCD_ENDPOINT_CONTEXT);
@@ -685,7 +707,9 @@ static VOID VhcdFinishTransfer(PVHCD_TRANSACTION Transaction, NTSTATUS Status, U
 static VOID VhcdTransactionCancelDpc(_In_ PKDPC Dpc, _In_opt_ PVOID DeferredContext,
                                      _In_opt_ PVOID SystemArgument1, _In_opt_ PVOID SystemArgument2)
 {
-    PVHCD_TRANSACTION transaction = (PVHCD_TRANSACTION)DeferredContext;
+    PVHCD_TRANSACTION transaction;
+    if (DeferredContext == NULL) return;
+    transaction = (PVHCD_TRANSACTION)DeferredContext;
     UNREFERENCED_PARAMETER(Dpc);
     UNREFERENCED_PARAMETER(SystemArgument1);
     UNREFERENCED_PARAMETER(SystemArgument2);
@@ -699,8 +723,8 @@ static VOID VhcdQueueTransactionCancellation(PVHCD_TRANSACTION Transaction)
     KeInsertQueueDpc(&Transaction->CancelDpc, NULL, NULL);
 }
 
-static NTSTATUS VhcdQueuePortResetNotification(LONG SlotIndex, LONG ResetType,
-                                                BOOLEAN AllowPoweredOffPort)
+static NTSTATUS VhcdQueuePortResetNotification(_In_ LONG SlotIndex, _In_ LONG ResetType,
+                                               _In_ BOOLEAN AllowPoweredOffPort)
 {
     PVHCD_TRANSACTION transaction;
     PKSEMAPHORE semaphore;
@@ -781,7 +805,7 @@ VOID VhcdEvtTransferCanceled(WDFREQUEST Request)
     }
 }
 
-static VOID VhcdCancelSlotTransactions(LONG SlotIndex, UCHAR EndpointAddress, BOOLEAN AllEndpoints)
+static VOID VhcdCancelSlotTransactions(_In_ LONG SlotIndex, _In_ UCHAR EndpointAddress, _In_ BOOLEAN AllEndpoints)
 {
     if (SlotIndex < 0 || SlotIndex >= VHCD_MAX_PORTS) return;
     for (;;) {
@@ -813,7 +837,7 @@ static VOID VhcdCancelSlotTransactions(LONG SlotIndex, UCHAR EndpointAddress, BO
     }
 }
 
-static VOID VhcdCancelEndpointTransfers(UCXENDPOINT Endpoint)
+static VOID VhcdCancelEndpointTransfers(_In_ UCXENDPOINT Endpoint)
 {
     PVHCD_ENDPOINT_CONTEXT context = VhcdGetEndpointContext(Endpoint);
     if (context != NULL) VhcdCancelSlotTransactions((LONG)context->SlotIndex, context->EndpointAddress, FALSE);
@@ -1160,7 +1184,13 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
             LONG value = -1;
             if (Urb->UrbSelectConfiguration.ConfigurationDescriptor != NULL) {
                 __try { value = Urb->UrbSelectConfiguration.ConfigurationDescriptor->bConfigurationValue; }
-                __except (EXCEPTION_EXECUTE_HANDLER) { ExFreePoolWithTag(transaction, VHCD_TX_SIGNATURE); return GetExceptionCode(); }
+                __except (GetExceptionCode() == STATUS_ACCESS_VIOLATION ||
+                    GetExceptionCode() == STATUS_DATATYPE_MISALIGNMENT
+                    ? EXCEPTION_EXECUTE_HANDLER
+                    : EXCEPTION_CONTINUE_SEARCH) {
+                    ExFreePoolWithTag(transaction, VHCD_TX_SIGNATURE);
+                    return GetExceptionCode();
+                }
             }
             inner->Type = 1; inner->Data.Descriptor.Type = 2; inner->Data.Descriptor.Subtype = 1; inner->Data.Descriptor.Index = -1; inner->Data.Descriptor.Value = value; inner->DataLength = 0;
             break;
@@ -1252,14 +1282,20 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
 static VOID VhcdCompleteRequestDpc(_In_ PKDPC Dpc, _In_opt_ PVOID DeferredContext,
                                   _In_opt_ PVOID SystemArgument1, _In_opt_ PVOID SystemArgument2)
 {
-    PVHCD_TRANSFER_CONTEXT context = (PVHCD_TRANSFER_CONTEXT)DeferredContext;
-    WDFREQUEST request = context->CompletionRequest;
-    PURB urb = context->CompletionUrb;
-    NTSTATUS requestStatus = context->CompletionStatus;
-    USBD_STATUS usbStatus = context->CompletionUsbStatus;
+    PVHCD_TRANSFER_CONTEXT context;
+    WDFREQUEST request;
+    PURB urb;
+    NTSTATUS requestStatus;
+    USBD_STATUS usbStatus;
     UNREFERENCED_PARAMETER(Dpc);
     UNREFERENCED_PARAMETER(SystemArgument1);
     UNREFERENCED_PARAMETER(SystemArgument2);
+    if (DeferredContext == NULL) return;
+    context = (PVHCD_TRANSFER_CONTEXT)DeferredContext;
+    request = context->CompletionRequest;
+    urb = context->CompletionUrb;
+    requestStatus = context->CompletionStatus;
+    usbStatus = context->CompletionUsbStatus;
     context->CompletionRequest = NULL;
     context->CompletionUrb = NULL;
     if (urb != NULL) urb->UrbHeader.Status = usbStatus;
@@ -1386,9 +1422,11 @@ VOID VhcdEvtIoInCallerContext(WDFDEVICE Device, WDFREQUEST Request)
     RtlZeroMemory(context, sizeof(*context));
     if (parameters.Parameters.DeviceIoControl.IoControlCode == IOCTL_BEGIN_TRANS_USB_DATA) {
         status = WdfRequestRetrieveUnsafeUserOutputBuffer(Request, sizeof(ioctl_usbtx_header_t), &userBuffer, &bufferLength);
+        if (NT_SUCCESS(status) && userBuffer == NULL) status = STATUS_INVALID_USER_BUFFER;
         if (NT_SUCCESS(status)) status = WdfRequestProbeAndLockUserBufferForWrite(Request, userBuffer, bufferLength, &context->OutputMemory);
     } else {
         status = WdfRequestRetrieveUnsafeUserInputBuffer(Request, sizeof(ioctl_usbtx_header_t), &userBuffer, &bufferLength);
+        if (NT_SUCCESS(status) && userBuffer == NULL) status = STATUS_INVALID_USER_BUFFER;
         if (NT_SUCCESS(status)) status = WdfRequestProbeAndLockUserBufferForRead(Request, userBuffer, bufferLength, &context->InputMemory);
     }
     if (!NT_SUCCESS(status)) { WdfRequestComplete(Request, status); return; }
@@ -1637,6 +1675,7 @@ VOID VhcdEvtIoDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, size_t OutputLen
         if (!NT_SUCCESS(status)) { WdfRequestComplete(Request, status); return; }
         status = WdfRequestRetrieveOutputBuffer(Request, sizeof(address), &buffer, &length);
         if (!NT_SUCCESS(status)) { WdfRequestComplete(Request, status); return; }
+        if (length < sizeof(address)) { WdfRequestComplete(Request, STATUS_BUFFER_TOO_SMALL); return; }
         fileContext = VhcdGetFileContext(WdfRequestGetFileObject(Request));
         if (fileContext == NULL || fileContext->Signature != VHCD_FILE_SIGNATURE || fileContext->SlotIndex >= 0 || ioContext == NULL || ioContext->AddSemaphore == NULL) { WdfRequestComplete(Request, STATUS_INVALID_DEVICE_STATE); return; }
         semaphore = ioContext->AddSemaphore;

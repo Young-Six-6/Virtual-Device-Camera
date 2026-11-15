@@ -71,6 +71,25 @@ $inf2cat = Get-ChildItem -LiteralPath $kitRoot -Directory -ErrorAction Stop |
 if (-not $inf2cat) {
     throw 'Inf2Cat.exe was not found. Install the Windows Driver Kit.'
 }
+$toolsRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Tools'
+$infverif = Get-ChildItem -LiteralPath $toolsRoot -Directory -ErrorAction Stop |
+    Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' } |
+    Sort-Object { [version]$_.Name } -Descending |
+    ForEach-Object {
+        $candidate = Join-Path $_.FullName 'x64\InfVerif.exe'
+        if (Test-Path -LiteralPath $candidate) { $candidate; break }
+    } |
+    Select-Object -First 1
+if (-not $infverif) {
+    throw 'InfVerif.exe was not found under Windows Kits\10\Tools. Install the Windows Driver Kit.'
+}
+$infFiles = @(
+    (Join-Path $packageDir 'xusb_reconstructed_tree.inf'),
+    (Join-Path $packageDir 'xusb_ucx_hcd.inf'))
+& $infverif /wbuild 10.0.19041 /w @infFiles
+if ($LASTEXITCODE -ne 0) {
+    throw "InfVerif failed for the Windows 10 19041+ driver package (exit code $LASTEXITCODE)"
+}
 
 & $inf2cat "/driver:$packageDir" /os:10_VB_X64
 if ($LASTEXITCODE -ne 0) {

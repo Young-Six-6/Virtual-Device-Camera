@@ -11,7 +11,7 @@ CatalogFile.NTamd64 = xusb_ucx_hcd.cat
 PnpLockdown = 1
 
 [DestinationDirs]
-DefaultDestDir = 12
+DefaultDestDir = 13
 
 [SourceDisksNames]
 1 = %DiskName%,,,
@@ -45,7 +45,7 @@ DisplayName = %ServiceDesc%
 ServiceType = 1
 StartType = 3
 ErrorControl = 1
-ServiceBinary = %12%\VirtualCameraUcxHcd.sys
+ServiceBinary = %13%\VirtualCameraUcxHcd.sys
 
 [Strings]
 ProviderName = "Virtual Device Camera Project"
