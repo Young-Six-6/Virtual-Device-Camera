@@ -1,0 +1,48 @@
+; xusb reconstructed driver package: root hub role.
+
+[Version]
+Signature = "$Windows NT$"
+Class = USB
+ClassGuid = {36FC9E60-C465-11CF-8056-444553540000}
+Provider = %ProviderName%
+DriverVer = 11/15/2026,1.0.0.0
+CatalogFile.NTamd64 = xusb_reconstructed_usb.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[SourceDisksFiles]
+xusb_driver.sys = 1
+
+[Manufacturer]
+%ProviderName% = Models,NTamd64
+
+[Models.NTamd64]
+%RootHubDesc% = RootHub_Install, vFxsUSB\vRootHUB&Virtual&Fanxiushu
+
+[RootHub_Install.NT]
+CopyFiles = DriverCopy
+
+[RootHub_Install.NT.Services]
+AddService = xusb_roothub,0x00000002,RootHub_Service
+
+[DriverCopy]
+xusb_driver.sys
+
+[RootHub_Service]
+DisplayName = %RootHubServiceDesc%
+ServiceType = 1
+StartType = 3
+ErrorControl = 1
+ServiceBinary = %12%\xusb_driver.sys
+LoadOrderGroup = Extended Base
+
+[Strings]
+ProviderName = "Virtual Device Camera reconstructed driver"
+DiskName = "Virtual Device Camera reconstructed driver"
+RootHubDesc = "Virtual USB root hub (reconstructed)"
+RootHubServiceDesc = "Virtual USB root hub (reconstructed)"

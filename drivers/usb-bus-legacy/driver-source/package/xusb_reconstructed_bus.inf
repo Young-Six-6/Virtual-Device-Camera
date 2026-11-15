@@ -1,0 +1,49 @@
+; xusb reconstructed driver package: bus enumerator roles.
+; This INF is intentionally separate from the preserved 2016 package.
+
+[Version]
+Signature = "$Windows NT$"
+Class = System
+ClassGuid = {4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider = %ProviderName%
+DriverVer = 11/15/2026,1.0.0.0
+CatalogFile.NTamd64 = xusb_reconstructed_bus.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[SourceDisksFiles]
+xusb_driver.sys = 1
+
+[Manufacturer]
+%ProviderName% = Models,NTamd64
+
+[Models.NTamd64]
+%UsbOnlyDesc% = UsbOnly_Install, root\*xusb_enumbus
+
+[UsbOnly_Install.NT]
+CopyFiles = DriverCopy
+
+[UsbOnly_Install.NT.Services]
+AddService = xusb_enumbus,0x00000002,UsbOnly_Service
+
+[DriverCopy]
+xusb_driver.sys
+
+[UsbOnly_Service]
+DisplayName = %UsbOnlyServiceDesc%
+ServiceType = 1
+StartType = 3
+ErrorControl = 1
+ServiceBinary = %12%\xusb_driver.sys
+LoadOrderGroup = Extended Base
+
+[Strings]
+ProviderName = "Virtual Device Camera reconstructed driver"
+DiskName = "Virtual Device Camera reconstructed driver"
+UsbOnlyDesc = "Virtual USB device enumerator (reconstructed)"
+UsbOnlyServiceDesc = "Virtual USB device enumerator (reconstructed)"

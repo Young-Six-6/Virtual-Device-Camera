@@ -69,6 +69,7 @@ typedef struct _XUSB_CHILD_EXTENSION {
     LONG BusAddress;
     BOOLEAN Present;
     BOOLEAN Removed;
+    GUID ContainerId;
     DEVICE_POWER_STATE DevicePowerState;
     UNICODE_STRING DeviceId;
     UNICODE_STRING HardwareIds;

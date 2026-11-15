@@ -17,7 +17,7 @@ x64 `xusb_virt.sys` 大小为 51,368 字节；其 Git blob SHA-1 为 `fb62e68217
 
 因此，目前可追溯到“原项目文档引用的 CSDN 资源、同名 GitHub 分发副本和二进制内嵌作者/签名信息”；仓库没有完整驱动源码，也没有足够证据把二进制映射到某个可重建的公开源码提交。驱动二进制的独立许可条款也未在包内提供，不能仅凭应用程序的 MIT `LICENSE` 推断驱动许可。
 
-`drivers/usb-bus-legacy/driver-source/` 是独立的新 WDM 源码工程，不会覆盖旧二进制包。其当前复刻范围和限制如下：
+`drivers/usb-bus-legacy/driver-source/` 是独立的新 WDM 源码工程，不会覆盖旧二进制包。原包四种角色及当前复刻状态见[重建驱动说明](../drivers/usb-bus-legacy/driver-source/README.md)：默认安装包只绑定应用使用的 USB-only enumerator；Root Hub、Host Controller 和 USB-tree 均隔离在实验包。原二进制在角色选择中将未匹配 ID 归入 USB-only role 0；重建版已保留此回退行为，INF 仍只匹配受支持的已知 ID。
 
 用户态通过 `IOCTL_XUSB_QUERY_DRIVER_INFO` 探测重建驱动。FOSS 版本返回带 `FOSS` 签名的版本结构；旧原版不识别这个私有查询码，用户态将其标记为“原版驱动”。既有四个 USB IOCTL 编号和结构保持不变。Web UI 的驱动状态卡也会显示识别结果。
 
@@ -28,7 +28,7 @@ x64 `xusb_virt.sys` 大小为 51,368 字节；其 Git blob SHA-1 为 `fb62e68217
 
 协议路径打通不代表与仓库当前用户态服务兼容。现有 UVC handler 尚未实现 bulk/interrupt 传输或 Microsoft OS feature descriptor，因此这些路径暂不可用。驱动已兼容该 handler 对 `GET_CURRENT_FRAME_NUMBER` 返回的 16 位值，并按 URB 需要扩展为 32 位。重建版实现 USB bus type 查询，并在 Root Hub FDO 本地响应 Hub name/`IOCTL_INTERNAL_USB_GET_HUB_COUNT`、Host Controller 返回 Root Hub PDO/栈顶、子 PDO 根据 present 状态响应 `IOCTL_INTERNAL_USB_GET_PORT_STATUS`；这些是补足总线语义的实现，尚未证明与旧二进制完全一致。其他 USB hub/port 请求未覆盖。驱动已将 WMI MOF schema/resource 嵌入镜像并通过 `mofcomp -WMI` 检查，WMI 消费者发现 class 的行为仍未在目标系统验证。用户态服务无响应时没有单请求超时。完整 USB Host Controller 协议、父 FDO 控制接口的最终访问策略以及 Windows USB/PnP/摄像头端到端运行均待验证。
 
-目前新驱动源码已通过本机 x64 Release/Debug 构建，但尚不能视为可替换旧驱动的全功能实现。上游 `x86/`、`x64/` 二进制保持原样。反编译清单和函数分析保存在本机 `source-reconstruction/` 目录，由 `.gitignore` 排除，不属于项目源码。
+当前 Release 驱动源码已构建，默认 x64 包已由 Inf2Cat 完成 signability 检查并生成 catalog；catalog 未签名，无法作为生产包直接部署。新包的构建命令、角色隔离和验证边界见[重建驱动说明](../drivers/usb-bus-legacy/driver-source/README.md)。这仍是替换候选，尚未证明可全功能替代原驱动：Root Hub/Host Controller/USB-tree 协议尚不完整，且未在目标 Windows 设备上完成安装、摄像头流和热插拔验证。上游 `x86/`、`x64/` 二进制保持原样。反编译清单和函数分析保存在本机 `source-reconstruction/` 目录，由 `.gitignore` 排除，不属于项目源码。
 
 ## INF 中的复制与改名
 

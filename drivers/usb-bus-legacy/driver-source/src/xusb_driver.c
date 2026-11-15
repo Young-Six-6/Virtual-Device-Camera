@@ -1,7 +1,9 @@
 #include <ntddk.h>
 #include <initguid.h>
+#include <usb.h>
 #include <usbiodef.h>
 #include <usbioctl.h>
+#include <usbbusif.h>
 #include <wdmguid.h>
 #include "xusb_driver.h"
 
@@ -260,7 +262,8 @@ static XUSB_DEVICE_ROLE XusbRoleFromHardwareIds(
         offset += (length + 1) * sizeof(WCHAR);
     }
 
-    return XusbRoleUnknown;
+    /* The original image assigns unmatched device IDs to the USB-only role. */
+    return XusbRoleUsbOnlyEnumerator;
 }
 
 NTSTATUS XusbGetDeviceRole(
@@ -297,9 +300,6 @@ NTSTATUS XusbGetDeviceRole(
         *Role = XusbRoleFromHardwareIds(
             (PCWSTR)hardwareIds,
             propertyBytes);
-        if (*Role == XusbRoleUnknown) {
-            status = STATUS_NO_SUCH_DEVICE;
-        }
     }
     ExFreePoolWithTag(hardwareIds, 'iUXV');
     return status;
