@@ -17,7 +17,7 @@ x64 `xusb_virt.sys` 大小为 51,368 字节；其 Git blob SHA-1 为 `fb62e68217
 
 因此，目前可追溯到“原项目文档引用的 CSDN 资源、同名 GitHub 分发副本和二进制内嵌作者/签名信息”；仓库没有完整驱动源码，也没有足够证据把二进制映射到某个可重建的公开源码提交。驱动二进制的独立许可条款也未在包内提供，不能仅凭应用程序的 MIT `LICENSE` 推断驱动许可。
 
-`drivers/usb-bus-legacy/driver-source/` 是独立的新 WDM 源码工程，不会覆盖旧二进制包。原包四种角色及当前复刻状态见[重建驱动说明](../drivers/usb-bus-legacy/driver-source/README.md)：默认安装包只绑定应用使用的 USB-only enumerator；Root Hub、Host Controller 和 USB-tree 均隔离在实验包。原二进制在角色选择中将未匹配 ID 归入 USB-only role 0；重建版已保留此回退行为，INF 仍只匹配受支持的已知 ID。
+`drivers/usb-bus-legacy/driver-source/` 是独立的新 WDM 源码工程，不会覆盖旧二进制包。原包四种角色及当前复刻状态见[重建驱动说明](../drivers/usb-bus-legacy/driver-source/README.md)：默认包包含应用使用的 USB-only enumerator 与用于更新旧应用控制接口提供者的 Root Hub；Host Controller/USB-tree 仍隔离在实验包。原二进制在角色选择中将未匹配 ID 归入 USB-only role 0；重建版已保留此回退行为，INF 仍只匹配受支持的已知 ID。
 
 用户态通过 `IOCTL_XUSB_QUERY_DRIVER_INFO` 探测重建驱动。FOSS 版本返回带 `FOSS` 签名的版本结构；旧原版不识别这个私有查询码，用户态将其标记为“原版驱动”。既有四个 USB IOCTL 编号和结构保持不变。Web UI 的驱动状态卡也会显示识别结果。
 
@@ -26,9 +26,9 @@ x64 `xusb_virt.sys` 大小为 51,368 字节；其 Git blob SHA-1 为 `fb62e68217
 - 配置/接口选择会校验当前配置。Pipe 和 interface 句柄带有代际信息，避免 alternate setting 切换后旧句柄误指向新端点。每个父设备最多创建 256 个子 PDO；每个子 PDO 最多允许 256 个事务和 64 MiB 事务预算，父设备总上限为 1024 个事务和 256 MiB。
 - 子 PDO 使用从旧二进制恢复的 `IoCreateDeviceSecure` 默认 SDDL 和 class GUID：SY 完全访问，BA/WD/RC 读写执行；相同 class GUID 保留 Windows 类注册表安全覆盖机制。子 PDO 处理基础 query/set power IRP。父 FDO 已实现 WMI provider 注册和 8 字节数据块回调。
 
-协议路径打通不代表与仓库当前用户态服务兼容。现有 UVC handler 尚未实现 bulk/interrupt 传输或 Microsoft OS feature descriptor，因此这些路径暂不可用。驱动已兼容该 handler 对 `GET_CURRENT_FRAME_NUMBER` 返回的 16 位值，并按 URB 需要扩展为 32 位。重建版实现 USB bus type 查询，并在 Root Hub FDO 本地响应 Hub name/`IOCTL_INTERNAL_USB_GET_HUB_COUNT`、Host Controller 返回 Root Hub PDO/栈顶、子 PDO 根据 present 状态响应 `IOCTL_INTERNAL_USB_GET_PORT_STATUS`；这些是补足总线语义的实现，尚未证明与旧二进制完全一致。其他 USB hub/port 请求未覆盖。驱动已将 WMI MOF schema/resource 嵌入镜像并通过 `mofcomp -WMI` 检查，WMI 消费者发现 class 的行为仍未在目标系统验证。用户态服务无响应时没有单请求超时。完整 USB Host Controller 协议、父 FDO 控制接口的最终访问策略以及 Windows USB/PnP/摄像头端到端运行均待验证。
+协议路径打通不代表与仓库当前用户态服务兼容。现有 UVC handler 尚未实现 bulk/interrupt 传输或 Microsoft OS feature descriptor，因此这些路径暂不可用。驱动已兼容该 handler 对 `GET_CURRENT_FRAME_NUMBER` 返回的 16 位值，并按 URB 需要扩展为 32 位。重建版实现 USB bus type 查询，并在 Root Hub FDO 本地响应 Hub name/`IOCTL_INTERNAL_USB_GET_HUB_COUNT`、Host Controller 返回 Root Hub PDO/栈顶、子 PDO 根据 present 状态响应 `IOCTL_INTERNAL_USB_GET_PORT_STATUS`；这些是补足总线语义的实现，尚未证明与旧二进制完全一致。USBDI 查询现按原版提供 V0–V3 接口槽和回调返回值；PDO 处理设备文本和 usage notification，明确不支持 Eject，并复用用户态建议的 BusAddress。其他 USB hub/port 请求未覆盖。驱动已将 WMI MOF schema/resource 嵌入镜像并通过 `mofcomp -WMI` 检查，WMI 消费者发现 class 的行为仍未在目标系统验证。用户态服务无响应时没有单请求超时。完整 USB Host Controller 协议、父 FDO 控制接口的最终访问策略以及 Windows USB/PnP/摄像头端到端运行均待验证。
 
-当前 Release 驱动源码已构建，默认 x64 包已由 Inf2Cat 完成 signability 检查并生成 catalog；catalog 未签名，无法作为生产包直接部署。新包的构建命令、角色隔离和验证边界见[重建驱动说明](../drivers/usb-bus-legacy/driver-source/README.md)。这仍是替换候选，尚未证明可全功能替代原驱动：Root Hub/Host Controller/USB-tree 协议尚不完整，且未在目标 Windows 设备上完成安装、摄像头流和热插拔验证。上游 `x86/`、`x64/` 二进制保持原样。反编译清单和函数分析保存在本机 `source-reconstruction/` 目录，由 `.gitignore` 排除，不属于项目源码。
+当前 Release 驱动源码已构建，默认 x64 包已由 Inf2Cat 完成 signability 检查并生成两个 catalog；catalog 未签名，无法作为生产包直接部署。`driver-source/deploy.ps1` 负责签名包的设备创建/更新/移除，需管理员运行并从 WDK 获取 DevCon。新包的构建命令、角色隔离和验证边界见[重建驱动说明](../drivers/usb-bus-legacy/driver-source/README.md)。这仍是替换候选，尚未证明可全功能替代原驱动：Root Hub/Host Controller/USB-tree 协议尚不完整，且未在目标 Windows 设备上完成安装、摄像头流和热插拔验证。上游 `x86/`、`x64/` 二进制保持原样。反编译清单和函数分析保存在本机 `source-reconstruction/` 目录，由 `.gitignore` 排除，不属于项目源码。
 
 ## INF 中的复制与改名
 

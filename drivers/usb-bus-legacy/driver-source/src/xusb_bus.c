@@ -4,6 +4,7 @@
 #include <usb.h>
 #include <usbioctl.h>
 #include <usbbusif.h>
+#include <ntstrsafe.h>
 #include "xusb_driver.h"
 
 IO_COMPLETION_ROUTINE XusbReleaseControlRemoveLock;
@@ -28,7 +29,7 @@ static VOID USB_BUSIFFN XusbUsbdGetVersion(
     UNREFERENCED_PARAMETER(BusContext);
     if (VersionInformation != NULL) {
         VersionInformation->USBDI_Version = 0x00000500;
-        VersionInformation->Supported_USB_Version = 0x0110;
+        VersionInformation->Supported_USB_Version = 0x0200;
     }
     if (HcdCapabilities != NULL) {
         *HcdCapabilities = 0;
@@ -40,11 +41,8 @@ static NTSTATUS USB_BUSIFFN XusbUsbdQueryBusTime(
     _Out_opt_ PULONG CurrentUsbFrame)
 {
     UNREFERENCED_PARAMETER(BusContext);
-    if (CurrentUsbFrame == NULL) {
-        return STATUS_INVALID_PARAMETER;
-    }
-    *CurrentUsbFrame = (ULONG)(KeQueryInterruptTime() / 10000);
-    return STATUS_SUCCESS;
+    UNREFERENCED_PARAMETER(CurrentUsbFrame);
+    return STATUS_UNSUCCESSFUL;
 }
 
 static NTSTATUS USB_BUSIFFN XusbUsbdSubmitIsoOutUrb(
@@ -53,7 +51,7 @@ static NTSTATUS USB_BUSIFFN XusbUsbdSubmitIsoOutUrb(
 {
     UNREFERENCED_PARAMETER(BusContext);
     UNREFERENCED_PARAMETER(Urb);
-    return STATUS_NOT_SUPPORTED;
+    return STATUS_UNSUCCESSFUL;
 }
 
 static NTSTATUS USB_BUSIFFN XusbUsbdQueryBusInformation(
@@ -64,23 +62,62 @@ static NTSTATUS USB_BUSIFFN XusbUsbdQueryBusInformation(
     _Out_opt_ PULONG BusInformationActualLength)
 {
     UNREFERENCED_PARAMETER(BusContext);
-    if (Level != 0 || BusInformationBuffer == NULL || BusInformationBufferLength == NULL) {
-        return STATUS_INVALID_PARAMETER;
-    }
-    if (*BusInformationBufferLength < sizeof(USB_BUS_INFORMATION_LEVEL_0)) {
-        *BusInformationBufferLength = sizeof(USB_BUS_INFORMATION_LEVEL_0);
-        if (BusInformationActualLength != NULL) {
-            *BusInformationActualLength = sizeof(USB_BUS_INFORMATION_LEVEL_0);
-        }
-        return STATUS_BUFFER_TOO_SMALL;
-    }
-    ((PUSB_BUS_INFORMATION_LEVEL_0)BusInformationBuffer)->TotalBandwidth = 12000000;
-    ((PUSB_BUS_INFORMATION_LEVEL_0)BusInformationBuffer)->ConsumedBandwidth = 0;
-    *BusInformationBufferLength = sizeof(USB_BUS_INFORMATION_LEVEL_0);
-    if (BusInformationActualLength != NULL) {
-        *BusInformationActualLength = sizeof(USB_BUS_INFORMATION_LEVEL_0);
-    }
+    UNREFERENCED_PARAMETER(Level);
+    UNREFERENCED_PARAMETER(BusInformationBuffer);
+    UNREFERENCED_PARAMETER(BusInformationBufferLength);
+    UNREFERENCED_PARAMETER(BusInformationActualLength);
+    return STATUS_UNSUCCESSFUL;
+}
+
+static BOOLEAN USB_BUSIFFN XusbUsbdIsDeviceHighSpeed(_In_opt_ PVOID BusContext)
+{
+    UNREFERENCED_PARAMETER(BusContext);
+    return TRUE;
+}
+
+static NTSTATUS USB_BUSIFFN XusbUsbdEnumLogEntry(
+    _In_ PVOID BusContext,
+    _In_ ULONG DriverTag,
+    _In_ ULONG EnumTag,
+    _In_ ULONG P1,
+    _In_ ULONG P2)
+{
+    UNREFERENCED_PARAMETER(BusContext);
+    UNREFERENCED_PARAMETER(DriverTag);
+    UNREFERENCED_PARAMETER(EnumTag);
+    UNREFERENCED_PARAMETER(P1);
+    UNREFERENCED_PARAMETER(P2);
     return STATUS_SUCCESS;
+}
+
+static NTSTATUS USB_BUSIFFN XusbUsbdQueryBusTimeEx(
+    _In_opt_ PVOID BusContext,
+    _Out_opt_ PULONG HighSpeedFrameCounter)
+{
+    UNREFERENCED_PARAMETER(BusContext);
+    UNREFERENCED_PARAMETER(HighSpeedFrameCounter);
+    return STATUS_UNSUCCESSFUL;
+}
+
+static NTSTATUS USB_BUSIFFN XusbUsbdQueryControllerType(
+    _In_opt_ PVOID BusContext,
+    _Out_opt_ PULONG HcdiOptionFlags,
+    _Out_opt_ PUSHORT PciVendorId,
+    _Out_opt_ PUSHORT PciDeviceId,
+    _Out_opt_ PUCHAR PciClass,
+    _Out_opt_ PUCHAR PciSubClass,
+    _Out_opt_ PUCHAR PciRevisionId,
+    _Out_opt_ PUCHAR PciProgIf)
+{
+    UNREFERENCED_PARAMETER(BusContext);
+    UNREFERENCED_PARAMETER(HcdiOptionFlags);
+    UNREFERENCED_PARAMETER(PciVendorId);
+    UNREFERENCED_PARAMETER(PciDeviceId);
+    UNREFERENCED_PARAMETER(PciClass);
+    UNREFERENCED_PARAMETER(PciSubClass);
+    UNREFERENCED_PARAMETER(PciRevisionId);
+    UNREFERENCED_PARAMETER(PciProgIf);
+    return STATUS_UNSUCCESSFUL;
 }
 
 static NTSTATUS XusbQueryUsbdInterface(
@@ -89,6 +126,8 @@ static NTSTATUS XusbQueryUsbdInterface(
 {
     PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
     PUSB_BUS_INTERFACE_USBDI_V0 busInterface;
+    USHORT requiredSize;
+    USHORT version = stack->Parameters.QueryInterface.Version;
 
     if (stack->Parameters.QueryInterface.InterfaceType == NULL ||
         !RtlEqualMemory(
@@ -97,15 +136,22 @@ static NTSTATUS XusbQueryUsbdInterface(
             sizeof(GUID))) {
         return STATUS_NOT_SUPPORTED;
     }
-    if (stack->Parameters.QueryInterface.Version != USB_BUSIF_USBDI_VERSION_0 ||
-        stack->Parameters.QueryInterface.Size < sizeof(*busInterface) ||
+    if (version > USB_BUSIF_USBDI_VERSION_3 ||
+        stack->Parameters.QueryInterface.Interface == NULL) {
+        return STATUS_NOT_SUPPORTED;
+    }
+    requiredSize = version == USB_BUSIF_USBDI_VERSION_0 ? sizeof(USB_BUS_INTERFACE_USBDI_V0) :
+        (version == USB_BUSIF_USBDI_VERSION_1 ? sizeof(USB_BUS_INTERFACE_USBDI_V1) :
+            (version == USB_BUSIF_USBDI_VERSION_2 ? sizeof(USB_BUS_INTERFACE_USBDI_V2) :
+                sizeof(USB_BUS_INTERFACE_USBDI_V3)));
+    if (stack->Parameters.QueryInterface.Size < requiredSize ||
         stack->Parameters.QueryInterface.Interface == NULL) {
         return STATUS_NOT_SUPPORTED;
     }
 
     busInterface = (PUSB_BUS_INTERFACE_USBDI_V0)stack->Parameters.QueryInterface.Interface;
-    busInterface->Size = sizeof(*busInterface);
-    busInterface->Version = USB_BUSIF_USBDI_VERSION_0;
+    busInterface->Size = requiredSize;
+    busInterface->Version = version;
     busInterface->BusContext = Child;
     busInterface->InterfaceReference = XusbUsbdInterfaceReference;
     busInterface->InterfaceDereference = XusbUsbdInterfaceDereference;
@@ -113,6 +159,18 @@ static NTSTATUS XusbQueryUsbdInterface(
     busInterface->QueryBusTime = XusbUsbdQueryBusTime;
     busInterface->SubmitIsoOutUrb = XusbUsbdSubmitIsoOutUrb;
     busInterface->QueryBusInformation = XusbUsbdQueryBusInformation;
+    if (version >= USB_BUSIF_USBDI_VERSION_1) {
+        ((PUSB_BUS_INTERFACE_USBDI_V1)busInterface)->IsDeviceHighSpeed =
+            XusbUsbdIsDeviceHighSpeed;
+    }
+    if (version >= USB_BUSIF_USBDI_VERSION_2) {
+        ((PUSB_BUS_INTERFACE_USBDI_V2)busInterface)->EnumLogEntry = XusbUsbdEnumLogEntry;
+    }
+    if (version >= USB_BUSIF_USBDI_VERSION_3) {
+        ((PUSB_BUS_INTERFACE_USBDI_V3)busInterface)->QueryBusTimeEx = XusbUsbdQueryBusTimeEx;
+        ((PUSB_BUS_INTERFACE_USBDI_V3)busInterface)->QueryControllerType =
+            XusbUsbdQueryControllerType;
+    }
     busInterface->InterfaceReference(Child);
     return STATUS_SUCCESS;
 }
@@ -500,35 +558,41 @@ static NTSTATUS XusbReferenceUserObjects(
     return STATUS_SUCCESS;
 }
 
-static LONG XusbAllocateBusAddress(_Inout_ PXUSB_PARENT_EXTENSION Parent)
+static BOOLEAN XusbIsBusAddressInUse(
+    _In_ PXUSB_PARENT_EXTENSION Parent,
+    _In_ ULONG Candidate)
+{
+    PLIST_ENTRY entry;
+
+    for (entry = Parent->Children.Flink; entry != &Parent->Children; entry = entry->Flink) {
+        PXUSB_CHILD_EXTENSION child = CONTAINING_RECORD(
+            entry,
+            XUSB_CHILD_EXTENSION,
+            Link);
+        if ((ULONG)child->BusAddress == Candidate) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static LONG XusbAllocateBusAddress(
+    _Inout_ PXUSB_PARENT_EXTENSION Parent,
+    _In_ LONG RequestedAddress)
 {
     ULONG candidate;
-    PLIST_ENTRY entry;
-    BOOLEAN found;
 
-    for (;;) {
-        candidate = Parent->NextBusAddress++;
-        if (Parent->NextBusAddress == 0 || Parent->NextBusAddress > MAXLONG) {
-            Parent->NextBusAddress = 1;
-        }
-        if (candidate == 0 || candidate > MAXLONG) {
-            continue;
-        }
-        found = TRUE;
-        for (entry = Parent->Children.Flink; entry != &Parent->Children; entry = entry->Flink) {
-            PXUSB_CHILD_EXTENSION child = CONTAINING_RECORD(
-                entry,
-                XUSB_CHILD_EXTENSION,
-                Link);
-            if ((ULONG)child->BusAddress == candidate) {
-                found = FALSE;
-                break;
-            }
-        }
-        if (found) {
+    if (RequestedAddress > 0 &&
+        !XusbIsBusAddressInUse(Parent, (ULONG)RequestedAddress)) {
+        return RequestedAddress;
+    }
+
+    for (candidate = 1; candidate <= MAXLONG; ++candidate) {
+        if (!XusbIsBusAddressInUse(Parent, candidate)) {
             return (LONG)candidate;
         }
     }
+    return 0;
 }
 
 NTSTATUS XusbCreateRoleChild(_In_ PDEVICE_OBJECT DeviceObject)
@@ -616,11 +680,6 @@ NTSTATUS XusbCreateRoleChild(_In_ PDEVICE_OBJECT DeviceObject)
     ObReferenceObject(DeviceObject);
     ObReferenceObject(child->PhysicalDeviceObject);
 
-    status = ExUuidCreate(&child->ContainerId);
-    if (!NT_SUCCESS(status)) {
-        goto Exit;
-    }
-
     status = XusbCopyString(childId, childIdChars, FALSE, &child->DeviceId);
     if (!NT_SUCCESS(status)) {
         goto Exit;
@@ -664,7 +723,12 @@ NTSTATUS XusbCreateRoleChild(_In_ PDEVICE_OBJECT DeviceObject)
         }
     }
 
-    child->BusAddress = XusbAllocateBusAddress(parent);
+    child->BusAddress = XusbAllocateBusAddress(parent, 0);
+    if (child->BusAddress == 0) {
+        ExReleaseFastMutex(&parent->ChildMutex);
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Exit;
+    }
     InsertTailList(&parent->Children, &child->Link);
     child->Linked = TRUE;
     ObReferenceObject(childPdo);
@@ -738,11 +802,6 @@ static NTSTATUS XusbCreateChild(
     ObReferenceObject(ParentDevice);
     ObReferenceObject(child->PhysicalDeviceObject);
 
-    status = ExUuidCreate(&child->ContainerId);
-    if (!NT_SUCCESS(status)) {
-        goto Exit;
-    }
-
     status = XusbCopyString(Request->device_id, HW_IDS_COUNT, FALSE, &child->DeviceId);
     if (!NT_SUCCESS(status)) {
         goto Exit;
@@ -787,7 +846,12 @@ static NTSTATUS XusbCreateChild(
             (capacityExceeded ? STATUS_INSUFFICIENT_RESOURCES : STATUS_DELETE_PENDING);
         goto Exit;
     }
-    child->BusAddress = XusbAllocateBusAddress(parent);
+    child->BusAddress = XusbAllocateBusAddress(parent, Request->BusAddress);
+    if (child->BusAddress == 0) {
+        ExReleaseFastMutex(&parent->ChildMutex);
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Exit;
+    }
     InsertTailList(&parent->Children, &child->Link);
     child->Linked = TRUE;
     FileContext->ChildPdo = childPdo;
@@ -1024,6 +1088,30 @@ static NTSTATUS XusbReturnPnpId(
 }
 #pragma warning(pop)
 
+#pragma warning(push)
+#pragma warning(disable: 6014) // The PnP manager owns the returned device-text allocation.
+static NTSTATUS XusbReturnDeviceText(
+    _Inout_ PIRP Irp,
+    _In_ PCUNICODE_STRING Text,
+    _Inout_ PIO_REMOVE_LOCK RemoveLock)
+{
+    PWSTR copy;
+    SIZE_T bytes = Text->Length + sizeof(WCHAR);
+
+    copy = ExAllocatePool2(POOL_FLAG_PAGED, bytes, XUSB_POOL_TAG);
+    if (copy == NULL) {
+        IoReleaseRemoveLock(RemoveLock, Irp);
+        XusbCompleteIrp(Irp, STATUS_INSUFFICIENT_RESOURCES, 0);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlCopyMemory(copy, Text->Buffer, Text->Length);
+    copy[Text->Length / sizeof(WCHAR)] = UNICODE_NULL;
+    IoReleaseRemoveLock(RemoveLock, Irp);
+    XusbCompleteIrp(Irp, STATUS_SUCCESS, (ULONG_PTR)copy);
+    return STATUS_SUCCESS;
+}
+#pragma warning(pop)
+
 static PDEVICE_OBJECT XusbRemoveChild(_In_ PDEVICE_OBJECT DeviceObject)
 {
     PXUSB_CHILD_EXTENSION child = (PXUSB_CHILD_EXTENSION)DeviceObject->DeviceExtension;
@@ -1130,16 +1218,6 @@ NTSTATUS XusbDispatchChildPnp(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp
             return XusbReturnPnpId(Irp, &child->HardwareIds, &child->RemoveLock);
         case BusQueryCompatibleIDs:
             return XusbReturnPnpId(Irp, &child->CompatibleIds, &child->RemoveLock);
-        case BusQueryContainerID: {
-            UNICODE_STRING containerId;
-            status = RtlStringFromGUID(&child->ContainerId, &containerId);
-            if (!NT_SUCCESS(status)) {
-                break;
-            }
-            status = XusbReturnPnpId(Irp, &containerId, &child->RemoveLock);
-            RtlFreeUnicodeString(&containerId);
-            return status;
-        }
         case BusQueryInstanceID: {
             WCHAR buffer[16];
             UNICODE_STRING instanceId;
@@ -1163,6 +1241,32 @@ NTSTATUS XusbDispatchChildPnp(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp
             break;
         }
         break;
+
+    case IRP_MN_QUERY_DEVICE_TEXT: {
+        WCHAR buffer[64];
+        UNICODE_STRING text;
+        NTSTATUS textStatus;
+
+        if (stack->Parameters.QueryDeviceText.DeviceTextType == DeviceTextDescription) {
+            RtlInitUnicodeString(&text, L"Virtual USB device");
+        } else if (stack->Parameters.QueryDeviceText.DeviceTextType ==
+            DeviceTextLocationInformation) {
+            textStatus = RtlStringCchPrintfW(
+                buffer,
+                RTL_NUMBER_OF(buffer),
+                L"Virtual USB bus address %ld",
+                child->BusAddress);
+            if (!NT_SUCCESS(textStatus)) {
+                status = textStatus;
+                break;
+            }
+            RtlInitUnicodeString(&text, buffer);
+        } else {
+            status = STATUS_NOT_SUPPORTED;
+            break;
+        }
+        return XusbReturnDeviceText(Irp, &text, &child->RemoveLock);
+    }
 
     case IRP_MN_QUERY_BUS_INFORMATION: {
         PPNP_BUS_INFORMATION busInformation = ExAllocatePool2(
@@ -1212,6 +1316,19 @@ NTSTATUS XusbDispatchChildPnp(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp
         }
         break;
 
+    case IRP_MN_EJECT: {
+        /* Dynamic removal is driven by XUSB_IOCTL_REMOVE_CHILD. */
+        status = STATUS_NOT_SUPPORTED;
+        break;
+    }
+
+    case IRP_MN_DEVICE_USAGE_NOTIFICATION:
+        if (stack->Parameters.UsageNotification.InPath) {
+            /* Virtual cameras cannot back paging, hibernation, or crash-dump I/O. */
+            status = STATUS_UNSUCCESSFUL;
+        }
+        break;
+
     case IRP_MN_QUERY_CAPABILITIES: {
         PDEVICE_CAPABILITIES capabilities = stack->Parameters.DeviceCapabilities.Capabilities;
         if (capabilities == NULL || capabilities->Size < sizeof(*capabilities)) {
@@ -1219,6 +1336,7 @@ NTSTATUS XusbDispatchChildPnp(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp
             break;
         }
         capabilities->Removable = TRUE;
+        capabilities->EjectSupported = FALSE;
         capabilities->SurpriseRemovalOK = TRUE;
         capabilities->UniqueID = FALSE;
         capabilities->DeviceD1 = FALSE;

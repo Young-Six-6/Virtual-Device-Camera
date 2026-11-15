@@ -30,7 +30,6 @@ typedef struct _XUSB_PARENT_EXTENSION {
     IO_REMOVE_LOCK RemoveLock;
     FAST_MUTEX ChildMutex;
     LIST_ENTRY Children;
-    ULONG NextBusAddress;
     XUSB_DEVICE_ROLE Role;
     volatile LONG TransactionCount;
     volatile LONG64 TransactionBytes;
@@ -69,7 +68,6 @@ typedef struct _XUSB_CHILD_EXTENSION {
     LONG BusAddress;
     BOOLEAN Present;
     BOOLEAN Removed;
-    GUID ContainerId;
     DEVICE_POWER_STATE DevicePowerState;
     UNICODE_STRING DeviceId;
     UNICODE_STRING HardwareIds;

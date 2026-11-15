@@ -710,7 +710,6 @@ NTSTATUS XusbAddDevice(
     RtlZeroMemory(extension, sizeof(*extension));
     extension->Signature = XUSB_PARENT_SIGNATURE;
     extension->PhysicalDeviceObject = PhysicalDeviceObject;
-    extension->NextBusAddress = 1;
     extension->Role = role;
     XusbWmiInitialize(extension);
     ExInitializeFastMutex(&extension->ChildMutex);
