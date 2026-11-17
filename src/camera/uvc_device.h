@@ -23,6 +23,9 @@ static_assert(sizeof(StreamControl) == 26, "UVC 1.0 probe/commit layout");
 class UvcDevice {
     int curr_config = 0, curr_interface = 0, curr_alt_setting = 0;
     int iso_ep_addr = 0x82, bitsPerPixel = 16, frame_count = 1;
+    bool super_speed_ = false;
+    uint32_t iso_payload_bytes_ = 3u * 1024u;
+    uint64_t iso_video_bytes_per_second_ = uint64_t(3u * 1024u - 2u) * 8000u;
     GUID guidFormat{0x32595559, 0x0000, 0x0010, {0x80,0,0,0xaa,0,0x38,0x9b,0x71}};
     struct { int width; int height; } frames[1]{};
     usb_device_descriptor dev_desc{};
@@ -53,7 +56,8 @@ class UvcDevice {
     void iso(usbtx_header_t& request);
     int encode(unsigned char* destination, size_t capacity);
 public:
-    UvcDevice(const uvc_vcam_t& config, Resolution size, MJPEG_FRAME_CALLBACK mjpeg_callback = nullptr);
+    UvcDevice(const uvc_vcam_t& config, Resolution size, MJPEG_FRAME_CALLBACK mjpeg_callback = nullptr,
+              bool super_speed = false);
     bool set_resolution(Resolution size);
     Resolution resolution() const { return {frames[0].width, frames[0].height}; }
     std::vector<char> frame_copy() const { return pixels_; }

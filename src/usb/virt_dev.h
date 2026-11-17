@@ -47,6 +47,7 @@ struct usbtx_header_t {
 void* virt_usb_open();
 void virt_usb_close(void* handle);
 int virt_usb_plugin(void* handle, const char* dev_id, const char* hw_ids, const char* comp_ids);
+bool virt_usb_is_superspeed(void* handle);
 int virt_usb_unplug(void* handle);
 int virt_usb_replug(void* handle);
 usbtx_header_t* virt_usb_begin(void* handle);

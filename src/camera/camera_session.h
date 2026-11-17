@@ -19,6 +19,7 @@ class CameraSession {
     std::string manufacturer_, product_;
     uvc_vcam_t config_;
     MJPEG_FRAME_CALLBACK mjpeg_callback_ = nullptr;
+    Resolution initial_size_;
     std::unique_ptr<UvcDevice> device_;
     std::unique_ptr<UsbTransport> transport_;
     DeviceIdentity identity_;

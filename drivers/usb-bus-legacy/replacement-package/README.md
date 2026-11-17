@@ -2,6 +2,8 @@
 
 Current machine evidence (2026-11-17): tree 1.0.0.11 and HCD 2.0.0.22 are bound in the same Windows boot session. The controller, virtual root hub, and active camera node report OK. DirectShow enumerates `MP4 HD Camera 1` with YUY2 and MJPEG modes; 1280×720 MJPEG capture was requested at 30fps and delivered 60 frames at about 25fps. Stopping the application removes its camera node and drains pending HCD transactions without restarting Windows. This validates the tested camera path, not every legacy URB or full production replacement behavior.
 
+The source template now targets HCD 2.0.0.23, which adds the experimental SuperSpeed path described below. This candidate has compiled, passed protocol-level descriptor/negotiation checks, and has been staged as an unsigned package, but has not been installed or tested through Windows PnP/DirectShow. The test machine remains on 2.0.0.22; do not treat USB 3.0 as runtime-verified.
+
 This is a separate experimental deployment workflow. It combines:
 
 - the reconstructed WDM role-3 enumerator (`root\*xusb_tree`), copied from
@@ -15,7 +17,7 @@ The UCX HCD implements the root-hub, USB-device and frozen BEGIN/END transaction
 paths used by the tested camera stream. It remains a replacement candidate for
 unimplemented protocol paths; successful staging or PnP binding alone does not prove
 that other USB devices or URB families work. The deploy script now
-also requires the new HCD's own started USB 2.0 root-hub child and exact running
+also requires the new HCD's own started USB root-hub child and exact running
 image hashes before it removes the old control-interface providers. This keeps the
 old provider available when the candidate fails to start.
 
@@ -97,8 +99,25 @@ service image hashes. Different bytes under the same versioned name are rejected
 instructions to increase the corresponding `DriverVer`. DevCon exit code 1 also stops
 deployment immediately; PnP readiness polling cannot finish a reboot-pending installation.
 The package also includes `query-ucx-state.ps1`; if the UCX controller starts but
-its USB 2.0 root hub does not appear, the deploy script prints the HCD's recorded
+its USB root hub does not appear, the deploy script prints the HCD's recorded
 initialization statuses before it exits.
+
+## SuperSpeed candidate status
+
+The 2.0.0.23 HCD reserves a dedicated virtual slot on its USB 3.0 root-hub port,
+uses UCX's SuperSpeed device-speed indication, reports connection and reset state,
+and checks the isochronous endpoint companion's burst/interval bounds. The camera
+uses an additive FOSS-only add IOCTL, then emits USB 3.0 device/BOS descriptors and
+a 45,000-byte `wBytesPerInterval` endpoint companion. Existing IOCTLs and transaction
+wire layout stay unchanged; older and original drivers reject the additive request
+and continue through USB 2.0.
+
+The selected 45,000-byte microframe budget is based on Microsoft's SuperSpeed isochronous
+example. It is enough for 1280×720 YUY2 at 30fps (about 55.3 MB/s), but this is a
+software-side capacity calculation, not proof of PnP enumeration or capture. Runtime
+validation still needs USB device-tree inspection, DirectShow format negotiation,
+frame-rate measurement, and stop/reconnect checks. Do not install this candidate as a
+known-working USB 3.0 driver until those checks pass.
 
 ## Uninstall
 

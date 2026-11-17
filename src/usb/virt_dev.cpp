@@ -24,6 +24,7 @@ struct Device {
     vcam::DeviceIdentity identity;
     int address = 0;
     bool plugged = false, remove_pending = false, active = false;
+    bool super_speed = false, speed_locked = false;
     size_t payload_capacity = 0;
 
     bool ioctl(DWORD code, void* input, DWORD input_bytes, void* output, DWORD output_bytes, DWORD& bytes) {
@@ -183,10 +184,27 @@ int virt_usb_plugin(void* handle, const char* id, const char* hardware, const ch
         request.hSemaphore = reinterpret_cast<ULONGLONG>(semaphore.get());
         request.hRemoveEvent = reinterpret_cast<ULONGLONG>(removed.get());
         request.BusAddress = device->address;
-        DWORD bytes = 0;
         int address = 0;
-        if (!device->ioctl(IOCTL_PDO_ADD, &request, sizeof(request), &address, sizeof(address), bytes) ||
-            bytes < sizeof(address)) return -1;
+        auto add = [&](DWORD code) {
+            DWORD bytes = 0;
+            if (!device->ioctl(code, &request, sizeof(request), &address, sizeof(address), bytes)) return false;
+            if (bytes >= sizeof(address)) return true;
+            DWORD ignored = 0;
+            device->ioctl(IOCTL_PDO_REMOVE, NULL, 0, NULL, 0, ignored);
+            SetLastError(ERROR_INVALID_DATA);
+            return false;
+        };
+        if (!device->speed_locked) {
+            if (add(IOCTL_PDO_ADD_SUPERSPEED)) {
+                device->super_speed = true;
+            } else {
+                if (GetLastError() == ERROR_OPERATION_ABORTED || !add(IOCTL_PDO_ADD)) return -1;
+                device->super_speed = false;
+            }
+            device->speed_locked = true;
+        } else if (!add(device->super_speed ? IOCTL_PDO_ADD_SUPERSPEED : IOCTL_PDO_ADD)) {
+            return -1;
+        }
         device->identity = std::move(identity);
         device->address = address;
         device->remove_pending = false;
@@ -196,6 +214,10 @@ int virt_usb_plugin(void* handle, const char* id, const char* hardware, const ch
         return 0;
     }
     catch (...) { return -1; }
+}
+bool virt_usb_is_superspeed(void* handle) {
+    auto* device = static_cast<Device*>(handle);
+    return device && device->super_speed;
 }
 int virt_usb_unplug(void* handle) {
     auto* device = static_cast<Device*>(handle);
@@ -307,6 +329,7 @@ public:
             (result == 1 ? UsbEndResult::canceled : UsbEndResult::failed);
     }
     size_t capacity() const override { return virt_usb_capacity(device_); }
+    bool is_superspeed() const override { return virt_usb_is_superspeed(device_); }
     void interrupt() noexcept override { virt_usb_interrupt(device_); }
     void resume() noexcept override { virt_usb_resume(device_); }
 };

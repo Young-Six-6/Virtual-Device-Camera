@@ -1,6 +1,6 @@
 # Virtual Camera UCX host controller
 
-Current machine evidence (2026-11-17): tree 1.0.0.11 and HCD 2.0.0.22 are bound. The controller and ROOT_HUB30 child report OK. The user-mode camera enumerates through this HCD and streams 1280×720 YUY2 and MJPEG; a 30fps MJPEG request delivered 60 frames at about 25fps. Application shutdown removes the camera node and drains pending HCD work without a Windows restart. The camera itself advertises USB 2.0; this result does not validate SuperSpeed.
+Current machine evidence (2026-11-17): tree 1.0.0.11 and HCD 2.0.0.22 are bound. The controller and ROOT_HUB30 child report OK. The user-mode camera enumerates through this HCD and streams 1280×720 YUY2 and MJPEG; a 30fps MJPEG request delivered 60 frames at about 25fps. Application shutdown removes the camera node and drains pending HCD work without a Windows restart. The camera itself advertises USB 2.0; this result does not validate SuperSpeed. Source candidate 2.0.0.23 adds a SuperSpeed camera path and passes Release build/protocol checks, but has not been installed or runtime-tested.
 
 This is an isolated KMDF + UCX 1.1 host-controller project. It targets the UCX 1.1
 DDI surface, pins KMDF 1.31, and is intended for Windows 10 version 2004
@@ -56,28 +56,29 @@ raw URB, so unsupported URB types cannot be passed through unchanged.
 
 The root-hub PDO enumerates after the bus stopped clearing the upper KMDF BusRelations result. This also preserves the PDO references owned by that result. Same-version unload/reload remains unverified.
 
-## USB 3.0 feasibility
+## USB 3.0 SuperSpeed path
 
-SuperSpeed is feasible in this software HCD without physical xHCI silicon, but it is a
-substantial protocol and enumeration change. HCD 2.0.0.22 exposes a USB 3.0 root-hub port,
-but USB-device speed is not yet used to select a SuperSpeed device/endpoint transfer path,
-and endpoint creation ignores the SuperSpeed companion descriptor. The unchanged camera
-advertises USB 2.0 and has no BOS or SuperSpeed endpoint companion descriptor. Raising the
-payload limit alone would misrepresent what the stack can enumerate and schedule.
+The 2.0.0.23 source candidate adds an additive `IOCTL_PDO_ADD_SUPERSPEED`, reserves a
+separate virtual slot on root-hub port 17, maps UCX's `UsbSuperSpeed` device speed, reports
+USB 3 port connect/reset/power state, and validates isochronous endpoint companion limits.
+The user-mode camera tries this FOSS-only add path first; the original `IOCTL_PDO_ADD` and
+the frozen BEGIN/END wire structures are unchanged, and unsupported older/original drivers
+fall back to the existing USB 2.0 path.
 
-A compatible implementation should add SuperSpeed root-hub port state and speed mapping,
-return valid 30-port information, provide the camera's BOS and endpoint companion
-descriptors, and negotiate/schedule transfers using `wBytesPerInterval` and the service
-interval. Microsoft documents SuperSpeed isochronous capacity in terms of the endpoint
-companion descriptor and recommends `wBytesPerInterval` as the interval limit:
-[isochronous endpoint transfers](https://learn.microsoft.com/windows-hardware/drivers/usbcon/transfer-data-to-isochronous-endpoints).
-The current 40-byte BEGIN/END wire ABI can remain frozen; these changes can be implemented
-inside the UCX HCD and UVC descriptor/negotiation path. This is a high-effort feature that
-needs staged validation with USBView/UsbTreeView, device enumeration, frame capture, and
-disconnect/reconnect. Until that work and runtime validation are complete, the driver is
-USB 2.0 only. Current USB 2.0 isochronous bandwidth is capped at 3 x 1024 bytes per
-microframe (24.576 MB/s raw, before protocol overhead), so high-resolution YUY2 frame
-rates are reduced to stay within that limit.
+When SuperSpeed is selected, the camera emits a USB 3.0 device descriptor, BOS with the
+SuperSpeed capability, 1024-byte isochronous packets, and a companion descriptor capped at
+45,000 bytes per microframe. It exposes the same YUY2/MJPEG formats and advertises 30fps
+for 720p YUY2; raw 1280×720 YUY2 at 30fps requires about 55.3 MB/s. Microsoft documents
+that SuperSpeed isochronous packet limits come from the companion descriptor's
+`wBytesPerInterval`, while high-speed is capped at 3×1024 bytes per microframe:
+[Microsoft isochronous transfer guidance](https://learn.microsoft.com/windows-hardware/drivers/usbcon/transfer-data-to-isochronous-endpoints).
+
+This candidate has passed Release compilation and protocol-level checks for the device,
+BOS, configuration, endpoint companion, and UVC probe budget. It has not been installed
+or tested through Windows PnP, USBView/UsbTreeView, DirectShow capture, or reconnect. The
+test machine remains on HCD 2.0.0.22; do not treat SuperSpeed as runtime-verified until
+those stages pass. USB 2.0 YUY2 720p remains physically limited to about 13.3fps, while
+the already-tested MJPEG path reached about 25fps on this machine.
 
 ## Removal and unload lifecycle
 

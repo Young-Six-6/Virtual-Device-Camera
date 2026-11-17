@@ -12,7 +12,7 @@ CameraSession::CameraSession(const uvc_vcam_t& config, Resolution size, std::uni
     if (!transport_ || !stop_) throw std::runtime_error("Virtual USB transport unavailable");
     config_.manu_fact = manufacturer_.c_str();
     config_.product = product_.c_str();
-    device_ = std::make_unique<UvcDevice>(config_, size, mjpeg_callback_);
+    initial_size_ = size;
     char id[64] = {};
     sprintf_s(id, "usb\\vid_%04x&pid_%04x", config.vid, config.pid);
     identity_ = {id, id, "USB\\DevClass_00&SubClass_00\nUSB\\DevClass_00\nUSB\\COMPOSITE"};
@@ -45,20 +45,30 @@ bool CameraSession::start() {
     transport_->resume();
     plugged_ = transport_->plug(identity_);
     if (!plugged_) return false;
+    try {
+        device_ = std::make_unique<UvcDevice>(config_, initial_size_, mjpeg_callback_, transport_->is_superspeed());
+    } catch (...) {
+        transport_->resume();
+        if (transport_->unplug()) plugged_ = false;
+        return false;
+    }
     if (start_worker()) return true;
-    transport_->unplug();
-    plugged_ = false;
+    transport_->resume();
+    if (transport_->unplug()) {
+        plugged_ = false;
+        device_.reset();
+    }
     return false;
 }
 Resolution CameraSession::resolution() const {
     std::lock_guard<std::mutex> lifecycle_lock(lifecycle_);
     std::lock_guard<std::mutex> frame_lock(frame_mutex_);
-    return device_->resolution();
+    return device_ ? device_->resolution() : Resolution{};
 }
 CameraFrame CameraSession::snapshot() const {
     std::lock_guard<std::mutex> lifecycle_lock(lifecycle_);
     std::lock_guard<std::mutex> frame_lock(frame_mutex_);
-    return {device_->resolution(), device_->frame_copy()};
+    return device_ ? CameraFrame{device_->resolution(), device_->frame_copy()} : CameraFrame{};
 }
 bool CameraSession::resize(Resolution size, std::string& error) {
     if (!valid_output(size)) { error = "invalid-resolution"; return false; }
@@ -69,7 +79,7 @@ bool CameraSession::resize(Resolution size, std::string& error) {
         if (device_->resolution() == size) return true;
     }
     // Allocate descriptors and frame storage before disrupting the active device.
-    auto replacement = std::make_unique<UvcDevice>(config_, size, mjpeg_callback_);
+    auto replacement = std::make_unique<UvcDevice>(config_, size, mjpeg_callback_, transport_->is_superspeed());
     stop_worker();
     transport_->resume();
     if (!transport_->unplug()) {

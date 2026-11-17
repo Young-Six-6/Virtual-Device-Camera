@@ -38,7 +38,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -FFmpegS
 
 ## 运行前要知道
 
-USB 2.0 下 1280×720 的未压缩 YUY2 帧为 1,843,200 字节，等时传输的带宽限制约为 13.3fps；应用现也发布 MJPEG 格式，描述符允许 15/30fps。测试机用 DirectShow 以 30fps 请求抓取 60 帧，实测约 25fps。实际速度受输入帧率、图像复杂度、编码 CPU 和主机 USB 调度影响。想要较高帧率时，摄像头客户端需选择 MJPEG；旧 YUY2 格式仍保留。USB 3.0 尚未实现完整 SuperSpeed 设备与端点路径，不能仅通过提高描述符数值获得 USB 3.0 带宽。
+USB 2.0 下 1280×720 未压缩 YUY2 每帧为 1,843,200 字节；高速等时端点的 24.576 MB/s 理论载荷上限折算约 13.3fps，所以这个帧率是格式和总线带宽的上限。应用同时提供 MJPEG，测试机以 30fps 请求抓取 60 帧，实测约 25fps。新候选 HCD `2.0.0.23` 已加入 SuperSpeed 虚拟端口、USB 3.0 描述符和端点预算，支持 720p YUY2 30fps 的软件路径；但目前只完成编译和协议级测试，尚未安装或在 Windows PnP/DirectShow 上实测。当前测试机仍运行 HCD `2.0.0.22`，所以 USB 3.0 带宽还不能视为已验证可用。
 
 截至 2026-11-17，本机同一启动周期运行重建总线 `1.0.0.11`（`xusb_tree_1_0_0_11`）和 HCD `2.0.0.22`（`ucx_hcd_2_0_0_22`）；UVC 摄像头可枚举、协商 YUY2/MJPEG 并抓帧。应用停止后设备正常移除，HCD 未重启，系统启动时间未变化。测试范围和驱动限制见[驱动文档](docs/driver.md)。
 

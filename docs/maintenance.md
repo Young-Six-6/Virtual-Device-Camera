@@ -23,7 +23,7 @@
 
 - MP4/管道输入输出分辨率矩阵、动态视频尺寸、缓冲区边界和重复停止测试。
 - 高频噪声 720p MJPEG 编码、USB 2.0 30fps 帧预算、输出缓冲区护栏和 FFmpeg 解码校验。
-- 描述符长度截断、UVC 协商、ISO 包边界、20,000 条确定性畸形请求、假 USB 传输生命周期、热更新回滚、管道重连和配置文件读写。
+- USB 2.0/3.0 UVC 描述符、BOS/端点 companion descriptor、UVC 协商、ISO 包边界、20,000 条确定性畸形请求、假 USB 传输生命周期、热更新回滚、管道重连和配置文件读写。SuperSpeed 自动化检查不代替实机 PnP/抓帧验证。
 - Python 配置、OBS 捕获模拟、分片 TCP、命名管道取消，以及 Python 客户端到 C++ 控制服务/Web UI 的 HTTP 授权、预览和设置联调。
 
 单独运行脚本可限定配置：`scripts/test-resolution.ps1 -Configuration Release`、`scripts/test-usb.ps1 -Configuration Debug`。后者不需要 FFmpeg。

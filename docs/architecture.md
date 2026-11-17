@@ -53,6 +53,6 @@ flowchart LR
 
 ## USB 与驱动边界
 
-`src/usb/ioctl.h` 中的接口 GUID、结构体布局和 IOCTL 是用户态与内核驱动之间的二进制契约。`drivers/usb-bus-legacy/` 包含保留的原始二进制包和独立重建的 WDM/UCX 源码。该源码目前支持摄像头所需的 USB 2.0 等时流；更多协议和 SuperSpeed 的完成状态见[驱动文档](driver.md)。自动化假传输测试不能替代真实设备与摄像头客户端验证；ABI 变更仍需旧驱动或兼容设备验证。
+`src/usb/ioctl.h` 中原有接口 GUID、结构体布局和 IOCTL 是用户态与内核驱动之间的冻结二进制契约；`IOCTL_PDO_ADD_SUPERSPEED` 是只对 FOSS 驱动启用的新增扩展，旧驱动不支持时用户态回退到原 USB 2.0 路径。`drivers/usb-bus-legacy/` 包含保留的原始二进制包和独立重建的 WDM/UCX 源码。SuperSpeed 路径已完成编译和协议级描述符测试，但尚未实机枚举/传输验证；状态见[驱动文档](driver.md)。自动化假传输测试不能替代真实设备与摄像头客户端验证。
 
 TCP 和本机帧管道使用相同的 RGB24 帧格式；控制管道是独立的文本命令通道。协议详见[运行与输入协议](usage.md)和[控制管道协议](control-protocol.md)。

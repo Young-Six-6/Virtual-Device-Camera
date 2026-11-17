@@ -38,7 +38,7 @@ MJPEG 模式仍走 USB 2.0，但每帧先由 FFmpeg 压缩，UVC 描述符提供
   -i 'video=MP4 HD Camera 1' -frames:v 60 -f null -
 ```
 
-选择原有 YUY2 格式时将输入选项改为 `-pixel_format yuyv422`，720p 最大帧率约 13.3fps。MJPEG 提高的是 USB 2.0 下的有效图像吞吐；虚拟设备尚未提供完整 SuperSpeed 描述符、端点调度和 HCD 传输路径，因此这不等于 USB 3.0 支持。
+选择原有 YUY2 格式时将输入选项改为 `-pixel_format yuyv422`，USB 2.0 下 720p 上限约 13.3fps。候选 HCD `2.0.0.23` 加入了 SuperSpeed 根端口、速度映射、BOS 和端点 companion descriptor，UVC 设备可按 45,000 字节/微帧协商，足够容纳 720p YUY2 30fps 所需的约 55.3 MB/s。该候选已通过 Release 构建和协议级描述符/协商检查，尚未部署到测试机；在 Windows 实际枚举和抓帧验证前，使用中的版本仍应按 USB 2.0 能力看待。
 
 ## RGB24 命名管道输入
 

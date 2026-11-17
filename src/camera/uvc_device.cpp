@@ -10,17 +10,25 @@
 namespace vcam {
 namespace {
 constexpr uint32_t high_speed_iso_payload_bytes = 3u * 1024u;
+constexpr uint32_t super_speed_iso_payload_bytes = 45000u;
 constexpr uint16_t high_speed_iso_max_packet_descriptor = 0x1400;
 constexpr uint32_t uvc_time_units_per_second = 10000000u;
 constexpr uint32_t microframes_per_second = 8000u;
 constexpr uint32_t uvc_payload_header_bytes = 2u;
 constexpr uint32_t mjpeg_frame_intervals[2] = {333333u, 666667u};
-constexpr uint64_t high_speed_iso_video_bytes_per_second =
-    uint64_t(high_speed_iso_payload_bytes - uvc_payload_header_bytes) * microframes_per_second;
+constexpr unsigned char superspeed_bos_descriptor[] = {
+    5, 0x0f, 22, 0, 2,
+    7, 0x10, 2, 0, 0, 0, 0,
+    10, 0x10, 3, 0, 0x08, 0, 3, 0, 0, 0
+};
 }
 
-UvcDevice::UvcDevice(const uvc_vcam_t& config, Resolution size, MJPEG_FRAME_CALLBACK mjpeg_callback)
-    : callback_(config.frame_callback), mjpeg_callback_(mjpeg_callback), parameter_(config.param) {
+UvcDevice::UvcDevice(const uvc_vcam_t& config, Resolution size, MJPEG_FRAME_CALLBACK mjpeg_callback,
+                     bool super_speed)
+    : super_speed_(super_speed),
+      iso_payload_bytes_(super_speed ? super_speed_iso_payload_bytes : high_speed_iso_payload_bytes),
+      iso_video_bytes_per_second_(uint64_t(iso_payload_bytes_ - uvc_payload_header_bytes) * microframes_per_second),
+      callback_(config.frame_callback), mjpeg_callback_(mjpeg_callback), parameter_(config.param) {
     if (!callback_) throw std::invalid_argument("Camera frame callback is required");
     fill_dev_desc(static_cast<unsigned short>(config.pid), config.vid);
     fill_str_desc(config.manu_fact, config.product);
@@ -37,23 +45,22 @@ bool UvcDevice::set_resolution(Resolution size) {
     curr_config = curr_interface = curr_alt_setting = 0;
     stream_ = StreamControl{};
     stream_.frame_bytes = static_cast<uint32_t>(pixels_.size());
-    stream_.payload_bytes = high_speed_iso_payload_bytes;
+    stream_.payload_bytes = iso_payload_bytes_;
     mjpeg_length_ = 0;
     mjpeg_max_frame_bytes_ = 0;
     mjpeg_.clear();
     if (mjpeg_callback_) {
-        const uint64_t frameBudget = high_speed_iso_video_bytes_per_second * mjpeg_frame_intervals[1] /
+        const uint64_t frameBudget = iso_video_bytes_per_second_ * mjpeg_frame_intervals[1] /
             uvc_time_units_per_second;
         if (!frameBudget || frameBudget > UINT32_MAX) return false;
         mjpeg_max_frame_bytes_ = static_cast<size_t>(frameBudget);
         mjpeg_.resize(mjpeg_max_frame_bytes_);
     }
     {
-        const uint64_t usableBytesPerSecond =
-            uint64_t(high_speed_iso_payload_bytes - uvc_payload_header_bytes) * microframes_per_second;
         const uint64_t frameBytes = pixels_.size();
         const uint64_t requiredInterval =
-            (frameBytes * uvc_time_units_per_second + usableBytesPerSecond - 1) / usableBytesPerSecond;
+            (frameBytes * uvc_time_units_per_second + iso_video_bytes_per_second_ - 1) /
+            iso_video_bytes_per_second_;
         frame_intervals_[0] = static_cast<uint32_t>((std::max)(uint64_t(333333), requiredInterval));
         frame_intervals_[1] = (std::max)(uint32_t(666667), frame_intervals_[0] + 333334u);
         stream_.interval = frame_intervals_[0];
@@ -67,11 +74,11 @@ void UvcDevice::fill_dev_desc(unsigned short pid, unsigned int vid)
 {
 	dev_desc.bLength = 0x12;
 	dev_desc.bDescriptorType = 0x01;
-	dev_desc.bcdUSB = 0x0200;
+	dev_desc.bcdUSB = super_speed_ ? 0x0300 : 0x0200;
 	dev_desc.bDeviceClass = 0xEF;
 	dev_desc.bDeviceSubClass = 0x02;
 	dev_desc.bDeviceProtocol = 0x01;
-	dev_desc.bMaxPacketSize0 = 0x40;
+	dev_desc.bMaxPacketSize0 = super_speed_ ? 0x09 : 0x40;
 	dev_desc.idVendor = vid;
 	dev_desc.idProduct = pid;
 	dev_desc.bcdDevice = 0x00;
@@ -316,7 +323,7 @@ void UvcDevice::fill_cfg_desc()
 		mjpeg_frame->wHeight = static_cast<uint16_t>(frames[0].height);
 		mjpeg_frame->dwMinBitRate = static_cast<uint32_t>(
 			uint64_t(mjpeg_max_frame_bytes_) * 8u * uvc_time_units_per_second / mjpeg_frame_intervals[1]);
-		mjpeg_frame->dwMaxBitRate = static_cast<uint32_t>(high_speed_iso_video_bytes_per_second * 8u);
+		mjpeg_frame->dwMaxBitRate = static_cast<uint32_t>(iso_video_bytes_per_second_ * 8u);
 		mjpeg_frame->dwMaxVideoFrameBufferSize = static_cast<uint32_t>(mjpeg_max_frame_bytes_);
 		mjpeg_frame->dwDefaultFrameInterval = mjpeg_frame_intervals[0];
 		mjpeg_frame->bFrameIntervalType = 0x02;
@@ -341,13 +348,25 @@ void UvcDevice::fill_cfg_desc()
 	ep->bDescriptorType = 0x05;
 	ep->bEndpointAddress = iso_ep_addr;
 	ep->bmAttributes = 0x05;
-	// High-speed wMaxPacketSize: 1024 bytes per transaction, three transactions
-	// per microframe (bits 12..11 = 2), for 3072 bytes per microframe.
-	ep->wMaxPacketSize = high_speed_iso_max_packet_descriptor;
+	if (super_speed_) {
+		ep->wMaxPacketSize = 1024;
+	} else {
+		// High-speed: 1024 bytes per transaction, three transactions per microframe.
+		ep->wMaxPacketSize = high_speed_iso_max_packet_descriptor;
+	}
 
 	ep->bInterval = 0x01;
 
-	const size_t config_length = (size_t)(((char*)ep + ep->bLength) - cfg_buffer);
+	char* config_end = reinterpret_cast<char*>(ep) + ep->bLength;
+	if (super_speed_) {
+		// Three 16-packet bursts with Mult=2; cap the interval at 45,000 bytes.
+		unsigned char companion[6] = { 6, 0x30, 15, 2, 0, 0 };
+		companion[4] = static_cast<unsigned char>(super_speed_iso_payload_bytes & 0xff);
+		companion[5] = static_cast<unsigned char>((super_speed_iso_payload_bytes >> 8) & 0xff);
+		std::memcpy(config_end, companion, sizeof(companion));
+		config_end += sizeof(companion);
+	}
+	const size_t config_length = (size_t)(config_end - cfg_buffer);
 	if (config_length > sizeof(cfg_buffer) || config_length > 0xffff)
 	{
 		printf("Invalid USB configuration descriptor length: %zu bytes\n", config_length);
@@ -374,6 +393,10 @@ void UvcDevice::descriptor(usbtx_header_t& request) {
         case 3:
             if (request.descriptor.index >= 0 && request.descriptor.index < str_count)
                 reply(request, str_desc[request.descriptor.index], str_desc[request.descriptor.index]->bLength);
+            break;
+        case 15:
+            if (super_speed_ && request.descriptor.index == 0)
+                reply(request, superspeed_bos_descriptor, sizeof(superspeed_bos_descriptor));
             break;
         }
     }
@@ -423,21 +446,21 @@ void UvcDevice::streaming(usbtx_header_t& request) {
             value = StreamControl{};
             value.interval = frame_intervals_[0];
             value.frame_bytes = static_cast<uint32_t>(pixels_.size());
-            value.payload_bytes = high_speed_iso_payload_bytes;
+            value.payload_bytes = iso_payload_bytes_;
         }
         if (request.vendor.request == UVC_GET_MIN) {
             value.interval = intervals[0];
             value.frame_bytes = stream_.format == 2 && mjpeg_callback_
                 ? static_cast<uint32_t>(mjpeg_max_frame_bytes_)
                 : static_cast<uint32_t>(pixels_.size());
-            value.payload_bytes = high_speed_iso_payload_bytes;
+            value.payload_bytes = iso_payload_bytes_;
         }
         if (request.vendor.request == UVC_GET_MAX) {
             value.interval = intervals[1];
             value.frame_bytes = stream_.format == 2 && mjpeg_callback_
                 ? static_cast<uint32_t>(mjpeg_max_frame_bytes_)
                 : static_cast<uint32_t>(pixels_.size());
-            value.payload_bytes = high_speed_iso_payload_bytes;
+            value.payload_bytes = iso_payload_bytes_;
         }
         if (request.vendor.request == UVC_GET_RES) value.interval = 0;
         reply(request, &value, sizeof(value));
@@ -457,8 +480,8 @@ void UvcDevice::streaming(usbtx_header_t& request) {
             ? static_cast<uint32_t>(mjpeg_max_frame_bytes_)
             : static_cast<uint32_t>(pixels_.size());
         stream_.payload_bytes = value.payload_bytes == 0
-            ? high_speed_iso_payload_bytes
-            : std::clamp(value.payload_bytes, uvc_payload_header_bytes, high_speed_iso_payload_bytes);
+            ? iso_payload_bytes_
+            : std::clamp(value.payload_bytes, uvc_payload_header_bytes, iso_payload_bytes_);
         position_ = 0;
         frame_started_at_ = 0;
         mjpeg_length_ = 0;
@@ -566,7 +589,7 @@ void UvcDevice::iso(usbtx_header_t& request) {
             frame.length != pixels_.size()) return;
         delay_ = std::clamp(frame.delay_msec, 1, 1000);
         if (stream_.format == 2) {
-            const uint64_t intervalBudget = high_speed_iso_video_bytes_per_second * stream_.interval /
+            const uint64_t intervalBudget = iso_video_bytes_per_second_ * stream_.interval /
                 uvc_time_units_per_second;
             const size_t outputCapacity = static_cast<size_t>((std::min)(
                 uint64_t(mjpeg_.size()), intervalBudget));

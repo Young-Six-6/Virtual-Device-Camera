@@ -15,6 +15,7 @@ public:
     virtual usbtx_header_t* begin() = 0;
     virtual UsbEndResult end(usbtx_header_t*) = 0;
     virtual size_t capacity() const = 0;
+    virtual bool is_superspeed() const { return false; }
     virtual void interrupt() noexcept = 0;
     virtual void resume() noexcept = 0;
 };

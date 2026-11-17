@@ -385,6 +385,78 @@ void mjpeg_protocol_tests() {
         "MJPEG end-of-frame flag was not set on the final packet");
 }
 
+void superspeed_protocol_tests() {
+    vcam::UvcDevice device(configuration(), {1280,720}, nullptr, true);
+
+    Packet deviceDescriptor(64);
+    deviceDescriptor.header().type = 1;
+    deviceDescriptor.header().descriptor.type = 1;
+    deviceDescriptor.header().descriptor.is_read = 1;
+    deviceDescriptor.header().descriptor.subtype = 1;
+    device.handle(deviceDescriptor.header(), deviceDescriptor.capacity);
+    require(deviceDescriptor.header().result == 0 && deviceDescriptor.header().data_length == 18 &&
+            deviceDescriptor.header().data[2] == 0 && deviceDescriptor.header().data[3] == 3 &&
+            deviceDescriptor.header().data[7] == 9,
+        "SuperSpeed device descriptor has the wrong USB version or EP0 encoding");
+
+    Packet bos(64);
+    bos.header().type = 1;
+    bos.header().descriptor.type = 1;
+    bos.header().descriptor.is_read = 1;
+    bos.header().descriptor.subtype = 15;
+    device.handle(bos.header(), bos.capacity);
+    const auto* bosBytes = reinterpret_cast<const unsigned char*>(bos.header().data);
+    require(bos.header().result == 0 && bos.header().data_length == 22 && bosBytes[0] == 5 &&
+            bosBytes[1] == 0x0f && bosBytes[2] == 22 && bosBytes[4] == 2 &&
+            bosBytes[14] == 3 && bosBytes[16] == 0x08,
+        "SuperSpeed BOS descriptor is incomplete or malformed");
+
+    auto config = descriptor();
+    device.handle(config.header(), config.capacity);
+    require(config.header().result == 0 && config.intact(), "SuperSpeed configuration descriptor failed");
+    const auto* bytes = reinterpret_cast<const unsigned char*>(config.header().data);
+    const size_t length = static_cast<size_t>(config.header().data_length);
+    bool foundEndpoint = false;
+    for (size_t position = 0; position + 2 <= length;) {
+        const size_t itemLength = bytes[position];
+        require(itemLength >= 2 && position + itemLength <= length,
+            "SuperSpeed configuration descriptor chain is malformed");
+        if (bytes[position + 1] == 0x05 && bytes[position] == 7 && bytes[position + 2] == 0x82) {
+            require(bytes[position + 4] == 0 && bytes[position + 5] == 4,
+                "SuperSpeed ISO endpoint must use a 1024-byte packet size");
+            require(position + 13 <= length && bytes[position + 7] == 6 && bytes[position + 8] == 0x30 &&
+                    bytes[position + 9] == 15 && bytes[position + 10] == 2 &&
+                    bytes[position + 11] == 0xc8 && bytes[position + 12] == 0xaf,
+                "SuperSpeed endpoint companion descriptor does not advertise the bounded 45,000-byte interval");
+            foundEndpoint = true;
+        }
+        position += itemLength;
+    }
+    require(foundEndpoint, "SuperSpeed isochronous endpoint descriptor is missing");
+
+    Packet probe(sizeof(vcam::StreamControl));
+    probe.header().type = 2;
+    probe.header().vendor.index = 1;
+    probe.header().vendor.value = 0x0100;
+    probe.header().vendor.request = UVC_GET_MAX;
+    device.handle(probe.header(), probe.capacity);
+    vcam::StreamControl stream{};
+    std::memcpy(&stream, probe.header().data, sizeof(stream));
+    require(probe.header().result == 0 && stream.payload_bytes == 45000 && stream.interval == 666667,
+        "SuperSpeed UVC probe does not expose its endpoint interval budget");
+
+    Packet minimum(sizeof(vcam::StreamControl));
+    minimum.header().type = 2;
+    minimum.header().vendor.index = 1;
+    minimum.header().vendor.value = 0x0100;
+    minimum.header().vendor.request = UVC_GET_MIN;
+    device.handle(minimum.header(), minimum.capacity);
+    std::memcpy(&stream, minimum.header().data, sizeof(stream));
+    require(minimum.header().result == 0 && stream.payload_bytes == 45000 &&
+            stream.frame_bytes == 1280u * 720u * 2u && stream.interval == 333333,
+        "SuperSpeed UVC probe does not advertise 720p YUY2 at 30 fps");
+}
+
 struct FakeState {
     std::mutex mutex;
     std::condition_variable changed;
@@ -629,11 +701,12 @@ int main(int argc, char** argv) {
         iso_reply_validation_tests();
         protocol_tests();
         mjpeg_protocol_tests();
+        superspeed_protocol_tests();
         lifecycle_tests();
         cancellation_test();
         GetProcessHandleCount(GetCurrentProcess(), &after);
         require(after <= before+4, "Camera/control lifecycle leaked Windows handles");
-        puts("PASS: YUY2/MJPEG descriptors and negotiation, ISO frame reassembly, wire types 2/4/5/6, 20000 malformed requests, lifecycle/replug rollback, and real control pipe.");
+        puts("PASS: USB 2.0/3.0 YUY2/MJPEG descriptors and negotiation, ISO frame reassembly, wire types 2/4/5/6, 20000 malformed requests, lifecycle/replug rollback, and real control pipe.");
         return 0;
     }
     catch (const std::exception& error) { fprintf(stderr, "FAIL: %s\n", error.what()); return 1; }
