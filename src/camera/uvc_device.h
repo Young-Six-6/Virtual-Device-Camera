@@ -14,7 +14,7 @@ struct StreamControl {
     uint8_t format = 1, frame = 1;
     uint32_t interval = 333333;
     uint16_t key_rate = 0, p_rate = 0, quality = 0, window = 0, delay = 10;
-    uint32_t frame_bytes = 0, payload_bytes = 1024;
+    uint32_t frame_bytes = 0, payload_bytes = 3u * 1024u;
 };
 #pragma pack(pop)
 static_assert(sizeof(StreamControl) == 26, "UVC 1.0 probe/commit layout");
@@ -32,11 +32,17 @@ class UvcDevice {
     char cfg_buffer[16*1024]{};
     usb_config_descriptor* cfg_desc = nullptr;
     std::vector<char> pixels_;
+    std::vector<char> mjpeg_;
+    size_t mjpeg_length_ = 0;
+    size_t mjpeg_max_frame_bytes_ = 0;
     size_t position_ = 0;
     uint8_t flip_ = 0;
+    uint32_t frame_intervals_[2] = {333333, 666667};
     int delay_ = 33;
+    ULONGLONG frame_started_at_ = 0;
     StreamControl stream_;
     FRAME_CALLBACK callback_;
+    MJPEG_FRAME_CALLBACK mjpeg_callback_ = nullptr;
     void* parameter_;
     void fill_dev_desc(unsigned short pid, unsigned int vid);
     void fill_str_desc(const char* manufacturer, const char* product);
@@ -47,7 +53,7 @@ class UvcDevice {
     void iso(usbtx_header_t& request);
     int encode(unsigned char* destination, size_t capacity);
 public:
-    UvcDevice(const uvc_vcam_t& config, Resolution size);
+    UvcDevice(const uvc_vcam_t& config, Resolution size, MJPEG_FRAME_CALLBACK mjpeg_callback = nullptr);
     bool set_resolution(Resolution size);
     Resolution resolution() const { return {frames[0].width, frames[0].height}; }
     std::vector<char> frame_copy() const { return pixels_; }

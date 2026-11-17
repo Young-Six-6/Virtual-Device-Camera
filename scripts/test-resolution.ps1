@@ -56,11 +56,14 @@ try {
     }
 }
 finally { $stream.Dispose() }
+$mjpegFixture = Join-Path $output 'encoded-720p-mjpeg.jpg'
 
 $originalPath = $env:PATH
 try {
     $env:PATH = (Join-Path $FFmpegRoot 'bin') + ';' + $env:PATH
-    & $testExe @fixtures $dynamicFixture
+    & $testExe @fixtures $dynamicFixture $mjpegFixture
     if ($LASTEXITCODE -ne 0) { throw "Resolution regression tests failed: $LASTEXITCODE" }
+    & $ffmpeg -hide_banner -loglevel error -y -i $mjpegFixture -frames:v 1 -f null -
+    if ($LASTEXITCODE -ne 0) { throw 'FFmpeg could not decode the generated 720p MJPEG frame.' }
 }
 finally { $env:PATH = $originalPath }

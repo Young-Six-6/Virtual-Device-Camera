@@ -1,12 +1,12 @@
 # Virtual Device Camera
 
-这是一个 Windows x64 虚拟 UVC 摄像头示例。程序通过既有虚拟 USB 总线驱动创建 UVC 摄像头，可从 MP4 文件或 RGB24 帧流取图，并转换为 YUY2 输出。
+这是一个 Windows x64 虚拟 UVC 摄像头。程序通过虚拟 USB 总线驱动创建 UVC 摄像头，可从 MP4 文件或 RGB24 帧流取图，并提供 YUY2 和 MJPEG 两种 UVC 格式。
 
 ## 能做什么
 
 - 传入一个或两个 MP4 路径，分别创建一个或两个摄像头实例。
 - 不传 MP4 时，通过 `\\.\pipe\vcam_pipe` 接收 RGB24 帧。
-- 将输入缩放到配置的摄像头分辨率，并转换成 UVC 使用的 YUY2 格式。
+- 将输入缩放到配置的摄像头分辨率，提供兼容性更好的 YUY2 和带宽更省的 MJPEG。
 - 通过独立命名管道查询状态，并在进程运行期间热更新输出分辨率。
 - 提供本机 Web UI 查看驱动/管道状态、预览画面和持久化运行配置。
 - 提供 OBS 本地管道、Hyper-V/TCP 转发、纯色帧发送和管道预览脚本。
@@ -38,7 +38,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -FFmpegS
 
 ## 运行前要知道
 
-应用程序构建成功不等于系统摄像头已经可用。程序通过 SetupAPI 查找虚拟 USB 总线接口；若接口不存在，会报告 `not found virtual usb path`。仓库保留了上游提供的 x86/x64 驱动文件；INF 会把同一个 `xusb_virt.sys` 安装为不同目标名称。驱动来源线索、文件清单和当前限制记录在[驱动文档](docs/driver.md)。此工作区没有安装或验证该内核驱动，因此摄像头设备的端到端运行尚未确认。
+USB 2.0 下 1280×720 的未压缩 YUY2 帧为 1,843,200 字节，等时传输的带宽限制约为 13.3fps；应用现也发布 MJPEG 格式，描述符允许 15/30fps。测试机用 DirectShow 以 30fps 请求抓取 60 帧，实测约 25fps。实际速度受输入帧率、图像复杂度、编码 CPU 和主机 USB 调度影响。想要较高帧率时，摄像头客户端需选择 MJPEG；旧 YUY2 格式仍保留。USB 3.0 尚未实现完整 SuperSpeed 设备与端点路径，不能仅通过提高描述符数值获得 USB 3.0 带宽。
+
+截至 2026-11-17，本机同一启动周期运行重建总线 `1.0.0.11`（`xusb_tree_1_0_0_11`）和 HCD `2.0.0.22`（`ucx_hcd_2_0_0_22`）；UVC 摄像头可枚举、协商 YUY2/MJPEG 并抓帧。应用停止后设备正常移除，HCD 未重启，系统启动时间未变化。测试范围和驱动限制见[驱动文档](docs/driver.md)。
 
 `config/default_res.txt` 支持 `480`、`720`、`1080` 三种预设。也可在启动时使用 `--resolution WIDTHxHEIGHT`，或通过控制管道在运行中修改输出分辨率。分辨率变更会重建 UVC 描述符并重新枚举设备，摄像头客户端需要重新打开设备。详见[控制管道协议](docs/control-protocol.md)。
 

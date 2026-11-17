@@ -25,6 +25,21 @@
 
 输入尺寸可以不同于 UVC 输出尺寸；应用会缩放到输出尺寸。不同宽高比的图像会拉伸。
 
+## UVC 格式与帧率
+
+应用同时发布未压缩 YUY2（DirectShow 常显示为 `yuyv422`）和 MJPEG。720p YUY2 每帧为 1,843,200 字节；USB 2.0 高速等时端点每微帧最多承载 3×1024 字节，扣除每个 UVC 包头后，720p 的可用上限约为 13.3fps。USB 2.0 的标称 480Mbps 并不能全部用于摄像头图像。端点每微帧限制见 [Microsoft 等时传输说明](https://learn.microsoft.com/windows-hardware/drivers/usbcon/transfer-data-to-isochronous-endpoints)。
+
+MJPEG 模式仍走 USB 2.0，但每帧先由 FFmpeg 压缩，UVC 描述符提供 1280×720 的 15fps 和 30fps 模式，并在当前协商帧预算内自动调节 JPEG 质量。测试机用 30fps 请求抓取 60 帧，实际约 25fps；这不是所有主机、输入源或画面复杂度下的保证。客户端若默认选 YUY2，仍会受到未压缩带宽限制，需要在客户端的格式/摄像头属性中选择 MJPEG。
+
+用 FFmpeg/DirectShow 选择 MJPEG：
+
+```powershell
+.\.deps\ffmpeg\bin\ffmpeg.exe -f dshow -video_size 1280x720 -framerate 30 -vcodec mjpeg `
+  -i 'video=MP4 HD Camera 1' -frames:v 60 -f null -
+```
+
+选择原有 YUY2 格式时将输入选项改为 `-pixel_format yuyv422`，720p 最大帧率约 13.3fps。MJPEG 提高的是 USB 2.0 下的有效图像吞吐；虚拟设备尚未提供完整 SuperSpeed 描述符、端点调度和 HCD 传输路径，因此这不等于 USB 3.0 支持。
+
 ## RGB24 命名管道输入
 
 默认管道为 `\\.\pipe\vcam_pipe`，可用 `--pipe` 更改。每个客户端连接先发送一次 8 字节 little-endian 头部，再连续发送未压缩 RGB24 帧：

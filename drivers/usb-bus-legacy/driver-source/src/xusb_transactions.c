@@ -893,7 +893,6 @@ static NTSTATUS XusbBuildTransaction(
         XusbReleaseTransactionResources(child, reservation);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    RtlZeroMemory(transaction, sizeof(*transaction));
     transaction->References = 1;
     transaction->Child = child;
     transaction->ReservedBytes = reservation;
@@ -925,7 +924,7 @@ static NTSTATUS XusbBuildTransaction(
     {
         ioctl_usbtx_header_t* outer = (ioctl_usbtx_header_t*)transaction->Buffer;
         PXUSB_USER_TRANSACTION request = (PXUSB_USER_TRANSACTION)(transaction->Buffer + FIELD_OFFSET(ioctl_usbtx_header_t, type));
-        RtlZeroMemory(transaction->Buffer, transaction->BufferBytes);
+        /* ExAllocatePool2 zeroes the allocation; avoid clearing a large ISO buffer twice. */
         outer->inter_handle = transaction->Id;
         outer->inter_seqno = transaction->Sequence;
         outer->data_length = (LONG)payloadLength;
@@ -1148,7 +1147,6 @@ static NTSTATUS XusbBuildPortTransaction(
         XusbReleaseTransactionResources(child, reservation);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    RtlZeroMemory(transaction, sizeof(*transaction));
     transaction->References = 1;
     transaction->Child = child;
     transaction->ReservedBytes = reservation;
@@ -1168,7 +1166,7 @@ static NTSTATUS XusbBuildPortTransaction(
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    RtlZeroMemory(transaction->Buffer, transaction->BufferBytes);
+    /* ExAllocatePool2 zeroes the allocation; preserve that guarantee without a second pass. */
     outer = (ioctl_usbtx_header_t*)transaction->Buffer;
     request = (PXUSB_USER_TRANSACTION)(transaction->Buffer +
         FIELD_OFFSET(ioctl_usbtx_header_t, type));

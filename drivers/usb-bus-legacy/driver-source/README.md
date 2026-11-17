@@ -13,6 +13,8 @@
 
 现有 UVC 程序走 USB-only 枚举器：通过冻结的 `GUID_XUSB_VIRT_INTERFACE` 和四个旧 IOCTL 添加/移除设备、提交 BEGIN/END 事务。旧 IOCTL 数值与结构保持在 `src/usb/ioctl.h`，新驱动额外提供只读 `IOCTL_XUSB_QUERY_DRIVER_INFO` 用于标识 FOSS 构建。
 
+USB-tree role 创建的内部 Host Controller PDO 报告项目专用软件总线 GUID，`LegacyBusType` 为 `PNPBus`；它与 UCX controller config 的 `UcxControllerParentBusTypeCustom` 对齐。USB-only、Root Hub 及普通 USB 子 PDO 继续报告标准 USB bus GUID。
+
 子 PDO 支持当前 UVC 活跃路径所需的控制/描述符/等时 URB，并将请求映射到旧用户态事务 ABI。`IRP_MN_QUERY_INTERFACE` 按旧二进制的布局提供 USBDI V0–V3，结构大小逐版校验；版本号、USB 2.0 标记和各回调结果与旧回调对齐。原版对应的 QueryBusTime/BusInformation/isochronous OUT 等回调本身就是失败 stub，新实现保留其返回状态。PDO 还处理设备文本、usage notification、ContainerID fallback 和移除状态；它声明不支持 Eject，由现有用户态 remove IOCTL 触发动态移除。PnP 查询停止、停止、取消停止、D3/D0 使用可恢复的事务 quiesce 状态：停止期间拒绝新 URB、取消挂起事务，START/D0 恢复接收；STOP 清空选中配置和 pipe 句柄。配置与接口选择会校验描述符；合成 pipe 句柄含代际信息。等时包边界和返回长度会校验。
 
 用户态在 PDO_ADD 中把上次返回的 BusAddress 作为建议值传回。新驱动会在该地址空闲时复用它，从而让同一摄像头断开/重连保持相同的 PnP instance ID；若地址仍被占用则重新分配。地址分配遵循 USB 地址范围 1–127。当前 ABI 没有设备序列号/稳定唯一 ID，驱动不伪造硬件 ContainerID，让 PnP 依据可移除设备能力生成容器 ID。
@@ -46,4 +48,4 @@
 
 默认包面向当前应用的两个 `GUID_XUSB_VIRT_INTERFACE` 提供角色。更新/卸载后仍需确认没有额外旧的接口提供者，避免用户态枚举到未更新的驱动实例。部署脚本不会删除 Driver Store 中的旧包。
 
-不要把新 `.sys` 手工覆盖到旧 INF 或旧 catalog。驱动包验证通过也不代表运行时已验证。任何签名包都需要先在可恢复的隔离 Windows 测试机上验证安装、PnP 枚举、UVC 描述符/控制请求、持续等时流、移除/重连；本机尚未完成这条端到端验证，也没有安装驱动或更改启动签名策略。
+不要把新 `.sys` 手工覆盖到旧 INF 或旧 catalog。当前测试机绑定 role-3 `1.0.0.11` 与 HCD `2.0.0.22`，控制器和根集线器均为 OK；应用创建的 UVC 摄像头可枚举，并通过 DirectShow 完成 YUY2/MJPEG 720p 抓帧。应用退出后摄像头 PDO 正常移除，系统无需重启。该验证覆盖当前摄像头数据路径，不代表所有 USB URB、卸载/重载和原版所有角色均已替代；实验 Host Controller/USB-tree 角色的剩余范围见本目录的 USB 3.0 与限制说明。实验包不能视为通用 USB 主控驱动。

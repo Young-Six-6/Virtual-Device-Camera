@@ -1,3 +1,6 @@
+; Template INF. replacement-package.ps1 derives a version-specific service,
+; image, and catalog name from DriverVer to isolate stale HCD images during
+; iterative test builds; the generated INF is the installable package.
 ; Reconstructed UCX 1.1 host-controller driver for the role-2 PDO emitted by
 ; the legacy role-3 USB-tree enumerator. Windows 10 2004 (build 19041)+ only.
 
@@ -6,7 +9,7 @@ Signature = "$Windows NT$"
 Class = USB
 ClassGuid = {36FC9E60-C465-11CF-8056-444553540000}
 Provider = %ProviderName%
-DriverVer = 11/15/2026,2.0.0.0
+DriverVer = 11/16/2026,2.0.0.22
 CatalogFile.NTamd64 = xusb_ucx_hcd.cat
 PnpLockdown = 1
 

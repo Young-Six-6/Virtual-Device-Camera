@@ -25,9 +25,24 @@ DEFINE_GUID(GUID_XUSB_VIRT_INTERFACE,
 #define IOCTL_XUSB_QUERY_DRIVER_INFO \
 	CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80a, METHOD_BUFFERED, FILE_READ_DATA)
 
+// Additive UCX initialization diagnostics; the frozen legacy IOCTLs stay unchanged.
+#define IOCTL_XUSB_QUERY_UCX_STATE \
+	CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80b, METHOD_BUFFERED, FILE_READ_DATA)
+
 #define XUSB_DRIVER_INFO_SIGNATURE 0x53534f46UL // "FOSS"
 #define XUSB_DRIVER_KIND_RECONSTRUCTED 1UL
 #define XUSB_DRIVER_ABI_VERSION 1UL
+
+#define XUSB_UCX_STATE_SIGNATURE 0x53554358UL // "XCUS"
+#define XUSB_UCX_STATE_ABI_VERSION 1UL
+
+#define XUSB_UCX_STAGE_DEVICE_INIT       0x00000001UL
+#define XUSB_UCX_STAGE_WDF_DEVICE        0x00000002UL
+#define XUSB_UCX_STAGE_VIRT_INTERFACE   0x00000004UL
+#define XUSB_UCX_STAGE_HCD_INTERFACE    0x00000008UL
+#define XUSB_UCX_STAGE_IO_QUEUE          0x00000010UL
+#define XUSB_UCX_STAGE_CONTROLLER        0x00000020UL
+#define XUSB_UCX_STAGE_ROOT_HUB          0x00000040UL
 
 typedef struct xusb_driver_info_t {
 	ULONG Signature;
@@ -35,6 +50,53 @@ typedef struct xusb_driver_info_t {
 	ULONG DriverKind;
 	ULONG AbiVersion;
 } xusb_driver_info_t;
+
+typedef struct xusb_ucx_state_t {
+	ULONG Signature;
+	ULONG StructureSize;
+	ULONG AbiVersion;
+	ULONG StageFlags;
+	LONG DeviceInitStatus;
+	LONG WdfDeviceStatus;
+	LONG VirtInterfaceStatus;
+	LONG HcdInterfaceStatus;
+	LONG IoQueueStatus;
+	LONG ControllerStatus;
+	LONG RootHubStatus;
+	LONG PrepareHardwareStatus;
+	ULONG PrepareHardwareCount;
+	ULONG RootHubGetInfoCount;
+	ULONG ControllerHandlePresent;
+	ULONG RootHubHandlePresent;
+    // Optional tail; the original 64-byte diagnostic response remains supported.
+    ULONG RootHubGet20PortInfoCount;
+    ULONG RootHubGet30PortInfoCount;
+    ULONG RootHubControlCount;
+    ULONG RootHubInterruptCount;
+    LONG RootHubGetInfoStatus;
+    LONG RootHubGet20PortInfoStatus;
+    ULONG RootHubLastUrbFunction;
+    ULONG RootHubLastSetup;
+    ULONG RootHubLastValueIndex;
+    ULONG RootHubLastUsbStatus;
+    LONG RootHubGet30PortInfoStatus;
+    ULONG RootHubGet30NumberOfPorts;
+    ULONG RootHubGet30PortInfoSize;
+    ULONG RootHubControl20Count;
+    ULONG RootHubControl30Count;
+    ULONG RootHubInterrupt20Count;
+    ULONG RootHubInterrupt30Count;
+    // Optional lifecycle diagnostics, appended without changing the legacy ABI.
+    ULONG ReleaseHardwareCount;
+    ULONG ReleaseHardwareCompletedCount;
+    ULONG D0EntryCount;
+    ULONG D0ExitCount;
+    ULONG CurrentPowerState;
+    ULONG Stopping;
+    ULONG PendingTransactions;
+    ULONG PendingRemovalWorkItems;
+    ULONG UserQueueState;
+} xusb_ucx_state_t;
 
 
 #define HW_IDS_COUNT    260

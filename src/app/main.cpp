@@ -113,7 +113,7 @@ int wmain(int argc, wchar_t** argv) {
             config.resume = frame_source_resume;
             config.width = settings.cameras[number - 1].width;
             config.height = settings.cameras[number - 1].height;
-            return Camera(vcam_create(&config), vcam_destroy);
+            return Camera(vcam_create_with_mjpeg(&config, frame_source_encode_mjpeg), vcam_destroy);
         };
         Camera camera1 = create(source1.get(), 1);
         if (!camera1) throw std::runtime_error("Unable to create camera 1; check the virtual USB driver");

@@ -3,14 +3,16 @@
 #include <stdexcept>
 
 namespace vcam {
-CameraSession::CameraSession(const uvc_vcam_t& config, Resolution size, std::unique_ptr<UsbTransport> transport)
+CameraSession::CameraSession(const uvc_vcam_t& config, Resolution size, std::unique_ptr<UsbTransport> transport,
+                             MJPEG_FRAME_CALLBACK mjpeg_callback)
     : manufacturer_(config.manu_fact ? config.manu_fact : "Fanxiushu"),
-      product_(config.product ? config.product : "Virtual Camera"), config_(config), transport_(std::move(transport)),
+      product_(config.product ? config.product : "Virtual Camera"), config_(config),
+      mjpeg_callback_(mjpeg_callback), transport_(std::move(transport)),
       stop_(CreateEvent(NULL, TRUE, FALSE, NULL)) {
     if (!transport_ || !stop_) throw std::runtime_error("Virtual USB transport unavailable");
     config_.manu_fact = manufacturer_.c_str();
     config_.product = product_.c_str();
-    device_ = std::make_unique<UvcDevice>(config_, size);
+    device_ = std::make_unique<UvcDevice>(config_, size, mjpeg_callback_);
     char id[64] = {};
     sprintf_s(id, "usb\\vid_%04x&pid_%04x", config.vid, config.pid);
     identity_ = {id, id, "USB\\DevClass_00&SubClass_00\nUSB\\DevClass_00\nUSB\\COMPOSITE"};
@@ -67,7 +69,7 @@ bool CameraSession::resize(Resolution size, std::string& error) {
         if (device_->resolution() == size) return true;
     }
     // Allocate descriptors and frame storage before disrupting the active device.
-    auto replacement = std::make_unique<UvcDevice>(config_, size);
+    auto replacement = std::make_unique<UvcDevice>(config_, size, mjpeg_callback_);
     stop_worker();
     transport_->resume();
     if (!transport_->unplug()) {

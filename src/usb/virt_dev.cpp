@@ -12,6 +12,7 @@
 
 namespace {
 constexpr size_t maximum_payload = 32 * 1024 * 1024;
+constexpr size_t initial_transaction_buffer_size = 64 * 1024;
 constexpr size_t request_offset = offsetof(ioctl_usbtx_header_t, type);
 static_assert(request_offset == 24 && sizeof(ioctl_usbtx_header_t) == 24 + sizeof(usbtx_header_t),
     "Legacy virtual USB driver ABI changed");
@@ -143,7 +144,7 @@ void* virt_usb_open() {
         device->file = open_driver();
         device->stop.reset(CreateEvent(NULL, TRUE, FALSE, NULL));
         if (!device->file || !device->stop) return nullptr;
-        device->buffer.resize(64 * 1024);
+        device->buffer.resize(initial_transaction_buffer_size);
         return device.release();
     }
     catch (...) { return nullptr; }
@@ -225,6 +226,9 @@ usbtx_header_t* virt_usb_begin(void* handle) {
     auto* device = static_cast<Device*>(handle);
     if (!device || !device->plugged || device->active) return nullptr;
     try {
+        // Keep a large vector's allocation for reuse without passing its high-water
+        // size through every IOCTL. Most USB transactions fit in the initial buffer.
+        device->buffer.resize(initial_transaction_buffer_size);
         for (;;) {
             HANDLE events[] = {device->stop.get(), device->semaphore.get()};
             if (WaitForMultipleObjects(2, events, FALSE, INFINITE) != WAIT_OBJECT_0+1) return nullptr;
@@ -232,7 +236,6 @@ usbtx_header_t* virt_usb_begin(void* handle) {
             bool complete = false;
             bool stale_signal = false;
             for (int attempt = 0; attempt < 2; ++attempt) {
-                std::fill(device->buffer.begin(), device->buffer.end(), 0);
                 complete = device->ioctl(IOCTL_BEGIN_TRANS_USB_DATA, NULL, 0, device->buffer.data(),
                     static_cast<DWORD>(device->buffer.size()), bytes);
                 if (complete) break;

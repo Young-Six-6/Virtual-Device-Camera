@@ -55,7 +55,29 @@ New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
 Copy-Item -LiteralPath $legacySys -Destination (Join-Path $packageDir 'xusb_driver.sys')
 Copy-Item -LiteralPath $ucxSys -Destination (Join-Path $packageDir 'VirtualCameraUcxHcd.sys')
 Copy-Item -LiteralPath (Join-Path $legacyRoot 'package\experimental\xusb_reconstructed_tree.inf') -Destination $packageDir
-Copy-Item -LiteralPath (Join-Path $root 'package\xusb_ucx_hcd.inf') -Destination $packageDir
+$treeInfPath = Join-Path $packageDir 'xusb_reconstructed_tree.inf'
+$treeInfText = [IO.File]::ReadAllText($treeInfPath)
+$treeVersion = [regex]::Match($treeInfText, '(?im)^\s*DriverVer\s*=\s*[^,]+,\s*([0-9]+(?:\.[0-9]+){1,3})\s*$')
+if (-not $treeVersion.Success) { throw "Could not parse DriverVer from $treeInfPath" }
+$treeSuffix = $treeVersion.Groups[1].Value.Replace('.', '_')
+$treeImageName = "xusb_driver_$treeSuffix.sys"
+$treeInfText = $treeInfText.Replace('xusb_virt', "xusb_tree_$treeSuffix").Replace('xusb_driver.sys', $treeImageName)
+[IO.File]::WriteAllText($treeInfPath, $treeInfText, [Text.UTF8Encoding]::new($false))
+Move-Item -LiteralPath (Join-Path $packageDir 'xusb_driver.sys') -Destination (Join-Path $packageDir $treeImageName)
+$ucxInf = Join-Path $packageDir 'xusb_ucx_hcd.inf'
+Copy-Item -LiteralPath (Join-Path $root 'package\xusb_ucx_hcd.inf') -Destination $ucxInf
+$ucxInfText = [System.IO.File]::ReadAllText($ucxInf)
+$driverVerMatch = [regex]::Match($ucxInfText, '(?im)^\s*DriverVer\s*=\s*[^,]+,\s*([0-9]+(?:\.[0-9]+){1,3})\s*$')
+if (-not $driverVerMatch.Success) { throw "Could not parse DriverVer from $ucxInf" }
+$serviceSuffix = $driverVerMatch.Groups[1].Value.Replace('.', '_')
+$versionedService = "ucx_hcd_$serviceSuffix"
+$versionedImage = "VirtualCameraUcxHcd_$serviceSuffix.sys"
+$ucxInfText = $ucxInfText.Replace('ucx_hcd', $versionedService)
+$ucxInfText = $ucxInfText.Replace('VirtualCameraUcxHcd.sys', $versionedImage)
+[System.IO.File]::WriteAllText($ucxInf, $ucxInfText, [System.Text.UTF8Encoding]::new($false))
+Move-Item -LiteralPath (Join-Path $packageDir 'VirtualCameraUcxHcd.sys') `
+    -Destination (Join-Path $packageDir $versionedImage)
+Copy-Item -LiteralPath (Join-Path $repoRoot 'scripts\query-ucx-state.ps1') -Destination $packageDir
 
 $kitRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
 $inf2cat = Get-ChildItem -LiteralPath $kitRoot -Directory -ErrorAction Stop |

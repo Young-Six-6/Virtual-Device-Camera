@@ -1,5 +1,7 @@
 # Virtual Camera UCX host controller
 
+Current machine evidence (2026-11-17): tree 1.0.0.11 and HCD 2.0.0.22 are bound. The controller and ROOT_HUB30 child report OK. The user-mode camera enumerates through this HCD and streams 1280×720 YUY2 and MJPEG; a 30fps MJPEG request delivered 60 frames at about 25fps. Application shutdown removes the camera node and drains pending HCD work without a Windows restart. The camera itself advertises USB 2.0; this result does not validate SuperSpeed.
+
 This is an isolated KMDF + UCX 1.1 host-controller project. It targets the UCX 1.1
 DDI surface, pins KMDF 1.31, and is intended for Windows 10 version 2004
 (build 19041) or newer.
@@ -33,12 +35,10 @@ compatibility target is based on Microsoft's UCX versioning guidance.
 
 ## Limits and validation status
 
-This builds as a Release x64 driver, but remains an unvalidated replacement candidate.
-The HCD maps the URB families accepted by the reconstructed WDM protocol into frozen
-wire types 1–6. The unchanged UVC handler intentionally stalls or ignores operations it
-does not implement (including bulk data and Microsoft OS feature descriptors), matching
-the old user-mode behavior. No driver installation or Windows USB/UVC end-to-end runtime
-validation has been run.
+This builds as a Release x64 driver and has passed the camera's tested USB 2.0 control,
+descriptor and isochronous capture path. It remains a partial replacement candidate:
+the HCD maps legacy operations into frozen wire types 1–6, while the UVC handler still
+does not implement bulk data or the complete Microsoft OS feature-descriptor path.
 The reconstructed WDM source maps `IOCTL_INTERNAL_USB_CYCLE_PORT` to wire reset type 2.
 That IOCTL targets the USB hub PDO; UCX-based operation is expected to expose the port
 state through root-hub callbacks instead. The new root hub models port-power off/on as
@@ -54,7 +54,107 @@ IOCTL to that sequence.
 The frozen ABI carries a 40-byte operation record and payload rather than an arbitrary
 raw URB, so unsupported URB types cannot be passed through unchanged.
 
+The root-hub PDO enumerates after the bus stopped clearing the upper KMDF BusRelations result. This also preserves the PDO references owned by that result. Same-version unload/reload remains unverified.
+
+## USB 3.0 feasibility
+
+SuperSpeed is feasible in this software HCD without physical xHCI silicon, but it is a
+substantial protocol and enumeration change. HCD 2.0.0.22 exposes a USB 3.0 root-hub port,
+but USB-device speed is not yet used to select a SuperSpeed device/endpoint transfer path,
+and endpoint creation ignores the SuperSpeed companion descriptor. The unchanged camera
+advertises USB 2.0 and has no BOS or SuperSpeed endpoint companion descriptor. Raising the
+payload limit alone would misrepresent what the stack can enumerate and schedule.
+
+A compatible implementation should add SuperSpeed root-hub port state and speed mapping,
+return valid 30-port information, provide the camera's BOS and endpoint companion
+descriptors, and negotiate/schedule transfers using `wBytesPerInterval` and the service
+interval. Microsoft documents SuperSpeed isochronous capacity in terms of the endpoint
+companion descriptor and recommends `wBytesPerInterval` as the interval limit:
+[isochronous endpoint transfers](https://learn.microsoft.com/windows-hardware/drivers/usbcon/transfer-data-to-isochronous-endpoints).
+The current 40-byte BEGIN/END wire ABI can remain frozen; these changes can be implemented
+inside the UCX HCD and UVC descriptor/negotiation path. This is a high-effort feature that
+needs staged validation with USBView/UsbTreeView, device enumeration, frame capture, and
+disconnect/reconnect. Until that work and runtime validation are complete, the driver is
+USB 2.0 only. Current USB 2.0 isochronous bandwidth is capped at 3 x 1024 bytes per
+microframe (24.576 MB/s raw, before protocol overhead), so high-resolution YUY2 frame
+rates are reduced to stay within that limit.
+
+## Removal and unload lifecycle
+
+The role-3 bus now retains a still-present child PDO across a function-driver removal
+for update or disable/enable. It only deletes the PDO after the device disappears from
+the bus. Its retained PDO uses temporary PnP transaction suspension, so START can resume
+it without reinitializing a permanently released remove lock. Role-3 `1.0.0.9`
+(`oem67.inf`) and HCD `2.0.0.10` (`oem65.inf`) were installed in the same boot session;
+both started successfully. Same-version unload/reload still needs validation.
+
+The HCD caller-context callback captures handles and METHOD_NEITHER buffers only for
+the four private user-mode IOCTLs. Other requests return to KMDF dispatch through
+WdfDeviceEnqueueRequest, allowing UCX and endpoint queues to receive kernel requests.
+PrepareHardware restarts the user queue explicitly purged by ReleaseHardware.
+
+The HCD registers `EvtDevicePrepareHardware` and `EvtDeviceReleaseHardware`. Prepare
+clears the stopping state on each PnP restart. Release marks the controller stopping,
+purges its user I/O queue, cancels all per-slot URB/reset transactions, waits for the
+transaction count to drain, flushes queued completion DPCs, and waits for removal
+notification work items to finish before returning. Device cleanup releases any
+leftover slot-owned event and semaphore references and clears controller, root-hub,
+queue, and address state. The
+shared slot lock is parented to the WDF driver object so it remains valid until final
+cleanup and can be reused if PnP recreates the device. Normal application handles must
+still be closed before uninstall; an open client handle correctly keeps its device stack
+alive. These paths compile in Release, but unload/re-enumeration still require runtime
+verification. The UCX role-2 HCD previously reported `STATUS_DRIVER_FAILED_PRIOR_UNLOAD`
+when role-3 was updated and its child was recreated. Each debug package now has a
+version-specific service and image path, so the next package can load without replacing
+the failed in-memory instance. The old image may remain until a later maintenance reboot;
+same-version device removal/rebind remains unsafe until the underlying teardown issue is
+diagnosed.
+
+`ReleaseHardware` also resets all USB 2.0/3.0 port-power flags and clears the cached UCX
+root-hub pipe/device handles after queued transactions and removal work items drain. This
+prevents a later PnP start or resource rebalance from reusing stale handles from the prior
+root-hub instance. This is lifecycle hygiene; it has not been shown to fix a root-hub
+startup failure when the HCD's control callback is never invoked.
+
+Cancel registration, transaction selection and `WdfRequestUnmarkCancelable` are serialized
+by the slot lock. If Unmark returns `STATUS_CANCELLED`, only the cancellation callback
+queues completion; the END/removal path releases its own transaction reference. The
+removal-work counter and its drain event also change under the same lock. These rules
+prevent early completion/freeing while the cancellation callback still uses the transaction,
+and prevent a stale zero-count event from overtaking newly queued removal work.
+
+Each allocated slot has a monotonically increasing generation. File, USB-device, endpoint,
+queue and transaction contexts retain it, and operations check it under the slot lock.
+After PnP stop/start, an old application handle or late UCX cleanup cannot remove a new
+device or decrement its reference count merely because it occupies the same port number.
+Private caller-context requests use `WdfDeviceEnqueueRequest` after handle/buffer capture;
+they have not yet come from a queue, so `WdfRequestForwardToIoQueue` is not valid there.
+
+Each UCX endpoint queue is now started by `EvtEndpointStart`. Purge and abort cancel the
+endpoint's outstanding transactions and purge its WDF queue; their UCX completion calls
+run only after KMDF reports that requests delivered to the queue have completed or been
+canceled. Abort restarts the WDF queue before completing the UCX abort. This ordering is
+necessary for interface changes and disconnect cleanup; it has been build-checked, but
+still needs on-device exercise through stream start/stop and unplug/replug.
+
 The role-2 INF lives in the combined deployment package at
 `../replacement-package/package/xusb_ucx_hcd.inf`; there is intentionally no
 standalone development INF here. The combined package workflow owns catalog
 generation and deployment metadata.
+
+## Historical root-hub startup failure (2026-11-16; superseded by HCD 2.0.0.22)
+
+The following note records the earlier Code 43 investigation and is not the current
+runtime state.
+
+The role-3 internal controller PDO reports a project-specific software bus GUID
+with `PNPBus`, matching the HCD's `UcxControllerParentBusTypeCustom` setting. The
+previous PDO implementation reported `GUID_BUS_TYPE_USB` for every child,
+including this host-controller PDO. Microsoft recommends a unique bus GUID for a
+vendor software bus. The updated PDO was installed on the test machine. UCX created
+the controller and root-hub objects and enumerated its root-hub PDO. At that stage the
+info callbacks succeeded, but USBHUB3 failed with Code 43 before the HCD control callback
+was observed. HCD 2.0.0.22 later passed root-hub startup and camera capture.
+
+The initialization query supports the prior 64-, 104- and 132-byte responses and a 168-byte lifecycle response. The latest tail records hardware release start/completion counts, D0 entry/exit counts, power/stopping state, pending transactions/removal work and the user queue state. The query script displays unavailable lifecycle fields as blank for older drivers. Snapshots are approximate, and the normal user queue is purged during removal, so this interface cannot be used to poll a stack that is already stalled inside teardown. Earlier 2.0.0.17/132-byte observations are historical and superseded by the 2.0.0.22 evidence at the top of this document.

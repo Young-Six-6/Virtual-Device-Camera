@@ -4,6 +4,7 @@
 #include "../src/app/app_config.h"
 #include "../src/app/web_server.h"
 #include "../src/common/win_handle.h"
+#include "../src/protocol/iso_reply.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -39,6 +40,13 @@ bool descriptor_grants(PSECURITY_DESCRIPTOR descriptor, WELL_KNOWN_SID_TYPE grou
 }
 int pattern(frame_t* frame) {
     for (int i = 0; i < frame->length; ++i) frame->buffer[i] = static_cast<char>(i & 0xff);
+    return 0;
+}
+int mjpeg_fixture(mjpeg_frame_t* frame) {
+    static constexpr unsigned char jpeg[] = {0xff,0xd8,0x10,0x20,0x30,0x40,0x50,0x60,0x70,0x80,0xff,0xd9};
+    if (!frame || frame->capacity < static_cast<int>(sizeof(jpeg))) return -1;
+    std::memcpy(frame->buffer, jpeg, sizeof(jpeg));
+    frame->length = sizeof(jpeg);
     return 0;
 }
 uvc_vcam_t configuration() {
@@ -84,6 +92,28 @@ vcam::Resolution descriptor_size(const usbtx_header_t& response) {
     }
     throw std::runtime_error("Frame descriptor missing");
 }
+const uvc_frame_uncompressed* video_frame_descriptor(const usbtx_header_t& response) {
+    size_t position = 0;
+    while (position + 2 <= size_t(response.data_length)) {
+        const auto* entry = reinterpret_cast<const unsigned char*>(response.data)+position;
+        require(entry[0] >= 2 && position+entry[0] <= size_t(response.data_length), "Invalid descriptor chain");
+        if (entry[1] == 0x24 && entry[0] == 34 && entry[2] == 5)
+            return reinterpret_cast<const uvc_frame_uncompressed*>(entry);
+        position += entry[0];
+    }
+    throw std::runtime_error("Frame descriptor missing");
+}
+uint16_t iso_endpoint_max_packet(const usbtx_header_t& response) {
+    size_t position = 0;
+    while (position + 2 <= size_t(response.data_length)) {
+        const auto* entry = reinterpret_cast<const unsigned char*>(response.data)+position;
+        require(entry[0] >= 2 && position+entry[0] <= size_t(response.data_length), "Invalid descriptor chain");
+        if (entry[1] == 0x05 && entry[0] >= 7 && entry[2] == 0x82)
+            return static_cast<uint16_t>(entry[4] | (uint16_t(entry[5]) << 8));
+        position += entry[0];
+    }
+    throw std::runtime_error("Isochronous endpoint descriptor missing");
+}
 Packet make_iso_packet() {
     Packet packet(ISO_PACKET_HDR_SIZE + 3*sizeof(iso_packet) + 24);
     auto& request = packet.header();
@@ -94,6 +124,37 @@ Packet make_iso_packet() {
     for (unsigned i = 0; i < 3; ++i) iso->packets[i].offset = i*8;
     return packet;
 }
+void iso_reply_validation_tests() {
+    require(xusb_iso_packet_fits_reply(24, 0, 10, 32),
+        "Trailing zero-length ISO packet beyond the returned payload was rejected");
+    require(xusb_iso_packet_fits_reply(32, 0, 0, 32),
+        "Zero-length ISO packet at transfer capacity was rejected");
+    require(xusb_iso_packet_fits_reply(4, 4, 8, 32),
+        "ISO packet ending at the returned payload boundary was rejected");
+    require(!xusb_iso_packet_fits_reply(8, 1, 8, 32),
+        "Nonempty ISO packet beyond the returned payload was accepted");
+    require(!xusb_iso_packet_fits_reply(33, 0, 0, 32),
+        "Zero-length ISO packet beyond transfer capacity was accepted");
+    require(!xusb_iso_packet_fits_reply(0, 0, 33, 32),
+        "Returned ISO payload larger than transfer capacity was accepted");
+    require(!xusb_iso_packet_fits_reply(0xfffffffful, 1, 0xfffffffful, 0xfffffffful),
+        "ISO offset/length overflow was accepted");
+
+    for (unsigned long capacity = 0; capacity <= 16; ++capacity) {
+        for (unsigned long returned = 0; returned <= capacity; ++returned) {
+            for (unsigned long offset = 0; offset <= capacity + 1; ++offset) {
+                for (unsigned long length = 0; length <= capacity + 1; ++length) {
+                    const bool withinCapacity = offset <= capacity && length <= capacity - offset;
+                    const bool withinReply = length == 0 ||
+                        (offset <= returned && length <= returned - offset);
+                    const bool expected = withinCapacity && withinReply;
+                    require(bool(xusb_iso_packet_fits_reply(offset, length, returned, capacity)) == expected,
+                        "ISO reply validator disagreed with exhaustive boundary cases");
+                }
+            }
+        }
+    }
+}
 void protocol_tests() {
     vcam::UvcDevice device(configuration(), {640,480});
     for (auto size : {vcam::Resolution{640,480}, {1280,720}, {1920,1080}}) {
@@ -101,6 +162,13 @@ void protocol_tests() {
         auto packet = descriptor();
         device.handle(packet.header(), packet.capacity);
         require(packet.header().result == 0 && packet.intact() && descriptor_size(packet.header()) == size, "Updated descriptor mismatch");
+        const auto* frame = video_frame_descriptor(packet.header());
+        constexpr uint64_t available_video_bytes_per_second = uint64_t(3070) * 8000;
+        require(iso_endpoint_max_packet(packet.header()) == 0x1400, "High-speed isochronous endpoint does not reserve three transactions per microframe");
+        require(frame->dwFrameInterval[0] <= frame->dwFrameInterval[1] &&
+            uint64_t(frame->dwMaxVideoFrameBufferSize) * 10000000u <=
+                available_video_bytes_per_second * frame->dwFrameInterval[0],
+            "Advertised maximum frame rate exceeds the USB 2.0 isochronous payload budget");
     }
     require(!device.set_resolution({641,480}), "Odd output width accepted");
     for (int subtype = 1; subtype <= 3; ++subtype) for (size_t length = 0; length < 32; ++length) {
@@ -118,6 +186,16 @@ void protocol_tests() {
             device.handle(hdr, packet.capacity);
             require(packet.intact() && hdr.result == 0 && size_t(hdr.data_length) <= length, "Streaming reply overflowed");
         }
+    }
+    {
+        Packet packet(sizeof(vcam::StreamControl));
+        auto& hdr = packet.header();
+        hdr.type = 2; hdr.vendor.index = 1; hdr.vendor.value = 0x0100; hdr.vendor.request = UVC_GET_DEF;
+        device.handle(hdr, packet.capacity);
+        vcam::StreamControl control{};
+        std::memcpy(&control, hdr.data, sizeof(control));
+        require(hdr.result == 0 && control.payload_bytes == 3072 && control.interval >= 333333,
+            "Default UVC probe did not negotiate the enlarged isochronous payload");
     }
     for (int status_type = 1; status_type <= 7; ++status_type) {
         Packet packet(4);
@@ -170,6 +248,7 @@ void protocol_tests() {
         auto& hdr = packet.header();
         hdr.type = 2; hdr.vendor.index = 1; hdr.vendor.value = 0x0200; hdr.vendor.request = UVC_SET_CUR;
         vcam::StreamControl value;
+        value.interval = 0; // Select the resolution-specific default frame interval.
         value.frame = static_cast<uint8_t>(index);
         std::memcpy(hdr.data, &value, sizeof(value));
         device.handle(hdr, packet.capacity);
@@ -217,6 +296,93 @@ void protocol_tests() {
         device.handle(packet.header(), packet.capacity);
         require(packet.intact(), "Protocol fuzz case overwrote guard bytes");
     }
+}
+
+void mjpeg_protocol_tests() {
+    vcam::UvcDevice device(configuration(), {4,2}, mjpeg_fixture);
+    auto descriptors = descriptor();
+    device.handle(descriptors.header(), descriptors.capacity);
+    require(descriptors.header().result == 0 && descriptors.intact(), "MJPEG descriptor request failed");
+    const auto* bytes = reinterpret_cast<const unsigned char*>(descriptors.header().data);
+    const size_t descriptor_length = static_cast<size_t>(descriptors.header().data_length);
+    bool found_yuy2 = false, found_mjpeg = false, found_stream_header = false;
+    for (size_t position = 0; position + 2 <= descriptor_length;) {
+        const size_t length = bytes[position];
+        require(length >= 2 && position + length <= descriptor_length, "MJPEG descriptor chain is malformed");
+        if (bytes[position+1] == 0x24 && bytes[position] == 27 && bytes[position+2] == 0x04) {
+            const auto* format = reinterpret_cast<const uvc_format_uncompressed*>(bytes + position);
+            found_yuy2 = format->bFormatIndex == 1;
+        }
+        if (bytes[position+1] == 0x24 && bytes[position+2] == 0x01 &&
+            bytes[position] == UVC_DT_INPUT_HEADER_SIZE(2,1)) {
+            const auto* header = reinterpret_cast<const uvc_input_header_descriptor*>(bytes + position);
+            require(header->bNumFormats == 2 && header->bControlSize == 1 &&
+                    header->bmaControls[0] == 0 && header->bmaControls[1] == 0 &&
+                    header->wTotalLength == UVC_DT_INPUT_HEADER_SIZE(2,1) + 27 + 34 + 6 +
+                        UVC_DT_FORMAT_MJPEG_SIZE + UVC_DT_FRAME_MJPEG_SIZE(2),
+                "UVC input header length/control array does not match the advertised formats");
+            found_stream_header = true;
+        }
+        if (bytes[position+1] == 0x24 && bytes[position] == UVC_DT_FORMAT_MJPEG_SIZE && bytes[position+2] == 0x06) {
+            const auto* format = reinterpret_cast<const uvc_format_mjpeg*>(bytes + position);
+            require(format->bFormatIndex == 2 && format->bNumFrameDescriptors == 1,
+                "MJPEG format index/frame count mismatch");
+            require(position + format->bLength + UVC_DT_FRAME_MJPEG_SIZE(2) <= descriptor_length,
+                "MJPEG frame descriptor is truncated");
+            const auto* frame = reinterpret_cast<const uvc_frame_mjpeg*>(bytes + position + format->bLength);
+            uint32_t intervals[2]{};
+            std::memcpy(intervals, reinterpret_cast<const char*>(frame) + UVC_DT_FRAME_MJPEG_SIZE(0), sizeof(intervals));
+            require(frame->bLength == UVC_DT_FRAME_MJPEG_SIZE(2) && frame->bDescriptorType == 0x24 &&
+                    frame->bDescriptorSubType == 0x07 && frame->bFrameIndex == 1 &&
+                    frame->wWidth == 4 && frame->wHeight == 2 && frame->dwMaxVideoFrameBufferSize >= 12 &&
+                    frame->bFrameIntervalType == 2 && intervals[0] == 333333 && intervals[1] == 666667,
+                "MJPEG frame mode or USB 2.0 frame budget descriptor is invalid");
+            found_mjpeg = true;
+        }
+        position += length;
+    }
+    require(found_yuy2 && found_mjpeg && found_stream_header,
+        "MJPEG mode was not added alongside the original YUY2 mode with a complete input header");
+
+    Packet negotiation(sizeof(vcam::StreamControl));
+    auto& negotiation_request = negotiation.header();
+    negotiation_request.type = 2;
+    negotiation_request.vendor.type = 1;
+    negotiation_request.vendor.index = 1;
+    negotiation_request.vendor.value = 0x0100;
+    negotiation_request.vendor.request = UVC_SET_CUR;
+    vcam::StreamControl stream{};
+    stream.format = 2;
+    stream.frame = 1;
+    stream.interval = 333333;
+    stream.payload_bytes = 3072;
+    std::memcpy(negotiation_request.data, &stream, sizeof(stream));
+    device.handle(negotiation_request, negotiation.capacity);
+    require(negotiation_request.result == 0 && negotiation_request.data_length == sizeof(stream),
+        "MJPEG stream negotiation failed");
+
+    auto packet = make_iso_packet();
+    device.handle(packet.header(), packet.capacity);
+    require(packet.header().result == 0 && packet.intact(), "MJPEG ISO transfer failed");
+    const auto* iso = reinterpret_cast<const iso_packet_hdr*>(packet.header().data);
+    const auto* payload = reinterpret_cast<const unsigned char*>(packet.header().data) +
+        ISO_PACKET_HDR_SIZE + 3*sizeof(iso_packet);
+    std::vector<unsigned char> image;
+    for (unsigned index = 0; index < 3; ++index) {
+        const auto& entry = iso->packets[index];
+        const auto* fragment = payload + entry.offset;
+        if (!entry.length) continue;
+        require(entry.length >= 2 && fragment[0] == 2 && (fragment[1] & UVC_STREAM_EOH),
+            "MJPEG payload header is missing");
+        require((fragment[1] & 1) == 0, "MJPEG frame identifier changed inside a frame");
+        image.insert(image.end(), fragment + 2, fragment + entry.length);
+    }
+    static constexpr unsigned char expected[] = {0xff,0xd8,0x10,0x20,0x30,0x40,0x50,0x60,0x70,0x80,0xff,0xd9};
+    require(image.size() == sizeof(expected) && std::memcmp(image.data(), expected, sizeof(expected)) == 0,
+        "MJPEG ISO fragments did not reassemble into the encoded image");
+    require(iso->packets[1].length &&
+            (payload[iso->packets[1].offset+1] & UVC_STREAM_EOF),
+        "MJPEG end-of-frame flag was not set on the final packet");
 }
 
 struct FakeState {
@@ -460,12 +626,14 @@ int main(int argc, char** argv) {
         }
         DWORD before = 0, after = 0;
         GetProcessHandleCount(GetCurrentProcess(), &before);
+        iso_reply_validation_tests();
         protocol_tests();
+        mjpeg_protocol_tests();
         lifecycle_tests();
         cancellation_test();
         GetProcessHandleCount(GetCurrentProcess(), &after);
         require(after <= before+4, "Camera/control lifecycle leaked Windows handles");
-        puts("PASS: descriptors, UVC negotiation, wire types 2/4/5/6, ISO framing, 20000 malformed requests, lifecycle/replug rollback, and real control pipe.");
+        puts("PASS: YUY2/MJPEG descriptors and negotiation, ISO frame reassembly, wire types 2/4/5/6, 20000 malformed requests, lifecycle/replug rollback, and real control pipe.");
         return 0;
     }
     catch (const std::exception& error) { fprintf(stderr, "FAIL: %s\n", error.what()); return 1; }

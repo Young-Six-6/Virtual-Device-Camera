@@ -7,7 +7,7 @@ Signature = "$Windows NT$"
 Class = System
 ClassGuid = {4D36E97D-E325-11CE-BFC1-08002BE10318}
 Provider = %ProviderName%
-DriverVer = 11/15/2026,1.0.0.0
+DriverVer = 11/16/2026,1.0.0.13
 CatalogFile.NTamd64 = xusb_reconstructed_tree.cat
 PnpLockdown = 1
 

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -232,6 +233,54 @@ void check_dynamic_file(const std::string& fixture, Resolution target)
     }
 }
 
+void check_mjpeg_encoder(const std::string& fixture, const std::string& encoded_path)
+{
+    constexpr Resolution size{1280,720};
+    Source source(frame_source_create_file(fixture.c_str()), frame_source_destroy);
+    require(source != nullptr, "Unable to create MJPEG frame source");
+    std::vector<char> yuy2((size_t)size.width * size.height * 2);
+    uint32_t state = 0x91e10da5u;
+    auto next = [&state]() {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        return static_cast<unsigned char>(state & 0xff);
+    };
+    for (size_t offset = 0; offset < yuy2.size(); offset += 4) {
+        yuy2[offset] = static_cast<char>(16 + next() % 220);
+        yuy2[offset+1] = static_cast<char>(16 + next() % 225);
+        yuy2[offset+2] = static_cast<char>(16 + next() % 220);
+        yuy2[offset+3] = static_cast<char>(16 + next() % 225);
+    }
+
+    constexpr size_t guard = 64;
+    constexpr unsigned char sentinel = 0xcd;
+    const size_t usb2_budget = (uint64_t(3070) * 8000 * 333333) / 10000000;
+    std::vector<unsigned char> too_small(128 + guard * 2, sentinel);
+    mjpeg_frame_t frame{yuy2.data(), static_cast<int>(yuy2.size()), size.width, size.height,
+        reinterpret_cast<char*>(too_small.data()+guard), 128, 0, source.get()};
+    require(frame_source_encode_mjpeg(&frame) < 0 &&
+        std::all_of(too_small.begin(), too_small.end(), [sentinel](unsigned char value) { return value == sentinel; }),
+        "MJPEG encoder wrote past a too-small output budget");
+
+    std::vector<unsigned char> encoded(usb2_budget + guard * 2, sentinel);
+    frame.buffer = reinterpret_cast<char*>(encoded.data()+guard);
+    frame.capacity = static_cast<int>(usb2_budget);
+    frame.length = 0;
+    require(frame_source_encode_mjpeg(&frame) == 0, "MJPEG encoder did not fit a noisy 720p frame into the 30 FPS USB 2.0 budget");
+    require(frame.length > 4 && static_cast<size_t>(frame.length) <= usb2_budget &&
+        encoded[guard] == 0xff && encoded[guard+1] == 0xd8 &&
+        encoded[guard+frame.length-2] == 0xff && encoded[guard+frame.length-1] == 0xd9,
+        "MJPEG encoder did not return a complete bounded JPEG image");
+    require(std::all_of(encoded.begin(), encoded.begin()+guard, [sentinel](unsigned char value) { return value == sentinel; }) &&
+        std::all_of(encoded.end()-guard, encoded.end(), [sentinel](unsigned char value) { return value == sentinel; }),
+        "MJPEG encoder wrote beyond the caller-owned output buffer");
+    std::ofstream output_file(encoded_path, std::ios::binary | std::ios::trunc);
+    output_file.write(reinterpret_cast<const char*>(encoded.data()+guard), frame.length);
+    require(bool(output_file), "Unable to save the encoded MJPEG validation frame");
+    printf("PASS: noisy 720p MJPEG frame encoded to %d bytes within the 30 FPS USB 2.0 budget.\n", frame.length);
+}
+
 void check_pipe_shutdown() {
     DWORD before = 0, after = 0;
     GetProcessHandleCount(GetCurrentProcess(), &before);
@@ -316,14 +365,15 @@ void check_pipe_reconfigure() {
 
 int main(int argc, char** argv)
 {
-    if (argc != 5)
+    if (argc != 6)
     {
-        fprintf(stderr, "Usage: resolution-tests 480.mp4 720.mp4 1080.mp4 dynamic.h264\n");
+        fprintf(stderr, "Usage: resolution-tests 480.mp4 720.mp4 1080.mp4 dynamic.h264 encoded.jpg\n");
         return 2;
     }
     try
     {
         check_rejection_boundaries(argv[1]);
+        check_mjpeg_encoder(argv[2], argv[5]);
         for (int input = 0; input < 3; ++input)
             for (Resolution target : resolutions)
             {
@@ -339,7 +389,7 @@ int main(int argc, char** argv)
         check_pipe_reconnect();
         check_pipe_shutdown();
         check_pipe_reconfigure();
-        printf("PASS: 9 MP4 + 9 pipe combinations, reconnect/reconfigure, dynamic-size video, looping, and buffer/header guards.\n");
+        printf("PASS: 720p MJPEG encoding within USB 2.0 budget; 9 MP4 + 9 pipe combinations, reconnect/reconfigure, dynamic-size video, looping, and buffer/header guards.\n");
         return 0;
     }
     catch (const std::exception& error)

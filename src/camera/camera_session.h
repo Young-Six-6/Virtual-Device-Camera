@@ -18,6 +18,7 @@ class CameraSession {
     mutable std::mutex frame_mutex_;
     std::string manufacturer_, product_;
     uvc_vcam_t config_;
+    MJPEG_FRAME_CALLBACK mjpeg_callback_ = nullptr;
     std::unique_ptr<UvcDevice> device_;
     std::unique_ptr<UsbTransport> transport_;
     DeviceIdentity identity_;
@@ -29,7 +30,8 @@ class CameraSession {
     void stop_worker() noexcept;
     void run() noexcept;
 public:
-    CameraSession(const uvc_vcam_t&, Resolution, std::unique_ptr<UsbTransport>);
+    CameraSession(const uvc_vcam_t&, Resolution, std::unique_ptr<UsbTransport>,
+                  MJPEG_FRAME_CALLBACK mjpeg_callback = nullptr);
     ~CameraSession();
     bool start();
     bool resize(Resolution, std::string& error);

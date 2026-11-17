@@ -12,6 +12,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Python dependencies are inconsistent.' }
 $previousFixture = $env:VCAM_TEST_CONTROL_EXE
 Push-Location $repoRoot
 try {
+    & (Join-Path $repoRoot 'tests\driver_deploy_tests.ps1')
     foreach ($configuration in $Configurations) {
         $sdkArgs = @{}
         if ($FFmpegRoot) { $sdkArgs.FFmpegRoot = $FFmpegRoot }

@@ -11,7 +11,7 @@
 | `src/app/app_config.*` | EXE 旁 `camera.ini` 的校验、读取和原子保存 |
 | `src/camera/camera_session.*` | 摄像头状态、热更新、工作线程和失败回滚 |
 | `src/camera/uvc_device.*` | UVC 描述符、类控制请求和等时数据包 |
-| `src/media/frame_source.*` | FFmpeg 解码、缩放和 RGB24 到 YUY2 转换 |
+| `src/media/frame_source.*` | FFmpeg 解码、缩放、YUY2 输出和 MJPEG 编码 |
 | `src/media/pipe_reader.*` | RGB24 输入管道连接、帧校验和最新帧缓存 |
 | `src/common/` | Win32 句柄 RAII、分辨率约束、可取消管道 I/O 和管道 ACL |
 | `src/usb/transport.h` | 可替换的 USB 传输接口和设备身份 |
@@ -30,7 +30,11 @@ flowchart LR
     CACHE --> SCALE
     SCALE --> RGB[RGB24 输出帧]
     RGB --> YUY2[RGB24 转 YUY2]
-    YUY2 --> UVC[UVC 描述符与等时数据包]
+    YUY2 --> RAW[UVC YUY2 等时数据]
+    YUY2 --> JPEG[FFmpeg MJPEG 编码]
+    JPEG --> COMPRESSED[UVC MJPEG 等时数据]
+    RAW --> UVC[UVC 摄像头设备]
+    COMPRESSED --> UVC
     UVC --> BUS[虚拟 USB 总线驱动]
     BUS --> HOST[Windows 摄像头客户端]
 ```
@@ -49,6 +53,6 @@ flowchart LR
 
 ## USB 与驱动边界
 
-`src/usb/ioctl.h` 中的接口 GUID、结构体布局和 IOCTL 是用户态与既有内核驱动之间的二进制契约。当前仓库没有总线驱动完整源码。测试通过假传输验证 UVC 协议和会话行为，不替代真实驱动的端到端测试。更改 ABI 前需要对应驱动源码或兼容设备验证。
+`src/usb/ioctl.h` 中的接口 GUID、结构体布局和 IOCTL 是用户态与内核驱动之间的二进制契约。`drivers/usb-bus-legacy/` 包含保留的原始二进制包和独立重建的 WDM/UCX 源码。该源码目前支持摄像头所需的 USB 2.0 等时流；更多协议和 SuperSpeed 的完成状态见[驱动文档](driver.md)。自动化假传输测试不能替代真实设备与摄像头客户端验证；ABI 变更仍需旧驱动或兼容设备验证。
 
 TCP 和本机帧管道使用相同的 RGB24 帧格式；控制管道是独立的文本命令通道。协议详见[运行与输入协议](usage.md)和[控制管道协议](control-protocol.md)。

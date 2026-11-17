@@ -52,8 +52,15 @@ struct frame_source {
     std::unique_ptr<AVCodecContext, CodecDeleter> codec;
     Frame decoded{av_frame_alloc()};
     Frame rgb{av_frame_alloc()};
+    Frame mjpeg_frame{av_frame_alloc()};
     std::unique_ptr<AVPacket, PacketDeleter> packet{av_packet_alloc()};
+    std::unique_ptr<AVPacket, PacketDeleter> mjpeg_packet{av_packet_alloc()};
     std::unique_ptr<SwsContext, ScaleDeleter> scaler;
+    std::unique_ptr<AVCodecContext, CodecDeleter> mjpeg_encoder;
+    std::unique_ptr<SwsContext, ScaleDeleter> mjpeg_scaler;
+    int mjpeg_width = 0;
+    int mjpeg_height = 0;
+    int64_t mjpeg_pts = 0;
     int stream = -1;
     bool draining = false;
     bool pending = false;
@@ -133,13 +140,48 @@ struct frame_source {
         rgb_to_yuy2(rgb->data[0], rgb->linesize[0], output);
         return true;
     }
+    bool open_mjpeg_encoder(int width, int height) {
+        if (mjpeg_encoder && width == mjpeg_width && height == mjpeg_height) return true;
+        mjpeg_scaler.reset();
+        mjpeg_encoder.reset();
+        av_frame_unref(mjpeg_frame.get());
+        const AVCodec* encoder = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
+        if (!encoder) return false;
+        std::unique_ptr<AVCodecContext, CodecDeleter> context(avcodec_alloc_context3(encoder));
+        if (!context) return false;
+        context->width = width;
+        context->height = height;
+        context->pix_fmt = AV_PIX_FMT_YUV422P;
+        context->time_base = AVRational{1, 30};
+        context->framerate = AVRational{30, 1};
+        context->color_range = AVCOL_RANGE_JPEG;
+        context->qmin = 2;
+        context->qmax = 31;
+        context->flags |= AV_CODEC_FLAG_QSCALE;
+        if (avcodec_open2(context.get(), encoder, nullptr) < 0) return false;
+
+        mjpeg_frame->format = context->pix_fmt;
+        mjpeg_frame->width = width;
+        mjpeg_frame->height = height;
+        mjpeg_frame->color_range = AVCOL_RANGE_JPEG;
+        if (av_frame_get_buffer(mjpeg_frame.get(), 32) < 0) {
+            av_frame_unref(mjpeg_frame.get());
+            return false;
+        }
+        mjpeg_encoder = std::move(context);
+        mjpeg_width = width;
+        mjpeg_height = height;
+        mjpeg_pts = 0;
+        return true;
+    }
 };
 
 frame_source* frame_source_create_file(const char* path) {
     if (!path || !*path) return nullptr;
     try {
         auto source = std::make_unique<frame_source>();
-        if (!source->decoded || !source->rgb || !source->packet) return nullptr;
+        if (!source->decoded || !source->rgb || !source->mjpeg_frame ||
+            !source->packet || !source->mjpeg_packet) return nullptr;
         source->path = path;
         return source.release();
     }
@@ -148,7 +190,8 @@ frame_source* frame_source_create_file(const char* path) {
 frame_source* frame_source_create_pipe(const char* pipe_path) {
     try {
         auto source = std::make_unique<frame_source>();
-        if (!source->decoded || !source->rgb || !source->packet) return nullptr;
+        if (!source->decoded || !source->rgb || !source->mjpeg_frame ||
+            !source->packet || !source->mjpeg_packet) return nullptr;
         source->pipe_mode = true;
         if (pipe_path && *pipe_path) source->pipe_path = pipe_path;
         return source.release();
@@ -216,4 +259,46 @@ int frame_source_callback(frame_t* output) {
         return 0;
     }
     catch (const std::exception& error) { fprintf(stderr, "Frame source: %s\n", error.what()); return -1; }
+}
+
+int frame_source_encode_mjpeg(mjpeg_frame_t* output) {
+    if (!output || !output->yuy2 || !output->buffer || !output->param || output->capacity <= 0 ||
+        !vcam::valid_output({output->width, output->height}) || output->yuy2_length < 0 ||
+        static_cast<size_t>(output->yuy2_length) < vcam::yuy2_bytes({output->width, output->height})) return -1;
+    auto& source = *static_cast<frame_source*>(output->param);
+    std::lock_guard<std::mutex> lock(source.render_mutex);
+    try {
+        if (!source.open_mjpeg_encoder(output->width, output->height)) return -1;
+        if (av_frame_make_writable(source.mjpeg_frame.get()) < 0) return -1;
+        const uint8_t* input[] = {reinterpret_cast<const uint8_t*>(output->yuy2), nullptr, nullptr, nullptr};
+        const int strides[] = {output->width * 2, 0, 0, 0};
+        source.mjpeg_scaler.reset(sws_getCachedContext(source.mjpeg_scaler.release(),
+            output->width, output->height, AV_PIX_FMT_YUYV422,
+            output->width, output->height, source.mjpeg_encoder->pix_fmt,
+            SWS_FAST_BILINEAR, nullptr, nullptr, nullptr));
+        if (!source.mjpeg_scaler) return -1;
+        const int* coefficients = sws_getCoefficients(SWS_CS_DEFAULT);
+        if (!coefficients || sws_setColorspaceDetails(source.mjpeg_scaler.get(), coefficients, 0,
+            coefficients, 1, 0, 1 << 16, 1 << 16) < 0 ||
+            sws_scale(source.mjpeg_scaler.get(), input, strides, 0, output->height,
+            source.mjpeg_frame->data, source.mjpeg_frame->linesize) != output->height) return -1;
+
+        // Increase quantization only when needed to fit this USB 2.0 frame budget.
+        constexpr int quality_steps[] = {4, 6, 8, 10, 12, 16, 20, 24, 30};
+        for (const int quality : quality_steps) {
+            source.mjpeg_frame->pts = source.mjpeg_pts++;
+            source.mjpeg_frame->quality = quality * FF_QP2LAMBDA;
+            av_packet_unref(source.mjpeg_packet.get());
+            if (avcodec_send_frame(source.mjpeg_encoder.get(), source.mjpeg_frame.get()) < 0 ||
+                avcodec_receive_packet(source.mjpeg_encoder.get(), source.mjpeg_packet.get()) < 0) return -1;
+            if (source.mjpeg_packet->size <= output->capacity) {
+                std::memcpy(output->buffer, source.mjpeg_packet->data,
+                    static_cast<size_t>(source.mjpeg_packet->size));
+                output->length = source.mjpeg_packet->size;
+                return 0;
+            }
+        }
+        return -1;
+    }
+    catch (const std::exception& error) { fprintf(stderr, "MJPEG encoder: %s\n", error.what()); return -1; }
 }

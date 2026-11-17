@@ -11,6 +11,7 @@ bool frame_source_start_pipe_listener(frame_source* source, vcam::PipeAccess acc
 bool frame_source_reconfigure_pipe(frame_source* source, const char* path, vcam::PipeAccess access);
 vcam::PipeReaderStatus frame_source_pipe_status(frame_source* source);
 int frame_source_callback(frame_t* frame);
+int frame_source_encode_mjpeg(mjpeg_frame_t* frame);
 void frame_source_destroy(frame_source* source);
 void frame_source_interrupt(void* source);
 void frame_source_resume(void* source);

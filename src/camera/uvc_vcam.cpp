@@ -15,16 +15,23 @@ vcam::Resolution initial_resolution(const uvc_vcam_t& config) {
     return {1920,1080};
 }
 }
-void* vcam_create(uvc_vcam_t* config) {
+namespace {
+void* create_camera(uvc_vcam_t* config, MJPEG_FRAME_CALLBACK mjpeg_callback) {
     if (!config || !config->frame_callback) return nullptr;
     try {
         auto transport = vcam::make_virtual_transport();
         if (!transport) { fprintf(stderr, "not found virtual usb path\n"); return nullptr; }
-        auto session = std::make_unique<vcam::CameraSession>(*config, initial_resolution(*config), std::move(transport));
+        auto session = std::make_unique<vcam::CameraSession>(
+            *config, initial_resolution(*config), std::move(transport), mjpeg_callback);
         if (!session->start()) return nullptr;
         return session.release();
     }
     catch (const std::exception& error) { fprintf(stderr, "Camera create: %s\n", error.what()); return nullptr; }
+}
+}
+void* vcam_create(uvc_vcam_t* config) { return create_camera(config, nullptr); }
+void* vcam_create_with_mjpeg(uvc_vcam_t* config, MJPEG_FRAME_CALLBACK callback) {
+    return callback ? create_camera(config, callback) : nullptr;
 }
 void vcam_destroy(void* handle) { delete static_cast<vcam::CameraSession*>(handle); }
 int vcam_set_resolution(void* handle, int width, int height) {
