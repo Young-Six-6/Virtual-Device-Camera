@@ -10,6 +10,8 @@
 
 FFmpeg/DirectShow 以 1280×720、30fps、YUY2 单路抓取 120 帧，耗时约 3.97 秒（约 30.2fps）。随后同一应用同时枚举两台摄像头，并在一个 FFmpeg 进程中同时打开两路 720p YUY2，各请求 120 帧，约 3.97 秒完成（约 30fps）。运行时 UVC 端点按 8,192 字节/125 微秒服务间隔传输，足以覆盖每路约 55.3 MB/s 的负载；应用退出后挂起事务和移除工作项都为 0。USB 2.0 高速等时传输的理论有效负载约 24.6 MB/s，对应 720p YUY2 约 13.3fps；压缩 MJPEG 可降低 USB 2.0 带宽需求。
 
+另验证了控制管道热更新分辨率：同一应用进程从 1280×720 切到 640×480，再恢复 1280×720；每次都返回 `REOPEN_REQUIRED`，`STATUS` 显示新分辨率且状态为 `RUNNING`。每次更新后重新打开 DirectShow 摄像头，720p 抓取 30 帧约 0.99 秒，480p 抓取 60 帧约 1.99 秒，恢复 720p 后抓取 30 帧约 0.99 秒，均约 30fps。应用正常退出后摄像头 PDO 消失，HCD 挂起事务和移除工作项均归零，未重启系统。
+
 此验证证明的是重建软件 HCD 上的虚拟 USB 摄像头完整枚举和抓帧链路，不是物理 USB 3 控制器带宽测量。它也不证明所有原版驱动角色、URB 家族或生产签名包完全可替代。HCD catalog 尚未完成生产签名，不能作为面向公众的正式签名包发布。更多使用命令见[运行说明](usage.md)。
 
 目录 `drivers/usb-bus-legacy/` 保留了上游仓库提供的 x86/x64 包。x64 目录实际包含 `xusb_bus.inf`、`xusb_ctrl.inf`、`xusb_virt.cat` 和 `xusb_virt.sys`；这些文件没有在重构中丢失。它们是旧版二进制包，不是当前构建的一部分。
@@ -36,7 +38,7 @@ x64 `xusb_virt.sys` 大小为 51,368 字节；其 Git blob SHA-1 为 `fb62e68217
 
 当前已在目标 Windows 上通过虚拟根集线器运行用户态摄像头，Windows UVC 驱动可协商并抓取 YUY2 与 MJPEG 等时流。HCD `2.0.0.32` 新增 USB 2.0 低/全速 PDO 添加 IOCTL，并按速度校验 EP0 与端点参数；该扩展已通过 ABI 静态断言和 WDK Release 构建，临时调用器实测 low/full 的 add/remove 请求成功且移除事件触发。调用器没有 USB 事务响应端，因此没有枚举出 PnP 设备，端点回调和数据传输尚未实测。低速仅允许控制与中断端点，全速支持控制、bulk、中断与等时端点。其余未实现或验证的边界包括 bulk/interrupt 用户态数据处理与端到端传输、Microsoft OS feature descriptor 的完整处理、完整多端口/电源行为、所有 Host Controller URB 家族和生产签名发布。重建版实现 USB bus type 查询，并在 Root Hub FDO 本地响应 Hub name、节点描述符/能力、连接信息、设备描述符转发、DriverKeyName 与 `IOCTL_INTERNAL_USB_GET_HUB_COUNT`；descriptor proxy 等待用户态最多 5 秒后取消。Host Controller 返回 Root Hub PDO/栈顶，子 PDO 根据 present 状态响应 `IOCTL_INTERNAL_USB_GET_PORT_STATUS`。USBDI 查询按原版提供 V0–V3 接口槽和回调返回值；PDO 处理设备文本和 usage notification，明确不支持 Eject，并复用用户态建议的 BusAddress（分配限制在 USB 1–127 地址范围）。子 PDO 的 PnP STOP/START 与 D3/D0 暂停/恢复事务队列并清理停止状态下的 pipe 配置。WMI MOF schema/resource 已嵌入镜像并通过 `mofcomp -WMI` 检查，WMI 消费者是否能发现 class 尚未在目标系统验证。常规 USB 用户态事务仍无单请求超时；完整 Host Controller 兼容性仍需逐项验证。
 
-当前 Release 驱动源码可构建；部署包通过 InfVerif/Inf2Cat 并生成 catalog。catalog 未完成生产签名，不能作为面向公众的正式签名包发布。新驱动最低要求 Windows 10 2004（build 19041）。构建脚本会自动选择具备 UCX 1.1/KMDF 1.31 的 WDK，也可显式指定版本。`replacement-package/replacement-deploy.ps1` 用于版本化 HCD 部署，`driver-source/deploy.ps1` 用于默认包设备创建/更新/移除；均需管理员权限并会阻止同名镜像冲突，不自动重启。测试机已安装本机测试签名的 HCD `2.0.0.32` 与 role-3 `1.0.0.16`，完成根集线器、单/双 SuperSpeed 摄像头枚举和 720p30 抓帧验证。低/全速新增 IOCTL 目前只完成静态 ABI 与构建检查，尚未运行验证；当前用户态程序仍只选择 USB 2.0 高速或 SuperSpeed。HCD 支持 USB 端点类型检查与 bulk/interrupt URB 转发，但当前用户态 handler 尚无对应数据传输实现，因此这些传输尚未端到端打通。重建驱动仍未覆盖原版所有角色、URB 和 Root Hub 行为。角色划分和限制见[重建驱动说明](../drivers/usb-bus-legacy/driver-source/README.md)。上游 `x86/`、`x64/` 二进制保持原样。反编译清单和函数分析保存在本机 `source-reconstruction/` 目录，由 `.gitignore` 排除，不属于项目源码。
+当前 Release 驱动源码可构建；部署包通过 InfVerif/Inf2Cat 并生成 catalog。catalog 未完成生产签名，不能作为面向公众的正式签名包发布。新驱动最低要求 Windows 10 2004（build 19041）。构建脚本会自动选择具备 UCX 1.1/KMDF 1.31 的 WDK，也可显式指定版本。`replacement-package/replacement-deploy.ps1` 用于版本化 HCD 部署，`driver-source/deploy.ps1` 用于默认包设备创建/更新/移除；均需管理员权限并会阻止同名镜像冲突，不自动重启。测试机已安装本机测试签名的 HCD `2.0.0.32` 与 role-3 `1.0.0.16`，完成根集线器、单/双 SuperSpeed 摄像头枚举、720p30 抓帧和热分辨率往返验证。低/全速新增 IOCTL 已通过 ABI 静态断言、Release 构建及临时调用器 add/remove 冒烟；该调用器未响应 USB 事务，因此尚未枚举 PnP 设备，也未验证端点回调或数据传输。当前用户态程序仍只选择 USB 2.0 高速或 SuperSpeed。HCD 支持 USB 端点类型检查与 bulk/interrupt URB 转发，但当前用户态 handler 尚无对应数据传输实现，因此这些传输尚未端到端打通。重建驱动仍未覆盖原版所有角色、URB 和 Root Hub 行为。角色划分和限制见[重建驱动说明](../drivers/usb-bus-legacy/driver-source/README.md)。上游 `x86/`、`x64/` 二进制保持原样。反编译清单和函数分析保存在本机 `source-reconstruction/` 目录，由 `.gitignore` 排除，不属于项目源码。
 
 ## INF 中的复制与改名
 
