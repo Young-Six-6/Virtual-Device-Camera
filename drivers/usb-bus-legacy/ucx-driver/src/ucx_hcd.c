@@ -27,6 +27,7 @@ static xusb_ucx_state_t gUcxState;
 #define VHCD_MAX_SLOTS (VHCD_MAX_PORTS + VHCD_MAX_USB30_PORTS)
 #define VHCD_USB30_SLOT_INDEX VHCD_MAX_PORTS
 #define VHCD_FIRST_USB30_PORT (VHCD_MAX_PORTS + 1)
+#define VHCD_USB30_PORT_NUMBER VHCD_FIRST_USB30_PORT
 #define VHCD_MAX_TRANSACTION_BYTES (32u * 1024u * 1024u)
 #define VHCD_MAX_SLOT_TRANSACTION_BYTES (64u * 1024u * 1024u)
 #define VHCD_MAX_SLOT_TRANSACTIONS 256u
@@ -566,7 +567,7 @@ NTSTATUS VhcdEvtControllerUsbDeviceAdd(UCXCONTROLLER Controller, PUCXUSBDEVICE_I
     ULONG slotIndex;
     if (DeviceInfo == NULL || DeviceInfo->PortPath.PortPathDepth == 0) return STATUS_NOT_SUPPORTED;
     portNumber = DeviceInfo->PortPath.PortPath[0];
-    if (portNumber == VHCD_FIRST_USB30_PORT && DeviceInfo->DeviceSpeed == UsbSuperSpeed)
+    if (portNumber == VHCD_USB30_PORT_NUMBER && DeviceInfo->DeviceSpeed == UsbSuperSpeed)
         slotIndex = VHCD_USB30_SLOT_INDEX;
     else if (portNumber > 0 && portNumber <= VHCD_MAX_PORTS && DeviceInfo->DeviceSpeed == UsbHighSpeed)
         slotIndex = portNumber - 1;
@@ -712,7 +713,8 @@ static VOID VhcdReadUsb30Port(_In_ USHORT Port, _Out_ PUSHORT Status, _Out_ PUSH
 
     *Status = 0;
     *Change = 0;
-    if (Port < VHCD_FIRST_USB30_PORT || Port >= VHCD_FIRST_USB30_PORT + VHCD_MAX_USB30_PORTS) return;
+    if (Port != VHCD_USB30_PORT_NUMBER &&
+        (Port < VHCD_FIRST_USB30_PORT || Port >= VHCD_FIRST_USB30_PORT + VHCD_MAX_USB30_PORTS)) return;
 
     RtlZeroMemory(&portStatus, sizeof(portStatus));
     WdfSpinLockAcquire(gSlotLock);
@@ -738,10 +740,14 @@ static BOOLEAN VhcdIsUsb30ControlRequest(_In_ PURB Urb)
 {
     const UCHAR* setup = Urb->UrbControlTransfer.SetupPacket;
     USHORT port = setup[4];
-    /* Both protocols share this root hub. The reported controller port number
-     * identifies the protocol; a cached pipe/device handle does not. */
-    return (setup[0] & 0x1f) == 3 && port >= VHCD_FIRST_USB30_PORT &&
-        port < VHCD_FIRST_USB30_PORT + VHCD_MAX_USB30_PORTS;
+    /* UCX sends both root-hub protocols through the same callback, and the
+     * control request itself does not identify which hub owns an aliased
+     * port number. Assign the SuperSpeed root port a distinct number after
+     * the USB 2.0 ports. */
+    if ((setup[0] & 0x1f) != 3) return FALSE;
+    if (port >= VHCD_FIRST_USB30_PORT &&
+        port < VHCD_FIRST_USB30_PORT + VHCD_MAX_USB30_PORTS) return TRUE;
+    return FALSE;
 }
 
 /* CONTROL_TRANSFER_EX replaces the reserved UrbLink with Timeout/Pad. All
@@ -786,8 +792,9 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
     isUsb30Control = VhcdIsUsb30ControlRequest(urb);
     if (setup[1] == USB_REQUEST_GET_DESCRIPTOR && (value >> 8) == USB_20_HUB_DESCRIPTOR_TYPE)
         isUsb30Control = FALSE;
-    else if (setup[1] == USB_REQUEST_GET_DESCRIPTOR && (value >> 8) == USB_30_HUB_DESCRIPTOR_TYPE)
+    else if (setup[1] == USB_REQUEST_GET_DESCRIPTOR && (value >> 8) == USB_30_HUB_DESCRIPTOR_TYPE) {
         isUsb30Control = TRUE;
+    }
     if (isUsb30Control)
         InterlockedIncrement((volatile LONG*)&gUcxState.RootHubControl30Count);
     else
@@ -826,7 +833,8 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
             if (length < sizeof(hubStatus) || data == NULL) urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
             else { RtlCopyMemory(data, &hubStatus, sizeof(hubStatus)); urb->UrbControlTransfer.TransferBufferLength = sizeof(hubStatus); }
         } else if ((setup[0] & 0x1f) == 3 && VhcdIsUsb30ControlRequest(urb) &&
-                   index >= VHCD_FIRST_USB30_PORT && index < VHCD_FIRST_USB30_PORT + VHCD_MAX_USB30_PORTS) {
+                   (index == VHCD_USB30_PORT_NUMBER ||
+                    (index >= VHCD_FIRST_USB30_PORT && index < VHCD_FIRST_USB30_PORT + VHCD_MAX_USB30_PORTS))) {
             VhcdReadUsb30Port(index, &statusWord, &changeWord);
             if (length < sizeof(ULONG) || data == NULL) urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
             else { ULONG portStatus = statusWord | ((ULONG)changeWord << 16); RtlCopyMemory(data, &portStatus, sizeof(portStatus)); urb->UrbControlTransfer.TransferBufferLength = sizeof(portStatus); }
@@ -846,7 +854,8 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
         urb->UrbControlTransfer.TransferBufferLength = 0;
     } else if ((setup[1] == USB_REQUEST_SET_FEATURE || setup[1] == USB_REQUEST_CLEAR_FEATURE) &&
                (setup[0] & 0x1f) == 3 && VhcdIsUsb30ControlRequest(urb) &&
-               index >= VHCD_FIRST_USB30_PORT && index < VHCD_FIRST_USB30_PORT + VHCD_MAX_USB30_PORTS) {
+               (index == VHCD_USB30_PORT_NUMBER ||
+                (index >= VHCD_FIRST_USB30_PORT && index < VHCD_FIRST_USB30_PORT + VHCD_MAX_USB30_PORTS))) {
         LONG slot = VHCD_USB30_SLOT_INDEX;
         BOOLEAN supported = TRUE;
         BOOLEAN changed = FALSE;
@@ -1056,6 +1065,9 @@ VOID VhcdEvtRootHubInterruptTx(UCXROOTHUB H, WDFREQUEST R)
         if (gSlots[i].ConnectionChanged || gSlots[i].ResetChanged || gSlots[i].SuspendChanged)
             bitmap |= 1u << (i + 1);
     }
+    if (gSlots[VHCD_USB30_SLOT_INDEX].ConnectionChanged ||
+        gSlots[VHCD_USB30_SLOT_INDEX].ResetChanged)
+        bitmap |= 1u << VHCD_USB30_PORT_NUMBER;
     WdfSpinLockRelease(gSlotLock);
     if (length < bytes || data == NULL) urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
     else { RtlZeroMemory(data, bytes); RtlCopyMemory(data, &bitmap, bytes); urb->UrbHeader.Status = USBD_STATUS_SUCCESS; urb->UrbBulkOrInterruptTransfer.TransferBufferLength = bytes; }
@@ -1134,7 +1146,7 @@ VOID VhcdEvtRootHubGet30PortInfo(UCXROOTHUB H, WDFREQUEST R)
         WdfRequestComplete(R, STATUS_INVALID_PARAMETER); return;
     }
     /* USB 2.0 and USB 3.0 port numbers must not alias in this controller. */
-    port->PortNumber = VHCD_FIRST_USB30_PORT;
+    port->PortNumber = VHCD_USB30_PORT_NUMBER;
     port->MinorRevision = 0;
     port->HubDepth = 0;
     port->Removable = TriStateTrue;
@@ -1826,9 +1838,12 @@ VOID VhcdEvtIoInCallerContext(WDFDEVICE Device, WDFREQUEST Request)
     WDF_REQUEST_PARAMETERS_INIT(&parameters);
     WdfRequestGetParameters(Request, &parameters);
     /* UCX routes kernel USB requests to its own queues. Only the private
-     * user protocol requires caller-context handle/buffer capture here. */
+     * user protocol requires caller-context handle/buffer capture here. Both
+     * legacy and SuperSpeed ADD requests carry user handles that must be
+     * referenced in the originating process context before queue dispatch. */
     if (parameters.Type != WdfRequestTypeDeviceControl ||
         (parameters.Parameters.DeviceIoControl.IoControlCode != IOCTL_PDO_ADD &&
+         parameters.Parameters.DeviceIoControl.IoControlCode != IOCTL_PDO_ADD_SUPERSPEED &&
          parameters.Parameters.DeviceIoControl.IoControlCode != IOCTL_PDO_REMOVE &&
          parameters.Parameters.DeviceIoControl.IoControlCode != IOCTL_BEGIN_TRANS_USB_DATA &&
          parameters.Parameters.DeviceIoControl.IoControlCode != IOCTL_END_TRANS_USB_DATA)) {
@@ -1837,7 +1852,8 @@ VOID VhcdEvtIoInCallerContext(WDFDEVICE Device, WDFREQUEST Request)
         return;
     }
     if (WdfRequestGetRequestorMode(Request) != UserMode) { WdfRequestComplete(Request, STATUS_INVALID_DEVICE_REQUEST); return; }
-    if (parameters.Parameters.DeviceIoControl.IoControlCode == IOCTL_PDO_ADD) {
+    if (parameters.Parameters.DeviceIoControl.IoControlCode == IOCTL_PDO_ADD ||
+        parameters.Parameters.DeviceIoControl.IoControlCode == IOCTL_PDO_ADD_SUPERSPEED) {
         ioctl_pdo_create_t* create;
         PKSEMAPHORE semaphore = NULL;
         PKEVENT removeEvent = NULL;
@@ -2168,10 +2184,14 @@ VOID VhcdEvtIoDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, size_t OutputLen
             return;
         }
         if (superSpeed) {
-            if (!gUsb30PortPowerOff && !gSlots[VHCD_USB30_SLOT_INDEX].Allocated)
+            /* USB 2.0 and USB 3.0 hubs number their ports independently. Keep
+             * USB 2.0 port 1 free while the single SuperSpeed port is active. */
+            if (!gUsb30PortPowerOff && !gSlots[VHCD_USB30_SLOT_INDEX].Allocated &&
+                !gSlots[0].Allocated)
                 slot = VHCD_USB30_SLOT_INDEX;
         } else {
-            for (i = 0; i < VHCD_MAX_PORTS; ++i) if (!gSlots[i].Allocated) { slot = i; break; }
+            const LONG firstPort = gSlots[VHCD_USB30_SLOT_INDEX].Allocated ? 1 : 0;
+            for (i = firstPort; i < VHCD_MAX_PORTS; ++i) if (!gSlots[i].Allocated) { slot = i; break; }
         }
         suggested = create->BusAddress;
         if (suggested < 1 || suggested > 127 || gAddressInUse[suggested]) {

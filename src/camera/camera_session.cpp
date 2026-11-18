@@ -45,6 +45,8 @@ bool CameraSession::start() {
     transport_->resume();
     plugged_ = transport_->plug(identity_);
     if (!plugged_) return false;
+    fprintf(stderr, "Virtual USB link: %s\n",
+        transport_->is_superspeed() ? "SuperSpeed" : "High-Speed (USB 2.0)");
     try {
         device_ = std::make_unique<UvcDevice>(config_, initial_size_, mjpeg_callback_, transport_->is_superspeed());
     } catch (...) {
@@ -99,22 +101,47 @@ bool CameraSession::resize(Resolution size, std::string& error) {
     return false;
 }
 void CameraSession::run() noexcept {
+    static const bool traceUsb = [] {
+        char value[2] = {};
+        return GetEnvironmentVariableA("VCAM_USB_TRACE", value, sizeof(value)) != 0;
+    }();
+    unsigned long long traceSequence = 0;
     try {
         while (WaitForSingleObject(stop_.get(), 0) != WAIT_OBJECT_0) {
             auto* request = transport_->begin();
-            if (!request) break;
-            const bool cycle = request->type == 4 && request->reset.type == 2;
-            int delay = 0;
-            {
-                std::lock_guard<std::mutex> lock(frame_mutex_);
-                delay = device_->delay_before(*request);
+            if (!request) {
+                if (traceUsb) fprintf(stderr, "USB trace: begin stopped\n");
+                break;
             }
-            if (delay && WaitForSingleObject(stop_.get(), delay) == WAIT_OBJECT_0) break;
+            const bool traceRequest = traceUsb && traceSequence < 128;
+            if (traceRequest) {
+                if (request->type == 3 && request->transfer.type == 3) {
+                    fprintf(stderr, "USB trace[%llu]: begin type=3 transfer=%d ep=0x%02x read=%d packets=%d bytes=%d\n",
+                        traceSequence, request->transfer.type, request->transfer.ep_address,
+                        request->transfer.is_read, request->transfer.number_packets, request->data_length);
+                } else if (request->type == 3) {
+                    fprintf(stderr, "USB trace[%llu]: begin type=3 transfer=%d ep=0x%02x read=%d bytes=%d\n",
+                        traceSequence, request->transfer.type, request->transfer.ep_address,
+                        request->transfer.is_read, request->data_length);
+                } else {
+                    fprintf(stderr, "USB trace[%llu]: begin type=%d bytes=%d\n",
+                        traceSequence, request->type, request->data_length);
+                }
+            }
+            const bool cycle = request->type == 4 && request->reset.type == 2;
             {
                 std::lock_guard<std::mutex> lock(frame_mutex_);
                 device_->handle(*request, transport_->capacity());
             }
+            if (traceRequest) {
+                fprintf(stderr, "USB trace[%llu]: handled result=%d bytes=%d\n",
+                    traceSequence, request->result, request->data_length);
+            }
             const UsbEndResult end_result = transport_->end(request);
+            if (traceRequest) {
+                fprintf(stderr, "USB trace[%llu]: end=%d\n", traceSequence, static_cast<int>(end_result));
+            }
+            ++traceSequence;
             if (end_result == UsbEndResult::failed) break;
             if (cycle && end_result == UsbEndResult::completed) {
                 if (!transport_->replug()) break;

@@ -9,7 +9,7 @@ Signature = "$Windows NT$"
 Class = USB
 ClassGuid = {36FC9E60-C465-11CF-8056-444553540000}
 Provider = %ProviderName%
-DriverVer = 11/17/2026,2.0.0.23
+DriverVer = 11/17/2026,2.0.0.28
 CatalogFile.NTamd64 = xusb_ucx_hcd.cat
 PnpLockdown = 1
 

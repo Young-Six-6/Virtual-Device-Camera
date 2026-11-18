@@ -42,7 +42,7 @@ class UvcDevice {
     uint8_t flip_ = 0;
     uint32_t frame_intervals_[2] = {333333, 666667};
     int delay_ = 33;
-    ULONGLONG frame_started_at_ = 0;
+    ULONGLONG next_frame_due_ = 0;
     StreamControl stream_;
     FRAME_CALLBACK callback_;
     MJPEG_FRAME_CALLBACK mjpeg_callback_ = nullptr;
@@ -62,6 +62,5 @@ public:
     Resolution resolution() const { return {frames[0].width, frames[0].height}; }
     std::vector<char> frame_copy() const { return pixels_; }
     void handle(usbtx_header_t& request, size_t payload_capacity);
-    int delay_before(const usbtx_header_t& request) const;
 };
 }

@@ -29,7 +29,7 @@
 
 应用同时发布未压缩 YUY2（DirectShow 常显示为 `yuyv422`）和 MJPEG。720p YUY2 每帧为 1,843,200 字节；USB 2.0 高速等时端点每微帧最多承载 3×1024 字节，扣除每个 UVC 包头后，720p 的可用上限约为 13.3fps。USB 2.0 的标称 480Mbps 并不能全部用于摄像头图像。端点每微帧限制见 [Microsoft 等时传输说明](https://learn.microsoft.com/windows-hardware/drivers/usbcon/transfer-data-to-isochronous-endpoints)。
 
-MJPEG 模式仍走 USB 2.0，但每帧先由 FFmpeg 压缩，UVC 描述符提供 1280×720 的 15fps 和 30fps 模式，并在当前协商帧预算内自动调节 JPEG 质量。测试机用 30fps 请求抓取 60 帧，实际约 25fps；这不是所有主机、输入源或画面复杂度下的保证。客户端若默认选 YUY2，仍会受到未压缩带宽限制，需要在客户端的格式/摄像头属性中选择 MJPEG。
+MJPEG 每帧先由 FFmpeg 压缩，UVC 描述符提供 1280×720 的 15fps 和 30fps 模式，并在当前协商帧预算内自动调节 JPEG 质量。USB 2.0 测试曾以 30fps 请求抓取 60 帧，约 25fps；实际帧率会随主机、输入源和画面复杂度变化。客户端若默认选 YUY2，可在 USB 2.0 环境选择 MJPEG 以降低未压缩带宽需求。
 
 用 FFmpeg/DirectShow 选择 MJPEG：
 
@@ -38,7 +38,7 @@ MJPEG 模式仍走 USB 2.0，但每帧先由 FFmpeg 压缩，UVC 描述符提供
   -i 'video=MP4 HD Camera 1' -frames:v 60 -f null -
 ```
 
-选择原有 YUY2 格式时将输入选项改为 `-pixel_format yuyv422`，USB 2.0 下 720p 上限约 13.3fps。候选 HCD `2.0.0.23` 加入了 SuperSpeed 根端口、速度映射、BOS 和端点 companion descriptor，UVC 设备可按 45,000 字节/微帧协商，足够容纳 720p YUY2 30fps 所需的约 55.3 MB/s。该候选已通过 Release 构建和协议级描述符/协商检查，尚未部署到测试机；在 Windows 实际枚举和抓帧验证前，使用中的版本仍应按 USB 2.0 能力看待。
+选择 YUY2 格式时使用 `-pixel_format yuyv422`。USB 2.0 高速等时端点每微帧最多承载 3×1024 字节，扣除 UVC 包头后约为 24.6 MB/s；720p YUY2 单帧 1,843,200 字节，因此理论上限约 13.3fps。重建 HCD `2.0.0.28` 的 SuperSpeed 路径将每 125 微秒的端点预算设为 8,192 字节，可用带宽约 65.5 MB/s，足以传输 720p YUY2 30fps（约 55.3 MB/s）。Windows 测试机用 FFmpeg/DirectShow 抓取 120 帧，耗时约 3.97 秒，约 30fps。该实测使用软件虚拟 USB 总线和测试签名驱动；它验证了当前虚拟摄像头传输链路，不代表物理 USB 3 控制器的吞吐保证。旧版原驱动不支持 SuperSpeed 扩展时会回退到 USB 2.0。
 
 ## RGB24 命名管道输入
 

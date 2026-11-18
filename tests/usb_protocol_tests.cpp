@@ -275,6 +275,7 @@ void protocol_tests() {
         }
         require(packet.header().result == 0 && packet.intact() && frame.size() == 16 && (data[17]&UVC_STREAM_EOF), "ISO frame completion failed");
         for (unsigned i = 0; i < frame.size(); ++i) require(frame[i] == i, "ISO packet reassembly mismatch");
+        if (pass == 0) Sleep(40); // Let the negotiated 30 FPS frame interval elapse.
     }
     for (int failure = 0; failure < 4; ++failure) {
         auto packet = make_iso_packet();
@@ -425,9 +426,9 @@ void superspeed_protocol_tests() {
             require(bytes[position + 4] == 0 && bytes[position + 5] == 4,
                 "SuperSpeed ISO endpoint must use a 1024-byte packet size");
             require(position + 13 <= length && bytes[position + 7] == 6 && bytes[position + 8] == 0x30 &&
-                    bytes[position + 9] == 15 && bytes[position + 10] == 2 &&
-                    bytes[position + 11] == 0xc8 && bytes[position + 12] == 0xaf,
-                "SuperSpeed endpoint companion descriptor does not advertise the bounded 45,000-byte interval");
+                    bytes[position + 9] == 7 && bytes[position + 10] == 0 &&
+                    bytes[position + 11] == 0 && bytes[position + 12] == 0x20,
+                "SuperSpeed endpoint companion descriptor does not advertise an 8,192-byte interval");
             foundEndpoint = true;
         }
         position += itemLength;
@@ -442,7 +443,7 @@ void superspeed_protocol_tests() {
     device.handle(probe.header(), probe.capacity);
     vcam::StreamControl stream{};
     std::memcpy(&stream, probe.header().data, sizeof(stream));
-    require(probe.header().result == 0 && stream.payload_bytes == 45000 && stream.interval == 666667,
+    require(probe.header().result == 0 && stream.payload_bytes == 8192 && stream.interval == 666667,
         "SuperSpeed UVC probe does not expose its endpoint interval budget");
 
     Packet minimum(sizeof(vcam::StreamControl));
@@ -452,7 +453,7 @@ void superspeed_protocol_tests() {
     minimum.header().vendor.request = UVC_GET_MIN;
     device.handle(minimum.header(), minimum.capacity);
     std::memcpy(&stream, minimum.header().data, sizeof(stream));
-    require(minimum.header().result == 0 && stream.payload_bytes == 45000 &&
+    require(minimum.header().result == 0 && stream.payload_bytes == 8192 &&
             stream.frame_bytes == 1280u * 720u * 2u && stream.interval == 333333,
         "SuperSpeed UVC probe does not advertise 720p YUY2 at 30 fps");
 }

@@ -4,10 +4,24 @@ param()
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $deployScript = Join-Path $repoRoot 'drivers\usb-bus-legacy\replacement-package\replacement-deploy.ps1'
+$ucxSource = Join-Path $repoRoot 'drivers\usb-bus-legacy\ucx-driver\src\ucx_hcd.c'
 $parseTokens = $null
 $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($deployScript, [ref]$parseTokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+
+$ucxText = [IO.File]::ReadAllText($ucxSource)
+$callerContextMatch = [regex]::Match($ucxText,
+    '(?s)VOID\s+VhcdEvtIoInCallerContext\s*\([^)]*\)\s*\{(?<body>.*?)\n\}')
+if (-not $callerContextMatch.Success -or
+    $callerContextMatch.Groups['body'].Value -notmatch '!=\s*IOCTL_PDO_ADD_SUPERSPEED' -or
+    $callerContextMatch.Groups['body'].Value -notmatch '==\s*IOCTL_PDO_ADD_SUPERSPEED' -or
+    $ucxText -notmatch '#define\s+VHCD_USB30_PORT_NUMBER\s+VHCD_FIRST_USB30_PORT' -or
+    $ucxText -notmatch 'DeviceInfo->DeviceSpeed\s*==\s*UsbSuperSpeed' -or
+    $ucxText -notmatch 'port\s*>=\s*VHCD_FIRST_USB30_PORT' -or
+    $ucxText -notmatch 'bitmap\s*\|=\s*1u\s*<<\s*VHCD_USB30_PORT_NUMBER') {
+    throw 'SuperSpeed ADD must preserve caller handles, and USB 3 port status/change bits must use its non-aliased port number.'
+}
 
 # Import only the two pure preflight/wrapper functions. Never execute the
 # elevated script body, and replace every native/CIM call these functions use.

@@ -23,11 +23,11 @@
 
 - MP4/管道输入输出分辨率矩阵、动态视频尺寸、缓冲区边界和重复停止测试。
 - 高频噪声 720p MJPEG 编码、USB 2.0 30fps 帧预算、输出缓冲区护栏和 FFmpeg 解码校验。
-- USB 2.0/3.0 UVC 描述符、BOS/端点 companion descriptor、UVC 协商、ISO 包边界、20,000 条确定性畸形请求、假 USB 传输生命周期、热更新回滚、管道重连和配置文件读写。SuperSpeed 自动化检查不代替实机 PnP/抓帧验证。
+- USB 2.0/3.0 UVC 描述符、BOS/端点 companion descriptor、UVC 协商、ISO 包边界、20,000 条确定性畸形请求、假 USB 传输生命周期、热更新回滚、管道重连和配置文件读写。SuperSpeed 自动化检查不代替 Windows PnP/DirectShow 实机抓帧验证。
 - Python 配置、OBS 捕获模拟、分片 TCP、命名管道取消，以及 Python 客户端到 C++ 控制服务/Web UI 的 HTTP 授权、预览和设置联调。
 
 单独运行脚本可限定配置：`scripts/test-resolution.ps1 -Configuration Release`、`scripts/test-usb.ps1 -Configuration Debug`。后者不需要 FFmpeg。
 
 ## 验证范围
 
-自动测试使用真实用户态帧处理、协议实现、Win32 命名管道和可注入的假 USB 传输；它不安装或模拟内核驱动，也不覆盖 OBS 服务端或 Hyper-V 网络。2026-11-17 已在目标机验证一个摄像头通过 DirectShow 枚举并以 YUY2/MJPEG 抓帧，退出时设备节点正常移除；双摄像头和热分辨率更新后的客户端重开仍需单独验证。驱动包来源和限制见[驱动文档](driver.md)。
+自动测试使用真实用户态帧处理、协议实现、Win32 命名管道和可注入的假 USB 传输；它不安装或模拟内核驱动，也不覆盖 OBS 服务端或 Hyper-V 网络。2026-11-18 已在目标机用重建 HCD 验证 SuperSpeed 摄像头枚举，并以 DirectShow 抓取 720p YUY2 120 帧，约 30fps；双摄像头和热分辨率更新后的客户端重开仍需单独验证。驱动包来源和限制见[驱动文档](driver.md)。

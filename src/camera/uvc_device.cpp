@@ -10,7 +10,7 @@
 namespace vcam {
 namespace {
 constexpr uint32_t high_speed_iso_payload_bytes = 3u * 1024u;
-constexpr uint32_t super_speed_iso_payload_bytes = 45000u;
+constexpr uint32_t super_speed_iso_payload_bytes = 8u * 1024u;
 constexpr uint16_t high_speed_iso_max_packet_descriptor = 0x1400;
 constexpr uint32_t uvc_time_units_per_second = 10000000u;
 constexpr uint32_t microframes_per_second = 8000u;
@@ -41,7 +41,7 @@ bool UvcDevice::set_resolution(Resolution size) {
     frames[0] = {size.width, size.height};
     position_ = 0;
     flip_ = 0;
-    frame_started_at_ = 0;
+    next_frame_due_ = 0;
     curr_config = curr_interface = curr_alt_setting = 0;
     stream_ = StreamControl{};
     stream_.frame_bytes = static_cast<uint32_t>(pixels_.size());
@@ -359,8 +359,8 @@ void UvcDevice::fill_cfg_desc()
 
 	char* config_end = reinterpret_cast<char*>(ep) + ep->bLength;
 	if (super_speed_) {
-		// Three 16-packet bursts with Mult=2; cap the interval at 45,000 bytes.
-		unsigned char companion[6] = { 6, 0x30, 15, 2, 0, 0 };
+		// One 8-packet burst per 125 us interval carries 65.5 MB/s after UVC headers.
+		unsigned char companion[6] = { 6, 0x30, 7, 0, 0, 0 };
 		companion[4] = static_cast<unsigned char>(super_speed_iso_payload_bytes & 0xff);
 		companion[5] = static_cast<unsigned char>((super_speed_iso_payload_bytes >> 8) & 0xff);
 		std::memcpy(config_end, companion, sizeof(companion));
@@ -414,7 +414,7 @@ void UvcDevice::descriptor(usbtx_header_t& request) {
             curr_interface = request.descriptor.index;
             curr_alt_setting = request.descriptor.value;
             position_ = 0;
-            frame_started_at_ = 0;
+            next_frame_due_ = 0;
             request.result = request.data_length = 0;
         }
     }
@@ -483,7 +483,7 @@ void UvcDevice::streaming(usbtx_header_t& request) {
             ? iso_payload_bytes_
             : std::clamp(value.payload_bytes, uvc_payload_header_bytes, iso_payload_bytes_);
         position_ = 0;
-        frame_started_at_ = 0;
+        next_frame_due_ = 0;
         mjpeg_length_ = 0;
         request.data_length = sizeof(StreamControl);
         request.result = 0;
@@ -540,7 +540,7 @@ void UvcDevice::control(usbtx_header_t& request) {
                 curr_interface = index;
                 curr_alt_setting = value;
                 position_ = 0;
-                frame_started_at_ = 0;
+                next_frame_due_ = 0;
                 request.result = request.data_length = 0;
             }
             break;
@@ -555,16 +555,6 @@ void UvcDevice::control(usbtx_header_t& request) {
     }
     request.type = 3;
     request.transfer = original;
-}
-int UvcDevice::delay_before(const usbtx_header_t& request) const {
-    if (request.type != 3 || request.transfer.type != 3 || position_ != 0) return 0;
-    const uint64_t intervalMilliseconds = (uint64_t(stream_.interval) + 9999u) / 10000u;
-    if (!frame_started_at_) return 0;
-    const uint64_t framePeriod = (std::max)(uint64_t(delay_), intervalMilliseconds);
-    const ULONGLONG due = frame_started_at_ + framePeriod;
-    const ULONGLONG now = GetTickCount64();
-    if (now >= due) return 0;
-    return static_cast<int>((std::min)(due - now, static_cast<ULONGLONG>(INT_MAX)));
 }
 void UvcDevice::iso(usbtx_header_t& request) {
     if (!request.transfer.is_read || request.transfer.ep_address != iso_ep_addr ||
@@ -581,8 +571,28 @@ void UvcDevice::iso(usbtx_header_t& request) {
         if (header->packets[i].offset > payload ||
             (i && header->packets[i].offset < header->packets[i-1].offset)) return;
     }
+    header->error_count = 0;
+    for (size_t i = 0; i < count; ++i) {
+        header->packets[i].length = 0;
+        header->packets[i].status = 0;
+    }
+    if (position_ == 0 && next_frame_due_) {
+        const uint64_t intervalMilliseconds = (uint64_t(stream_.interval) + 5000u) / 10000u;
+        const uint64_t framePeriod = (std::max)(uint64_t(delay_), intervalMilliseconds);
+        const uint64_t schedulingTolerance = (std::max)(uint64_t(1), framePeriod / 16u);
+        const ULONGLONG now = GetTickCount64();
+        if (now < next_frame_due_ && next_frame_due_ - now > schedulingTolerance) {
+            // ISO URBs cover scheduled service intervals. Complete early polls
+            // immediately with empty packets instead of sleeping and missing
+            // the next URB's bus schedule.
+            request.result = 0;
+            request.data_length = static_cast<int>(metadata);
+            return;
+        }
+    }
     if (position_ == 0) {
         const ULONGLONG frameStarted = GetTickCount64();
+        const ULONGLONG previousFrameDue = next_frame_due_;
         const auto size = resolution();
         frame_t frame{pixels_.data(), static_cast<int>(pixels_.size()), size.width, size.height, delay_, parameter_};
         if (callback_(&frame) < 0 || frame.width != size.width || frame.height != size.height ||
@@ -600,12 +610,10 @@ void UvcDevice::iso(usbtx_header_t& request) {
                 static_cast<size_t>(encoded.length) > outputCapacity) return;
             mjpeg_length_ = static_cast<size_t>(encoded.length);
         }
-        frame_started_at_ = frameStarted;
-    }
-    header->error_count = 0;
-    for (size_t i = 0; i < count; ++i) {
-        header->packets[i].length = 0;
-        header->packets[i].status = 0;
+        const uint64_t intervalMilliseconds = (uint64_t(stream_.interval) + 5000u) / 10000u;
+        const uint64_t framePeriod = (std::max)(uint64_t(delay_), intervalMilliseconds);
+        next_frame_due_ = previousFrameDue ? previousFrameDue + framePeriod : frameStarted + framePeriod;
+        while (next_frame_due_ <= frameStarted) next_frame_due_ += framePeriod;
     }
     size_t used = 0;
     for (size_t i = 0; i < count; ++i) {
@@ -652,7 +660,7 @@ void UvcDevice::handle(usbtx_header_t& request, size_t payload_capacity) {
         break;
     case 4:
         position_ = 0;
-        frame_started_at_ = 0;
+        next_frame_due_ = 0;
         request.result = request.data_length = 0;
         break;
     case 5: {
