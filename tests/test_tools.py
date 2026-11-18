@@ -2,6 +2,7 @@ import base64
 import contextlib
 import io
 import http.client
+import json
 import os
 from pathlib import Path
 import socket
@@ -12,6 +13,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from urllib.parse import urlencode
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -127,8 +129,17 @@ class WindowsPipeTests(unittest.TestCase):
             self.assertEqual(page.status, 200)
             page_html = page.read()
             self.assertIn(b'VIRTUAL CAMERA / CONTROL', page_html)
-            self.assertIn('虚拟链路模式'.encode(), page_html)
+            self.assertIn('USB 模式'.encode(), page_html)
+            self.assertIn('实际帧率'.encode(), page_html)
             self.assertIn('摄像头状态'.encode(), page_html)
+            self.assertIn(b'id="customCss"', page_html)
+            self.assertIn(b'id="customJs"', page_html)
+            self.assertIn(b'id="hideWindow"', page_html)
+            self.assertIn(b'id="logOutput"', page_html)
+            self.assertIn(b'body { color: blue; }', page_html)
+            self.assertIn(b'window.fixtureTheme = true;', page_html)
+            self.assertIn(b'<\\/style>', page_html)
+            self.assertIn(b'<\\/script>', page_html)
             connection.close()
 
             connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
@@ -145,6 +156,35 @@ class WindowsPipeTests(unittest.TestCase):
             connection.close()
 
             connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+            connection.request('GET', '/api/theme', headers=auth)
+            theme = connection.getresponse()
+            self.assertEqual(theme.status, 200)
+            theme_value = json.loads(theme.read())
+            self.assertIn('</style>', theme_value['css'])
+            self.assertIn('</script>', theme_value['js'])
+            connection.close()
+
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+            connection.request('GET', '/api/logs', headers=auth)
+            logs = connection.getresponse()
+            self.assertEqual(logs.status, 200)
+            self.assertEqual(json.loads(logs.read())['text'], 'fixture log line\n')
+            connection.close()
+
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+            connection.request('GET', '/api/window', headers=auth)
+            window = connection.getresponse()
+            self.assertEqual(json.loads(window.read()), {'hidden': False})
+            connection.close()
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+            connection.request('POST', '/api/window', body='hidden=true', headers={**auth,
+                'Origin': f'http://127.0.0.1:{port}', 'Content-Type': 'application/x-www-form-urlencoded'})
+            window = connection.getresponse()
+            self.assertEqual(window.status, 200)
+            self.assertEqual(json.loads(window.read()), {'ok': True, 'hidden': True})
+            connection.close()
+
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
             connection.request('GET', '/api/status', headers={**auth, 'Origin': 'http://evil.example'})
             self.assertEqual(connection.getresponse().status, 403)
             connection.close()
@@ -157,7 +197,14 @@ class WindowsPipeTests(unittest.TestCase):
             self.assertEqual(frame.read(), bytes([16,128,235,128]))
             connection.close()
 
-            body = 'camera=1&width=640&height=480&rgb_pipe=%5C%5C.%5Cpipe%5Cvcam_pipe&control_pipe=%5C%5C.%5Cpipe%5Cvcam_control&control_pipe_access=everyone'
+            body = urlencode({
+                'camera': 1, 'width': 640, 'height': 480, 'fps': 24,
+                'vid': '1234', 'pid': 'abcd', 'manufacturer': '测试厂商', 'name': '测试摄像头',
+                'yuy2': 'true', 'mjpeg': 'false',
+                'rgb_pipe': r'\\.\pipe\vcam_pipe', 'control_pipe': r'\\.\pipe\vcam_control',
+                'control_pipe_access': 'everyone', 'custom_css': 'body { color: red; }\n',
+                'custom_js': 'window.testTheme = true;\n'
+            })
             connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
             connection.request('POST', '/api/config', body=body, headers={**auth,
                 'Origin': f'http://127.0.0.1:{port}', 'Content-Type': 'application/x-www-form-urlencoded'})

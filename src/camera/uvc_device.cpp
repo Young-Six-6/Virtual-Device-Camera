@@ -15,7 +15,6 @@ constexpr uint16_t high_speed_iso_max_packet_descriptor = 0x1400;
 constexpr uint32_t uvc_time_units_per_second = 10000000u;
 constexpr uint32_t microframes_per_second = 8000u;
 constexpr uint32_t uvc_payload_header_bytes = 2u;
-constexpr uint32_t mjpeg_frame_intervals[2] = {333333u, 666667u};
 constexpr unsigned char superspeed_bos_descriptor[] = {
     5, 0x0f, 22, 0, 2,
     7, 0x10, 2, 0, 0, 0, 0,
@@ -28,8 +27,13 @@ UvcDevice::UvcDevice(const uvc_vcam_t& config, Resolution size, MJPEG_FRAME_CALL
     : super_speed_(super_speed),
       iso_payload_bytes_(super_speed ? super_speed_iso_payload_bytes : high_speed_iso_payload_bytes),
       iso_video_bytes_per_second_(uint64_t(iso_payload_bytes_ - uvc_payload_header_bytes) * microframes_per_second),
+      enable_yuy2_(config.enable_yuy2), enable_mjpeg_(config.enable_mjpeg && mjpeg_callback != nullptr),
+      requested_fps_(config.fps),
       callback_(config.frame_callback), mjpeg_callback_(mjpeg_callback), parameter_(config.param) {
-    if (!callback_) throw std::invalid_argument("Camera frame callback is required");
+    if (!callback_ || requested_fps_ < 1 || requested_fps_ > 60 || (!enable_yuy2_ && !enable_mjpeg_))
+        throw std::invalid_argument("Invalid camera format or frame-rate settings");
+    yuy2_format_index_ = enable_yuy2_ ? 1 : 0;
+    mjpeg_format_index_ = enable_yuy2_ ? 2 : 1;
     fill_dev_desc(static_cast<unsigned short>(config.pid), config.vid);
     fill_str_desc(config.manu_fact, config.product);
     if (!set_resolution(size)) throw std::invalid_argument("Invalid camera resolution");
@@ -45,13 +49,20 @@ bool UvcDevice::set_resolution(Resolution size) {
     curr_config = 0;
     interface_alt_settings_[0] = interface_alt_settings_[1] = 0;
     stream_ = StreamControl{};
+    completed_frame_times_.fill(0);
+    completed_frame_cursor_ = 0;
+    completed_frame_count_ = 0;
+    actual_fps_ = 0;
     stream_.frame_bytes = static_cast<uint32_t>(pixels_.size());
     stream_.payload_bytes = iso_payload_bytes_;
+    const uint32_t requested_interval = uvc_time_units_per_second / requested_fps_;
+    mjpeg_frame_intervals_[0] = (std::max)(166667u, requested_interval);
+    mjpeg_frame_intervals_[1] = (std::max)(666667u, mjpeg_frame_intervals_[0] + 333334u);
     mjpeg_length_ = 0;
     mjpeg_max_frame_bytes_ = 0;
     mjpeg_.clear();
-    if (mjpeg_callback_) {
-        const uint64_t frameBudget = iso_video_bytes_per_second_ * mjpeg_frame_intervals[1] /
+    if (enable_mjpeg_) {
+        const uint64_t frameBudget = iso_video_bytes_per_second_ * mjpeg_frame_intervals_[1] /
             uvc_time_units_per_second;
         if (!frameBudget || frameBudget > UINT32_MAX) return false;
         mjpeg_max_frame_bytes_ = static_cast<size_t>(frameBudget);
@@ -62,9 +73,13 @@ bool UvcDevice::set_resolution(Resolution size) {
         const uint64_t requiredInterval =
             (frameBytes * uvc_time_units_per_second + iso_video_bytes_per_second_ - 1) /
             iso_video_bytes_per_second_;
-        frame_intervals_[0] = static_cast<uint32_t>((std::max)(uint64_t(333333), requiredInterval));
+        frame_intervals_[0] = static_cast<uint32_t>((std::max)(
+            (std::max)(uint64_t(166667), uint64_t(requested_interval)), requiredInterval));
         frame_intervals_[1] = (std::max)(uint32_t(666667), frame_intervals_[0] + 333334u);
-        stream_.interval = frame_intervals_[0];
+        stream_.format = enable_yuy2_ ? yuy2_format_index_ : mjpeg_format_index_;
+        stream_.interval = enable_yuy2_ ? frame_intervals_[0] : mjpeg_frame_intervals_[0];
+        stream_.frame_bytes = enable_yuy2_ ? static_cast<uint32_t>(pixels_.size()) :
+            static_cast<uint32_t>(mjpeg_max_frame_bytes_);
     }
     std::memset(cfg_buffer, 0, sizeof(cfg_buffer));
     fill_cfg_desc();
@@ -91,15 +106,10 @@ void UvcDevice::fill_dev_desc(unsigned short pid, unsigned int vid)
 static void set_usb_string_descriptor(usb_string_descriptor* descriptor, const char* value)
 {
 	descriptor->bDescriptorType = 0x03;
-	const int converted_chars = value
-		? ::MultiByteToWideChar(CP_ACP, 0, value, -1, (PWCHAR)descriptor->wData, 127)
-		: 0;
-	if (converted_chars <= 0)
-	{
-		descriptor->wData[0] = L'\0';
-		descriptor->bLength = 2;
-		return;
-	}
+	if (!value || !*value) throw std::invalid_argument("USB manufacturer and product names cannot be empty");
+	const int converted_chars = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+		value, -1, reinterpret_cast<PWCHAR>(descriptor->wData), 127);
+	if (converted_chars <= 0) throw std::invalid_argument("USB device name must be valid UTF-8 and at most 126 characters");
 
 	const size_t text_bytes = (size_t)(converted_chars - 1) * sizeof(WCHAR);
 	descriptor->bLength = (UCHAR)(2 + text_bytes);
@@ -237,12 +247,12 @@ void UvcDevice::fill_cfg_desc()
 	intr->iInterface = 0x00;
 
 	uvc_input_header_descriptor* vshdr = (uvc_input_header_descriptor*)((char*)intr + intr->bLength);
-	vshdr->bLength = UVC_DT_INPUT_HEADER_SIZE(mjpeg_callback_ ? 2 : 1, 1);
+	const uint8_t formatCount = static_cast<uint8_t>(enable_yuy2_ + enable_mjpeg_);
+	vshdr->bLength = UVC_DT_INPUT_HEADER_SIZE(formatCount, 1);
 	vshdr->bDescriptorType = 0x24;
 	vshdr->bDescriptorSubType = 0x01;
-    vshdr->bNumFormats = mjpeg_callback_ ? 0x02 : 0x01;
-	vshdr->wTotalLength = static_cast<uint16_t>(vshdr->bLength + 27 + frame_count * 34 + 6 +
-        (mjpeg_callback_ ? UVC_DT_FORMAT_MJPEG_SIZE + UVC_DT_FRAME_MJPEG_SIZE(2) : 0));
+	vshdr->bNumFormats = formatCount;
+	vshdr->wTotalLength = 0;
 	vshdr->bEndpointAddress = iso_ep_addr;
 	vshdr->bmInfo = 0x00;
 	vshdr->bTerminalLink = 0x03;
@@ -250,61 +260,56 @@ void UvcDevice::fill_cfg_desc()
 	vshdr->bTriggerSupport = 0x00;
 	vshdr->bTriggerUsage = 0x00;
 	vshdr->bControlSize = 0x01;
-	vshdr->bmaControls[0] = 0x00;
-	if (mjpeg_callback_) vshdr->bmaControls[1] = 0x00;
+	char* format_cursor = reinterpret_cast<char*>(vshdr) + vshdr->bLength;
+	if (enable_yuy2_) {
+		uvc_format_uncompressed* fmt = reinterpret_cast<uvc_format_uncompressed*>(format_cursor);
+		fmt->bLength = 0x1B;
+		fmt->bDescriptorType = 0x24;
+		fmt->bDescriptorSubType = 0x04;
+		fmt->bFormatIndex = yuy2_format_index_;
+		fmt->bNumFrameDescriptors = frame_count;
+		std::memcpy(fmt->guidFormat, &guidFormat, sizeof(GUID));
+		fmt->bBitsPerPixel = bitsPerPixel;
+		fmt->bDefaultFrameIndex = 0x01;
+		fmt->bAspectRatioX = 0;
+		fmt->bAspectRatioY = 0;
+		fmt->bmInterfaceFlags = 0;
+		fmt->bCopyProtect = 0;
 
-	uvc_format_uncompressed* fmt = (uvc_format_uncompressed*)((char*)vshdr + vshdr->bLength);
-	fmt->bLength = 0x1B;
-	fmt->bDescriptorType = 0x24;
-	fmt->bDescriptorSubType = 0x04;
-	fmt->bFormatIndex = 0x01;
-	fmt->bNumFrameDescriptors = frame_count;
-	memcpy(fmt->guidFormat, &guidFormat, sizeof(GUID));
-	fmt->bBitsPerPixel = bitsPerPixel;
-	fmt->bDefaultFrameIndex = 0x01;
-	fmt->bAspectRatioX = 0x00;
-	fmt->bAspectRatioY = 0x00;
-	fmt->bmInterfaceFlags = 0x00;
-	fmt->bCopyProtect = 0x00;
-
-	uvc_frame_uncompressed* frame = (uvc_frame_uncompressed*)((char*)fmt + fmt->bLength);
-	for (int i = 0; i < frame_count; ++i) {
-
+		auto* frame = reinterpret_cast<uvc_frame_uncompressed*>(format_cursor + fmt->bLength);
 		frame->bLength = 34;
 		frame->bDescriptorType = 0x24;
 		frame->bDescriptorSubType = 0x05;
-		frame->bFrameIndex = i + 1;
-		frame->bmCapabilities = 0x00;
-		frame->wWidth = frames[i].width;
-		frame->wHeight = frames[i].height;
+		frame->bFrameIndex = 1;
+		frame->bmCapabilities = 0;
+		frame->wWidth = static_cast<uint16_t>(frames[0].width);
+		frame->wHeight = static_cast<uint16_t>(frames[0].height);
 		const uint64_t frameBits = uint64_t(bitsPerPixel) * frame->wWidth * frame->wHeight;
 		frame->dwMinBitRate = static_cast<uint32_t>(frameBits * uvc_time_units_per_second / frame_intervals_[1]);
 		frame->dwMaxBitRate = static_cast<uint32_t>(frameBits * uvc_time_units_per_second / frame_intervals_[0]);
-		frame->dwMaxVideoFrameBufferSize = (bitsPerPixel / 8)* frame->wWidth* frame->wHeight;
+		frame->dwMaxVideoFrameBufferSize = static_cast<uint32_t>(yuy2_bytes({frame->wWidth, frame->wHeight}));
 		frame->dwDefaultFrameInterval = frame_intervals_[0];
-		frame->bFrameIntervalType = 0x02;
+		frame->bFrameIntervalType = 2;
 		frame->dwFrameInterval[0] = frame_intervals_[0];
 		frame->dwFrameInterval[1] = frame_intervals_[1];
+		format_cursor = reinterpret_cast<char*>(frame) + frame->bLength;
 
-		frame = (uvc_frame_uncompressed*)((char*)frame + frame->bLength);
+		auto* color = reinterpret_cast<uvc_color_matching_descriptor*>(format_cursor);
+		color->bLength = 6;
+		color->bDescriptorType = 0x24;
+		color->bDescriptorSubType = 0x0D;
+		color->bColorPrimaries = 1;
+		color->bTransferCharacteristics = 1;
+		color->bMatrixCoefficients = 4;
+		format_cursor += color->bLength;
 	}
 
-	uvc_color_matching_descriptor* cmd = (uvc_color_matching_descriptor*)frame;
-	cmd->bLength = 0x06;
-	cmd->bDescriptorType = 0x24;
-	cmd->bDescriptorSubType = 0x0D;
-	cmd->bColorPrimaries = 0x01;
-	cmd->bTransferCharacteristics = 0x01;
-	cmd->bMatrixCoefficients = 0x04;
-	char* alternate_interface = reinterpret_cast<char*>(cmd) + cmd->bLength;
-
-	if (mjpeg_callback_) {
-		auto* mjpeg_format = reinterpret_cast<uvc_format_mjpeg*>(
-			reinterpret_cast<char*>(cmd) + cmd->bLength);
+	if (enable_mjpeg_) {
+		auto* mjpeg_format = reinterpret_cast<uvc_format_mjpeg*>(format_cursor);
 		mjpeg_format->bLength = UVC_DT_FORMAT_MJPEG_SIZE;
 		mjpeg_format->bDescriptorType = 0x24;
 		mjpeg_format->bDescriptorSubType = 0x06;
-		mjpeg_format->bFormatIndex = 0x02;
+		mjpeg_format->bFormatIndex = mjpeg_format_index_;
 		mjpeg_format->bNumFrameDescriptors = 0x01;
 		mjpeg_format->bmFlags = 0;
 		mjpeg_format->bDefaultFrameIndex = 0x01;
@@ -313,8 +318,7 @@ void UvcDevice::fill_cfg_desc()
 		mjpeg_format->bmInterfaceFlags = 0;
 		mjpeg_format->bCopyProtect = 0;
 
-		auto* mjpeg_frame = reinterpret_cast<uvc_frame_mjpeg*>(
-			reinterpret_cast<char*>(mjpeg_format) + mjpeg_format->bLength);
+		auto* mjpeg_frame = reinterpret_cast<uvc_frame_mjpeg*>(format_cursor + mjpeg_format->bLength);
 		mjpeg_frame->bLength = UVC_DT_FRAME_MJPEG_SIZE(2);
 		mjpeg_frame->bDescriptorType = 0x24;
 		mjpeg_frame->bDescriptorSubType = 0x07;
@@ -323,15 +327,17 @@ void UvcDevice::fill_cfg_desc()
 		mjpeg_frame->wWidth = static_cast<uint16_t>(frames[0].width);
 		mjpeg_frame->wHeight = static_cast<uint16_t>(frames[0].height);
 		mjpeg_frame->dwMinBitRate = static_cast<uint32_t>(
-			uint64_t(mjpeg_max_frame_bytes_) * 8u * uvc_time_units_per_second / mjpeg_frame_intervals[1]);
+			uint64_t(mjpeg_max_frame_bytes_) * 8u * uvc_time_units_per_second / mjpeg_frame_intervals_[1]);
 		mjpeg_frame->dwMaxBitRate = static_cast<uint32_t>(iso_video_bytes_per_second_ * 8u);
 		mjpeg_frame->dwMaxVideoFrameBufferSize = static_cast<uint32_t>(mjpeg_max_frame_bytes_);
-		mjpeg_frame->dwDefaultFrameInterval = mjpeg_frame_intervals[0];
+		mjpeg_frame->dwDefaultFrameInterval = mjpeg_frame_intervals_[0];
 		mjpeg_frame->bFrameIntervalType = 0x02;
 		std::memcpy(reinterpret_cast<char*>(mjpeg_frame) + UVC_DT_FRAME_MJPEG_SIZE(0),
-			mjpeg_frame_intervals, sizeof(mjpeg_frame_intervals));
-		alternate_interface = reinterpret_cast<char*>(mjpeg_frame) + mjpeg_frame->bLength;
+			mjpeg_frame_intervals_, sizeof(mjpeg_frame_intervals_));
+		format_cursor = reinterpret_cast<char*>(mjpeg_frame) + mjpeg_frame->bLength;
 	}
+	vshdr->wTotalLength = static_cast<uint16_t>(format_cursor - reinterpret_cast<char*>(vshdr));
+	char* alternate_interface = format_cursor;
 
 	intr = reinterpret_cast<usb_interface_descriptor*>(alternate_interface);
 	intr->bLength = 0x09;
@@ -447,24 +453,26 @@ void UvcDevice::streaming(usbtx_header_t& request) {
     case UVC_GET_MAX:
     case UVC_GET_RES: {
         StreamControl value = stream_;
-        const uint32_t* intervals = stream_.format == 2 && mjpeg_callback_
-            ? mjpeg_frame_intervals : frame_intervals_;
+        const bool selectedMjpeg = enable_mjpeg_ && stream_.format == mjpeg_format_index_;
+        const uint32_t* intervals = selectedMjpeg ? mjpeg_frame_intervals_ : frame_intervals_;
         if (request.vendor.request == UVC_GET_DEF) {
             value = StreamControl{};
-            value.interval = frame_intervals_[0];
-            value.frame_bytes = static_cast<uint32_t>(pixels_.size());
+            value.format = enable_yuy2_ ? yuy2_format_index_ : mjpeg_format_index_;
+            value.interval = enable_yuy2_ ? frame_intervals_[0] : mjpeg_frame_intervals_[0];
+            value.frame_bytes = enable_yuy2_ ? static_cast<uint32_t>(pixels_.size()) :
+                static_cast<uint32_t>(mjpeg_max_frame_bytes_);
             value.payload_bytes = iso_payload_bytes_;
         }
         if (request.vendor.request == UVC_GET_MIN) {
             value.interval = intervals[0];
-            value.frame_bytes = stream_.format == 2 && mjpeg_callback_
+            value.frame_bytes = selectedMjpeg
                 ? static_cast<uint32_t>(mjpeg_max_frame_bytes_)
                 : static_cast<uint32_t>(pixels_.size());
             value.payload_bytes = iso_payload_bytes_;
         }
         if (request.vendor.request == UVC_GET_MAX) {
             value.interval = intervals[1];
-            value.frame_bytes = stream_.format == 2 && mjpeg_callback_
+            value.frame_bytes = selectedMjpeg
                 ? static_cast<uint32_t>(mjpeg_max_frame_bytes_)
                 : static_cast<uint32_t>(pixels_.size());
             value.payload_bytes = iso_payload_bytes_;
@@ -477,13 +485,15 @@ void UvcDevice::streaming(usbtx_header_t& request) {
         if (request.data_length < sizeof(StreamControl)) break;
         StreamControl value;
         std::memcpy(&value, request.data, sizeof(value));
-        if ((value.format != 1 && !(value.format == 2 && mjpeg_callback_)) || value.frame != 1) break;
-        const uint32_t* intervals = value.format == 2 ? mjpeg_frame_intervals : frame_intervals_;
+        const bool useMjpeg = enable_mjpeg_ && value.format == mjpeg_format_index_;
+        const bool useYuy2 = enable_yuy2_ && value.format == yuy2_format_index_;
+        if ((!useYuy2 && !useMjpeg) || value.frame != 1) break;
+        const uint32_t* intervals = useMjpeg ? mjpeg_frame_intervals_ : frame_intervals_;
         if (value.interval != 0 && value.interval != intervals[0] && value.interval != intervals[1]) break;
         stream_.format = value.format;
         stream_.frame = value.frame;
         stream_.interval = value.interval ? value.interval : intervals[0];
-        stream_.frame_bytes = value.format == 2
+        stream_.frame_bytes = useMjpeg
             ? static_cast<uint32_t>(mjpeg_max_frame_bytes_)
             : static_cast<uint32_t>(pixels_.size());
         stream_.payload_bytes = value.payload_bytes == 0
@@ -612,7 +622,7 @@ void UvcDevice::iso(usbtx_header_t& request) {
         if (callback_(&frame) < 0 || frame.width != size.width || frame.height != size.height ||
             frame.length != pixels_.size()) return;
         delay_ = std::clamp(frame.delay_msec, 1, 1000);
-        if (stream_.format == 2) {
+        if (enable_mjpeg_ && stream_.format == mjpeg_format_index_) {
             const uint64_t intervalBudget = iso_video_bytes_per_second_ * stream_.interval /
                 uvc_time_units_per_second;
             const size_t outputCapacity = static_cast<size_t>((std::min)(
@@ -644,8 +654,9 @@ void UvcDevice::iso(usbtx_header_t& request) {
     request.data_length = static_cast<int>(metadata + used);
 }
 int UvcDevice::encode(unsigned char* destination, size_t capacity) {
-    const char* source = stream_.format == 2 ? mjpeg_.data() : pixels_.data();
-    const size_t frameLength = stream_.format == 2 ? mjpeg_length_ : pixels_.size();
+    const bool streamMjpeg = enable_mjpeg_ && stream_.format == mjpeg_format_index_;
+    const char* source = streamMjpeg ? mjpeg_.data() : pixels_.data();
+    const size_t frameLength = streamMjpeg ? mjpeg_length_ : pixels_.size();
     if (capacity <= 2 || position_ >= frameLength || !source) return 0;
     const size_t count = (std::min)(frameLength-position_, capacity-2);
     destination[0] = 2;
@@ -656,6 +667,17 @@ int UvcDevice::encode(unsigned char* destination, size_t capacity) {
         destination[1] |= UVC_STREAM_EOF;
         flip_ ^= 1;
         position_ = 0;
+        completed_frame_times_[completed_frame_cursor_] = GetTickCount64();
+        completed_frame_cursor_ = (completed_frame_cursor_ + 1) % completed_frame_times_.size();
+        completed_frame_count_ = (std::min)(completed_frame_count_ + 1, completed_frame_times_.size());
+        if (completed_frame_count_ > 1) {
+            const size_t first = (completed_frame_cursor_ + completed_frame_times_.size() - completed_frame_count_) %
+                completed_frame_times_.size();
+            const size_t last = (completed_frame_cursor_ + completed_frame_times_.size() - 1) %
+                completed_frame_times_.size();
+            const ULONGLONG elapsed = completed_frame_times_[last] - completed_frame_times_[first];
+            if (elapsed) actual_fps_ = static_cast<double>(completed_frame_count_ - 1) * 1000.0 / elapsed;
+        }
     }
     return static_cast<int>(count+2);
 }
