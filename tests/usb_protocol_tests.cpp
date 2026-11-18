@@ -208,6 +208,112 @@ void protocol_tests() {
         require(packet.intact() && hdr.result == 0 && size_t(hdr.data_length) == expected,
             "Status/configuration/interface/frame-number response mismatch");
     }
+    {
+        Packet selectInterface(0);
+        auto& select = selectInterface.header();
+        select.type = 1;
+        select.descriptor.type = 2;
+        select.descriptor.subtype = 2;
+        select.descriptor.index = 1;
+        select.descriptor.value = 1;
+        device.handle(select, selectInterface.capacity);
+        require(select.result == 0 && select.data_length == 0,
+            "UCX SELECT_INTERFACE did not set the streaming alternate setting");
+
+        for (int interfaceNumber = 0; interfaceNumber <= 1; ++interfaceNumber) {
+            Packet getInterface(1);
+            auto& get = getInterface.header();
+            get.type = 5;
+            get.status.type = 6;
+            get.status.index = interfaceNumber;
+            device.handle(get, getInterface.capacity);
+            require(get.result == 0 && get.data_length == 1 &&
+                static_cast<uint8_t>(get.data[0]) == (interfaceNumber == 1 ? 1 : 0),
+                "GET_INTERFACE returned the alternate setting of a different interface");
+        }
+
+        Packet invalidInterface(1);
+        invalidInterface.header().type = 5;
+        invalidInterface.header().status.type = 6;
+        invalidInterface.header().status.index = 2;
+        device.handle(invalidInterface.header(), invalidInterface.capacity);
+        require(invalidInterface.header().result < 0 && invalidInterface.header().data_length == 0,
+            "GET_INTERFACE accepted an unconfigured interface number");
+
+        Packet setInterfaceControl(0);
+        auto& setInterface = setInterfaceControl.header();
+        setInterface.type = 3;
+        setInterface.transfer.type = 1;
+        const unsigned char setInterfaceSetup[] = {0x01, 11, 1, 0, 1, 0, 0, 0};
+        std::memcpy(setInterface.transfer.setup_packet, setInterfaceSetup, sizeof(setInterfaceSetup));
+        device.handle(setInterface, setInterfaceControl.capacity);
+        require(setInterface.result == 0 && setInterface.data_length == 0,
+            "Standard SET_INTERFACE did not complete");
+
+        for (int interfaceNumber = 0; interfaceNumber <= 1; ++interfaceNumber) {
+            Packet getInterfaceControl(1);
+            auto& getInterface = getInterfaceControl.header();
+            getInterface.type = 3;
+            getInterface.transfer.type = 1;
+            const unsigned char getInterfaceSetup[] = {
+                0x81, 10, 0, 0, static_cast<unsigned char>(interfaceNumber), 0, 1, 0
+            };
+            std::memcpy(getInterface.transfer.setup_packet, getInterfaceSetup, sizeof(getInterfaceSetup));
+            device.handle(getInterface, getInterfaceControl.capacity);
+            require(getInterface.result == 0 && getInterface.data_length == 1 &&
+                static_cast<uint8_t>(getInterface.data[0]) == (interfaceNumber == 1 ? 1 : 0),
+                "Standard GET_INTERFACE returned the alternate setting of a different interface");
+        }
+
+        Packet setConfiguration(0);
+        auto& set = setConfiguration.header();
+        set.type = 3;
+        set.transfer.type = 1;
+        const unsigned char setup[] = {0x00, 9, 1, 0, 0, 0, 0, 0};
+        std::memcpy(set.transfer.setup_packet, setup, sizeof(setup));
+        device.handle(set, setConfiguration.capacity);
+        require(set.result == 0 && set.data_length == 0,
+            "SET_CONFIGURATION did not complete");
+        Packet resetInterface(1);
+        resetInterface.header().type = 5;
+        resetInterface.header().status.type = 6;
+        resetInterface.header().status.index = 1;
+        device.handle(resetInterface.header(), resetInterface.capacity);
+        require(resetInterface.header().result == 0 && resetInterface.header().data_length == 1 &&
+            static_cast<uint8_t>(resetInterface.header().data[0]) == 0,
+            "SET_CONFIGURATION did not reset interface alternate settings");
+
+        Packet selectStreaming(0);
+        auto& selectAlt = selectStreaming.header();
+        selectAlt.type = 1;
+        selectAlt.descriptor.type = 2;
+        selectAlt.descriptor.subtype = 2;
+        selectAlt.descriptor.index = 1;
+        selectAlt.descriptor.value = 1;
+        device.handle(selectAlt, selectStreaming.capacity);
+        require(selectAlt.result == 0 && selectAlt.data_length == 0,
+            "UCX SELECT_INTERFACE did not restore the streaming alternate setting");
+
+        Packet selectConfiguration(0);
+        auto& selectConfig = selectConfiguration.header();
+        selectConfig.type = 1;
+        selectConfig.descriptor.type = 2;
+        selectConfig.descriptor.subtype = 1;
+        selectConfig.descriptor.index = -1;
+        selectConfig.descriptor.value = 1;
+        device.handle(selectConfig, selectConfiguration.capacity);
+        require(selectConfig.result == 0 && selectConfig.data_length == 0,
+            "UCX SELECT_CONFIGURATION did not complete");
+        Packet selectConfigurationReset(1);
+        selectConfigurationReset.header().type = 5;
+        selectConfigurationReset.header().status.type = 6;
+        selectConfigurationReset.header().status.index = 1;
+        device.handle(selectConfigurationReset.header(), selectConfigurationReset.capacity);
+        require(selectConfigurationReset.header().result == 0 &&
+            selectConfigurationReset.header().data_length == 1 &&
+            static_cast<uint8_t>(selectConfigurationReset.header().data[0]) == 0,
+            "UCX SELECT_CONFIGURATION did not reset interface alternate settings");
+    }
     for (int feature_type : {1, 2}) for (int recipient = 1; recipient <= 4; ++recipient) {
         Packet packet(0);
         auto& hdr = packet.header();

@@ -42,7 +42,8 @@ bool UvcDevice::set_resolution(Resolution size) {
     position_ = 0;
     flip_ = 0;
     next_frame_due_ = 0;
-    curr_config = curr_interface = curr_alt_setting = 0;
+    curr_config = 0;
+    interface_alt_settings_[0] = interface_alt_settings_[1] = 0;
     stream_ = StreamControl{};
     stream_.frame_bytes = static_cast<uint32_t>(pixels_.size());
     stream_.payload_bytes = iso_payload_bytes_;
@@ -405,16 +406,22 @@ void UvcDevice::descriptor(usbtx_header_t& request) {
             const int value = request.descriptor.value;
             if (value == -1 || value == 0 || value == 1) {
                 curr_config = value < 0 ? 0 : value;
+                interface_alt_settings_[0] = interface_alt_settings_[1] = 0;
+                position_ = 0;
+                next_frame_due_ = 0;
                 request.result = request.data_length = 0;
             }
         }
         else if (request.descriptor.subtype == 2 && request.descriptor.index >= 0 &&
                  request.descriptor.index <= 1 && request.descriptor.value >= 0 &&
                  request.descriptor.value <= (request.descriptor.index == 1 ? 1 : 0)) {
-            curr_interface = request.descriptor.index;
-            curr_alt_setting = request.descriptor.value;
-            position_ = 0;
-            next_frame_due_ = 0;
+            const int interfaceNumber = request.descriptor.index;
+            const bool changed = interface_alt_settings_[interfaceNumber] != request.descriptor.value;
+            interface_alt_settings_[interfaceNumber] = request.descriptor.value;
+            if (interfaceNumber == 1 && changed) {
+                position_ = 0;
+                next_frame_due_ = 0;
+            }
             request.result = request.data_length = 0;
         }
     }
@@ -527,20 +534,27 @@ void UvcDevice::control(usbtx_header_t& request) {
         case 9:
             if (!(setup[0] & 0x80) && value <= 1) {
                 curr_config = value;
+                interface_alt_settings_[0] = interface_alt_settings_[1] = 0;
+                position_ = 0;
+                next_frame_due_ = 0;
                 request.result = request.data_length = 0;
             }
             break;
         case 10: {
-            const uint8_t alternate = static_cast<uint8_t>(curr_alt_setting);
-            if ((setup[0] & 0x80) && index <= 1) reply(request, &alternate, 1);
+            if ((setup[0] & 0x80) && index <= 1) {
+                const uint8_t alternate = static_cast<uint8_t>(interface_alt_settings_[index]);
+                reply(request, &alternate, 1);
+            }
             break;
         }
         case 11:
             if (!(setup[0] & 0x80) && index <= 1 && value <= (index == 1 ? 1 : 0)) {
-                curr_interface = index;
-                curr_alt_setting = value;
-                position_ = 0;
-                next_frame_due_ = 0;
+                const bool changed = interface_alt_settings_[index] != value;
+                interface_alt_settings_[index] = value;
+                if (index == 1 && changed) {
+                    position_ = 0;
+                    next_frame_due_ = 0;
+                }
                 request.result = request.data_length = 0;
             }
             break;
@@ -665,8 +679,14 @@ void UvcDevice::handle(usbtx_header_t& request, size_t payload_capacity) {
         break;
     case 5: {
         if (request.status.type == 5 || request.status.type == 6) {
-            const uint8_t value = static_cast<uint8_t>(request.status.type == 5 ? curr_config : curr_alt_setting);
-            reply(request, &value, 1);
+            if (request.status.type == 5) {
+                const uint8_t value = static_cast<uint8_t>(curr_config);
+                reply(request, &value, 1);
+            }
+            else if (request.status.index >= 0 && request.status.index <= 1) {
+                const uint8_t value = static_cast<uint8_t>(interface_alt_settings_[request.status.index]);
+                reply(request, &value, 1);
+            }
         }
         else {
             const uint16_t value = 0;

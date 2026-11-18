@@ -21,7 +21,8 @@ static_assert(sizeof(StreamControl) == 26, "UVC 1.0 probe/commit layout");
 
 // Single-threaded protocol engine. CameraSession owns synchronization and I/O.
 class UvcDevice {
-    int curr_config = 0, curr_interface = 0, curr_alt_setting = 0;
+    int curr_config = 0;
+    int interface_alt_settings_[2] = {0, 0};
     int iso_ep_addr = 0x82, bitsPerPixel = 16, frame_count = 1;
     bool super_speed_ = false;
     uint32_t iso_payload_bytes_ = 3u * 1024u;
