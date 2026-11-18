@@ -38,7 +38,7 @@ MJPEG 每帧先由 FFmpeg 压缩，UVC 描述符提供 1280×720 的 15fps 和 3
   -i 'video=MP4 HD Camera 1' -frames:v 60 -f null -
 ```
 
-选择 YUY2 格式时使用 `-pixel_format yuyv422`。USB 2.0 高速等时端点每微帧最多承载 3×1024 字节，扣除 UVC 包头后约为 24.6 MB/s；720p YUY2 单帧 1,843,200 字节，因此理论上限约 13.3fps。重建 HCD `2.0.0.28` 的 SuperSpeed 路径将每 125 微秒的端点预算设为 8,192 字节，可用带宽约 65.5 MB/s，足以传输 720p YUY2 30fps（约 55.3 MB/s）。Windows 测试机用 FFmpeg/DirectShow 抓取 120 帧，耗时约 3.97 秒，约 30fps。该实测使用软件虚拟 USB 总线和测试签名驱动；它验证了当前虚拟摄像头传输链路，不代表物理 USB 3 控制器的吞吐保证。旧版原驱动不支持 SuperSpeed 扩展时会回退到 USB 2.0。
+选择 YUY2 格式时使用 `-pixel_format yuyv422`。USB 2.0 高速等时端点每微帧最多承载 3×1024 字节，扣除 UVC 包头后约为 24.6 MB/s；720p YUY2 单帧 1,843,200 字节，因此理论上限约 13.3fps。重建 HCD `2.0.0.30` 的 SuperSpeed 路径将每 125 微秒的端点预算设为 8,192 字节，可用带宽约 65.5 MB/s，足以传输 720p YUY2 30fps（约 55.3 MB/s）。Windows 测试机用 FFmpeg/DirectShow 抓取 120 帧，耗时 3.976 秒，约 30.2fps。该实测使用软件虚拟 USB 总线和本机测试签名驱动；它验证了单摄像头虚拟 USB 传输链路，不代表物理 USB 3 控制器的吞吐保证。旧版原驱动不支持 SuperSpeed 扩展时会回退到 USB 2.0。
 
 ## RGB24 命名管道输入
 

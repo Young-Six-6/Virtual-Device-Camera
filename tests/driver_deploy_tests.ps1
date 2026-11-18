@@ -187,6 +187,8 @@ ServiceBinary = %13%\$treeImageName
         if ($_.Exception.Message -notmatch 'same-version role-3 package contains different') { throw }
     }
     if (-not $didThrow) { throw 'A same-version DriverStore image collision passed the preflight.' }
+    Assert-TreePackageCandidates -RequestedVersion ([version]'1.0.0.14') `
+        -RequestedService $treeService -ExpectedImage $candidateImage
     Copy-Item -LiteralPath $candidateImage -Destination $script:MockExportImage -Force
     $script:MockDriverPackages += [pscustomobject]@{
         OriginalFileName = 'xusb_reconstructed_tree.inf'

@@ -53,6 +53,6 @@ flowchart LR
 
 ## USB 与驱动边界
 
-`src/usb/ioctl.h` 中原有接口 GUID、结构体布局和 IOCTL 是用户态与内核驱动之间的冻结二进制契约；`IOCTL_PDO_ADD_SUPERSPEED` 是只对 FOSS 驱动启用的新增扩展，旧驱动不支持时用户态回退到原 USB 2.0 路径。`drivers/usb-bus-legacy/` 包含保留的原始二进制包和独立重建的 WDM/UCX 源码。重建 HCD `2.0.0.28` 已在目标 Windows 上枚举 SuperSpeed 摄像头，并通过 DirectShow 实测 720p YUY2 约 30fps；此结果验证的是软件虚拟总线，不代表物理 USB 3 链路测速，也不覆盖原版驱动的所有 URB 行为。验证细节见[驱动文档](driver.md)。
+`src/usb/ioctl.h` 中原有接口 GUID、结构体布局和 IOCTL 是用户态与内核驱动之间的冻结二进制契约；`IOCTL_PDO_ADD_SUPERSPEED` 是只对 FOSS 驱动启用的新增扩展，旧驱动不支持时用户态回退到原 USB 2.0 路径。`drivers/usb-bus-legacy/` 包含保留的原始二进制包和独立重建的 WDM/UCX 源码。重建 HCD `2.0.0.30` 已在目标 Windows 上枚举单个 SuperSpeed 摄像头，并通过 DirectShow 抓取 720p YUY2 120 帧（3.976 秒，约 30.2fps）；此结果验证的是软件虚拟总线，不代表物理 USB 3 链路测速，也不覆盖原版驱动的所有 URB 行为。验证细节见[驱动文档](driver.md)。
 
 TCP 和本机帧管道使用相同的 RGB24 帧格式；控制管道是独立的文本命令通道。协议详见[运行与输入协议](usage.md)和[控制管道协议](control-protocol.md)。
