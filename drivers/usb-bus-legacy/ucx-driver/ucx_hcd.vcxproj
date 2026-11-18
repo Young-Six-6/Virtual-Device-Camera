@@ -8,7 +8,6 @@
     <ProjectGuid>{8D11A6B3-3398-4D75-B5F3-C8DBB0F1A611}</ProjectGuid>
     <Keyword>Driver</Keyword>
     <RootNamespace>VirtualCameraUcxHcd</RootNamespace>
-    <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == ''">10.0.28000.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <PropertyGroup>
     <TargetName>VirtualCameraUcxHcd</TargetName>

@@ -59,10 +59,86 @@ $busInfPath = Join-Path $packageRoot 'xusb_reconstructed_bus.inf'
 $busCatalogPath = Join-Path $packageRoot 'xusb_reconstructed_bus.cat'
 $rootHubInfPath = Join-Path $packageRoot 'xusb_reconstructed_usb.inf'
 $rootHubCatalogPath = Join-Path $packageRoot 'xusb_reconstructed_usb.cat'
-$driverPath = Join-Path $packageRoot 'xusb_driver.sys'
-foreach ($requiredFile in @($busInfPath, $busCatalogPath, $rootHubInfPath, $rootHubCatalogPath, $driverPath)) {
+foreach ($requiredFile in @($busInfPath, $busCatalogPath, $rootHubInfPath, $rootHubCatalogPath)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "The USB-only driver package is incomplete: $requiredFile"
+    }
+}
+
+function Get-InfPackageMetadata {
+    param([Parameter(Mandatory = $true)][string] $InfPath)
+
+    $text = [System.IO.File]::ReadAllText($InfPath)
+    $versionMatch = [regex]::Match($text, '(?im)^\s*DriverVer\s*=\s*[^,\r\n]+,\s*(\d+\.\d+\.\d+\.\d+)\s*$')
+    $serviceMatch = [regex]::Match($text, '(?im)^\s*AddService\s*=\s*([A-Za-z0-9_.-]+)\s*,')
+    $imageMatch = [regex]::Match($text, '(?im)^\s*ServiceBinary\s*=\s*%\d+%\\([^\\\r\n]+\.sys)\s*$')
+    if (-not $versionMatch.Success -or -not $serviceMatch.Success -or -not $imageMatch.Success) {
+        throw "The INF lacks a versioned DriverVer, AddService or ServiceBinary entry: $InfPath. Rebuild it with package.ps1."
+    }
+
+    [pscustomobject]@{
+        InfPath = $InfPath
+        Version = $versionMatch.Groups[1].Value
+        Service = $serviceMatch.Groups[1].Value
+        ImageName = $imageMatch.Groups[1].Value
+    }
+}
+
+function Get-NormalizedServiceImagePath {
+    param([Parameter(Mandatory = $true)][string] $PathName)
+
+    $path = [Environment]::ExpandEnvironmentVariables($PathName.Trim().Trim('"'))
+    if ($path.StartsWith('\??\', [StringComparison]::OrdinalIgnoreCase)) {
+        $path = $path.Substring(4)
+    }
+    if ($path.StartsWith('\SystemRoot\', [StringComparison]::OrdinalIgnoreCase)) {
+        $path = Join-Path $env:SystemRoot $path.Substring('\SystemRoot\'.Length)
+    }
+    return $path
+}
+
+$busPackage = Get-InfPackageMetadata -InfPath $busInfPath
+$rootHubPackage = Get-InfPackageMetadata -InfPath $rootHubInfPath
+if ($busPackage.Version -ne $rootHubPackage.Version) {
+    throw "The bus and Root Hub packages have different DriverVer values ($($busPackage.Version), $($rootHubPackage.Version)). Rebuild them together."
+}
+$versionSuffix = $busPackage.Version.Replace('.', '_')
+$expectedImageName = "xusb_driver_$versionSuffix.sys"
+if ($busPackage.ImageName -ne $expectedImageName -or $rootHubPackage.ImageName -ne $expectedImageName -or
+    $busPackage.Service -notmatch "_$([regex]::Escape($versionSuffix))$" -or
+    $rootHubPackage.Service -notmatch "_$([regex]::Escape($versionSuffix))$") {
+    throw "The package does not use service and image names isolated to DriverVer $($busPackage.Version). Rebuild it with package.ps1."
+}
+$driverPath = Join-Path $packageRoot $expectedImageName
+if (-not (Test-Path -LiteralPath $driverPath -PathType Leaf)) {
+    throw "The versioned driver image referenced by the INFs is missing: $driverPath"
+}
+
+$packageHash = (Get-FileHash -LiteralPath $driverPath -Algorithm SHA256).Hash
+foreach ($serviceName in @($busPackage.Service, $rootHubPackage.Service)) {
+    $installedService = Get-CimInstance -ClassName Win32_SystemDriver -Filter "Name='$serviceName'" -ErrorAction SilentlyContinue
+    if ($installedService) {
+        $serviceImagePath = Get-NormalizedServiceImagePath -PathName ([string]$installedService.PathName)
+        if (-not [string]::Equals(
+            [System.IO.Path]::GetFileName($serviceImagePath),
+            $expectedImageName,
+            [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Installed service '$serviceName' points to an unexpected image: $($installedService.PathName)"
+        }
+        if (-not (Test-Path -LiteralPath $serviceImagePath -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $serviceImagePath -Algorithm SHA256).Hash -ne $packageHash) {
+            throw "Installed service '$serviceName' has a stale or different image. Increase the package version; deployment will not overwrite a possibly loaded driver."
+        }
+    }
+}
+
+Write-Output "Deploying driver version $($busPackage.Version) ($expectedImageName)."
+
+if ($PSCmdlet.ParameterSetName -eq 'Install') {
+    $existingBusDevices = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+        Where-Object { $_.InstanceId.StartsWith('ROOT\*XUSB_ENUMBUS', [StringComparison]::OrdinalIgnoreCase) })
+    if ($existingBusDevices.Count -gt 0) {
+        throw "A reconstructed USB-only bus is already present. Use -UpdateExisting to update it without creating a duplicate device."
     }
 }
 
@@ -89,6 +165,50 @@ if ($LASTEXITCODE -ne 0) {
     throw "DevCon could not bind the reconstructed driver (exit code $LASTEXITCODE)"
 }
 
+function Assert-DeviceUsesService {
+    param(
+        [Parameter(Mandatory = $true)][string] $InstancePrefix,
+        [Parameter(Mandatory = $true)][string] $ExpectedService,
+        [Parameter(Mandatory = $true)][string] $ExpectedImageName,
+        [Parameter(Mandatory = $true)][string] $ExpectedImageHash
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $devices = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
+            Where-Object { $_.InstanceId.StartsWith($InstancePrefix, [StringComparison]::OrdinalIgnoreCase) })
+        if ($devices.Count -gt 0) { break }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($devices.Count -eq 0) {
+        throw "No present device was found after binding '$ExpectedService' (prefix '$InstancePrefix'). No automatic restart was attempted."
+    }
+
+    foreach ($device in $devices) {
+        if ($device.Status -ne 'OK') {
+            throw "Device '$($device.InstanceId)' is present but not started (status '$($device.Status)')."
+        }
+        $serviceProperty = Get-PnpDeviceProperty -InstanceId $device.InstanceId -KeyName 'DEVPKEY_Device_Service' -ErrorAction Stop
+        if ([string]$serviceProperty.Data -ne $ExpectedService) {
+            throw "Device '$($device.InstanceId)' is bound to '$($serviceProperty.Data)', not the requested versioned service '$ExpectedService'. Deployment stopped; inspect PnP state before retrying."
+        }
+        $installedService = Get-CimInstance -ClassName Win32_SystemDriver `
+            -Filter "Name='$ExpectedService'" -ErrorAction SilentlyContinue
+        if (-not $installedService -or -not $installedService.PathName) {
+            throw "The bound service '$ExpectedService' has no discoverable image path."
+        }
+        $serviceImagePath = Get-NormalizedServiceImagePath -PathName ([string]$installedService.PathName)
+        if ([System.IO.Path]::GetFileName($serviceImagePath) -ine $ExpectedImageName -or
+            -not (Test-Path -LiteralPath $serviceImagePath -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $serviceImagePath -Algorithm SHA256).Hash -ne $ExpectedImageHash) {
+            throw "Device '$($device.InstanceId)' is bound to '$ExpectedService', but its service image does not match the requested package."
+        }
+    }
+}
+
+Assert-DeviceUsesService -InstancePrefix 'ROOT\*XUSB_ENUMBUS' -ExpectedService $busPackage.Service `
+    -ExpectedImageName $expectedImageName -ExpectedImageHash $packageHash
+
 $rootHubDevices = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
     Where-Object { $_.InstanceId -like 'VFxsUSB\vRootHUB&Virtual&Fanxiushu*' })
 if ($rootHubDevices.Count -gt 0) {
@@ -96,6 +216,8 @@ if ($rootHubDevices.Count -gt 0) {
     if ($LASTEXITCODE -ne 0) {
         throw "DevCon could not update the existing Root Hub provider (exit code $LASTEXITCODE)"
     }
+    Assert-DeviceUsesService -InstancePrefix 'VFXSUSB\VROOTHUB&VIRTUAL&FANXIUSHU' `
+        -ExpectedService $rootHubPackage.Service -ExpectedImageName $expectedImageName -ExpectedImageHash $packageHash
 }
 
-Write-Output 'The USB-only driver is installed, and any present Root Hub provider was updated. Restart the camera application before opening the virtual camera.'
+Write-Output "The USB-only driver version $($busPackage.Version) is installed, and any present Root Hub provider was updated. Restart the camera application before opening the virtual camera. No Windows restart was requested."

@@ -4,6 +4,7 @@
 #include "../common/win_handle.h"
 #include <atomic>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -11,6 +12,12 @@ namespace vcam {
 struct CameraFrame {
     Resolution size;
     std::vector<char> yuy2;
+};
+
+struct CameraSessionStatus {
+    Resolution size;
+    bool running = false;
+    std::string usb_mode = "disconnected";
 };
 
 class CameraSession {
@@ -36,6 +43,7 @@ public:
     ~CameraSession();
     bool start();
     bool resize(Resolution, std::string& error);
+    CameraSessionStatus status_snapshot() const;
     Resolution resolution() const;
     CameraFrame snapshot() const;
     bool running() const { return running_.load(); }

@@ -10,7 +10,7 @@ CatalogFile.NTamd64 = xusb_reconstructed_usb.cat
 PnpLockdown = 1
 
 [DestinationDirs]
-DefaultDestDir = 12
+DefaultDestDir = 13
 
 [SourceDisksNames]
 1 = %DiskName%,,,
@@ -38,7 +38,7 @@ DisplayName = %RootHubServiceDesc%
 ServiceType = 1
 StartType = 3
 ErrorControl = 1
-ServiceBinary = %12%\xusb_driver.sys
+ServiceBinary = %13%\xusb_driver.sys
 LoadOrderGroup = Extended Base
 
 [Strings]

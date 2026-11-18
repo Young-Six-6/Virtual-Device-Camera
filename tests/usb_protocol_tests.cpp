@@ -463,14 +463,16 @@ struct FakeState {
     std::condition_variable changed;
     bool stopped = false, plugged = false, destroyed = false;
     int plugs = 0, unplugs = 0, fail_plug = -1, cycles = 0;
-    bool cancel_next_end = false;
+    bool cancel_next_end = false, fail_next_end = false;
     std::deque<Packet> requests, responses;
 };
 class FakeTransport final : public vcam::UsbTransport {
     std::shared_ptr<FakeState> state_;
     std::unique_ptr<Packet> active_;
+    bool super_speed_;
 public:
-    explicit FakeTransport(std::shared_ptr<FakeState> state) : state_(std::move(state)) {}
+    explicit FakeTransport(std::shared_ptr<FakeState> state, bool super_speed = false)
+        : state_(std::move(state)), super_speed_(super_speed) {}
     ~FakeTransport() override { std::lock_guard<std::mutex> lock(state_->mutex); state_->destroyed = true; }
     bool plug(const vcam::DeviceIdentity&) override {
         std::lock_guard<std::mutex> lock(state_->mutex);
@@ -501,10 +503,17 @@ public:
             state_->changed.notify_all();
             return vcam::UsbEndResult::canceled;
         }
+        if (state_->fail_next_end) {
+            state_->fail_next_end = false;
+            active_.reset();
+            state_->changed.notify_all();
+            return vcam::UsbEndResult::failed;
+        }
         state_->responses.push_back(std::move(*active_)); active_.reset(); state_->changed.notify_all();
         return vcam::UsbEndResult::completed;
     }
     size_t capacity() const override { return active_ ? active_->capacity : 0; }
+    bool is_superspeed() const override { return super_speed_; }
     void interrupt() noexcept override { std::lock_guard<std::mutex> lock(state_->mutex); state_->stopped = true; state_->changed.notify_all(); }
     void resume() noexcept override { std::lock_guard<std::mutex> lock(state_->mutex); state_->stopped = false; }
 };
@@ -530,6 +539,8 @@ void lifecycle_tests() {
         {
             vcam::CameraSession session(configuration(), {640,480}, std::make_unique<FakeTransport>(state));
             require(session.start(), "Camera worker start failed");
+            auto status = session.status_snapshot();
+            require(status.running && status.usb_mode == "high-speed", "USB 2.0 camera link status is wrong");
             for (auto size : {vcam::Resolution{1280,720}, {1920,1080}, {640,480}}) {
                 std::string error;
                 require(session.resize(size, error), "Hot resolution failed");
@@ -545,6 +556,25 @@ void lifecycle_tests() {
             require(state->changed.wait_for(lock, std::chrono::seconds(1), [&] { return state->cycles == 1; }), "Reset did not replug synchronously");
         }
         require(state->destroyed && !state->plugged, "Transport released before shutdown completed");
+    }
+    {
+        auto superspeed_state = std::make_shared<FakeState>();
+        vcam::CameraSession session(configuration(), {640,480},
+            std::make_unique<FakeTransport>(superspeed_state, true));
+        require(session.status_snapshot().usb_mode == "disconnected", "Unplugged camera reported an active USB link");
+        require(session.start(), "SuperSpeed camera worker start failed");
+        require(session.status_snapshot().usb_mode == "superspeed", "SuperSpeed camera link mode is wrong");
+        {
+            std::lock_guard<std::mutex> lock(superspeed_state->mutex);
+            superspeed_state->fail_next_end = true;
+            superspeed_state->requests.push_back(descriptor());
+            superspeed_state->changed.notify_all();
+        }
+        const ULONGLONG failure_deadline = GetTickCount64() + 1000;
+        while (session.running() && GetTickCount64() < failure_deadline) Sleep(1);
+        const auto stopped_status = session.status_snapshot();
+        require(!stopped_status.running && stopped_status.usb_mode == "superspeed",
+            "A stopped USB worker did not expose its stopped state alongside the selected link mode");
     }
     require(GetTickCount64()-started < 10000, "Worker shutdown did not cancel waits promptly");
     {

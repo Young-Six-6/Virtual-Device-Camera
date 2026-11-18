@@ -61,11 +61,12 @@ std::string RuntimeController::status_json(unsigned short web_port) const {
     for (int index = 0; index < 2; ++index) {
         if (index) json << ',';
         if (cameras_[index]) {
-            const Resolution size = cameras_[index]->resolution();
+            const CameraSessionStatus camera = cameras_[index]->status_snapshot();
             json << "{\"index\":" << index + 1 << ",\"present\":true,\"running\":"
-                 << (cameras_[index]->running() ? "true" : "false") << ",\"width\":" << size.width
-                 << ",\"height\":" << size.height << '}';
-        } else json << "{\"index\":" << index + 1 << ",\"present\":false,\"running\":false,\"width\":0,\"height\":0}";
+                 << (camera.running ? "true" : "false") << ",\"width\":" << camera.size.width
+                 << ",\"height\":" << camera.size.height
+                 << ",\"usbMode\":" << json_string(camera.usb_mode) << '}';
+        } else json << "{\"index\":" << index + 1 << ",\"present\":false,\"running\":false,\"width\":0,\"height\":0,\"usbMode\":\"disconnected\"}";
     }
     json << "]}";
     return json.str();

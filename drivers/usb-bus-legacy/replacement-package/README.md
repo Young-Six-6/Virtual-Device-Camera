@@ -1,8 +1,10 @@
 # Combined role-3 + UCX role-2 replacement package
 
-Current machine evidence (2026-11-18): tree 1.0.0.11 and HCD 2.0.0.28 are bound in the same Windows boot session. The controller, USB 3 root hub, and SuperSpeed camera node report OK. DirectShow captured 120 frames of 1280×720 YUY2 at about 30fps (120 frames in approximately 3.97 seconds). During capture the HCD had 16 pending transactions; after the app stopped, the camera node disappeared and the count returned to zero without restarting Windows. This validates the tested single-camera stream, not every legacy URB or full production replacement behavior. The earlier USB 2.0 MJPEG result (about 25fps) is historical evidence.
+Runtime measurement (2026-11-18): tree 1.0.0.11 and HCD 2.0.0.28 were bound in the same Windows boot session. The controller, USB 3 root hub, and SuperSpeed camera node reported OK. DirectShow captured 120 frames of 1280×720 YUY2 at about 30fps (120 frames in approximately 3.97 seconds). During capture the HCD had 16 pending transactions; after the app stopped, the camera node disappeared and the count returned to zero without restarting Windows. This validates the tested single-camera stream, not every legacy URB or full production replacement behavior. The earlier USB 2.0 MJPEG result (about 25fps) is historical evidence.
 
-The source template targets HCD 2.0.0.28. Its SuperSpeed camera path has been installed and verified through Windows PnP and DirectShow on the software virtual bus. This is not a physical USB 3 controller benchmark and does not establish complete compatibility with unrelated USB devices or every legacy protocol path.
+Latest read-only PnP/SCM query (2026-11-18) reports tree 1.0.0.13 and HCD 2.0.0.28 in `OK` state, with the HCD service running. The camera application was not running, so there was no active stream or live frame-rate measurement. HCD 2.0.0.29 remains a source/package candidate and has not been installed.
+
+The installed and runtime-verified HCD is 2.0.0.28. The source template now targets 2.0.0.29, which adds seven SuperSpeed device slots and has passed Release build plus static package checks; it has not yet been installed for multi-camera PnP capture. Runtime throughput claims below refer to the verified 2.0.0.28 single-camera path. This is not a physical USB 3 controller benchmark and does not establish complete compatibility with unrelated USB devices or every legacy protocol path.
 
 This is a separate experimental deployment workflow. It combines:
 
@@ -37,8 +39,10 @@ that Windows maps the legacy internal cycle-port IOCTL to this sequence.
 
 ## Build and stage
 
-Run from an x64 Windows development machine with Visual Studio C++ tools, the
-matching WDK/SDK and UCX 1.1 headers/libraries installed:
+Run from an x64 Windows development machine with Visual Studio C++ tools and a WDK
+containing x64 kernel libraries, UCX 1.1 headers/`ucxstub.lib`, and KMDF 1.31. The script
+selects the newest compatible installed kit; pass `-WindowsTargetPlatformVersion` to pin
+a specific compatible version:
 
 ```powershell
 ./replacement-package.ps1 -Configuration Release
@@ -75,11 +79,12 @@ nodes (it does not delete their DriverStore packages), and fails if one remains.
 
 Open an elevated PowerShell window. The deployment script requires the x64
 DevCon utility from the WDK tools to create the root-enumerated role-3 node.
-It stages the UCX INF first, creates/installs `root\*xusb_tree`, waits for the
-role-2 child, then asks PnPUtil to install the matching UCX HCD package and waits for
-its versioned UCX HCD service binding and a started USB root-hub child (ROOT_HUB20 or ROOT_HUB30). Only after both
-driver services point to the requested package images does it remove old control
-providers:
+It rejects any higher-version role-3 package already staged for the same INF, stages
+the UCX INF, binds `root\*xusb_tree` to the exact requested service/version/image,
+then asks PnPUtil to install the matching UCX HCD package and waits for its versioned
+service binding and a started USB root-hub child (ROOT_HUB20 or ROOT_HUB30). It removes
+obsolete UCX packages and old control providers only after both driver services point
+to the requested package images:
 
 ```powershell
 ./replacement-deploy.ps1 -Action Install
@@ -95,16 +100,19 @@ versioned debug builds. If PnPUtil returns `3010`, the deploy script now stops i
 and identifies the command; it does not continue changing devices or reboot Windows.
 Same-version unload and uninstall may still require separate recovery work.
 Before any device change, the script compares both requested service names with existing
-service image hashes. Different bytes under the same versioned name are rejected with
-instructions to increase the corresponding `DriverVer`. DevCon exit code 1 also stops
-deployment immediately; PnP readiness polling cannot finish a reboot-pending installation.
+service image hashes and checks staged role-3 packages for higher-version or same-version
+service/image conflicts. If `Get-WindowsDriver` does not provide a usable FileRepository INF
+path, it exports the published package to a temporary directory and hashes the SYS without
+changing PnP state. Conflicts stop deployment before updating a device. Different bytes
+under the same versioned name require an increased `DriverVer`. DevCon exit code 1 also
+stops deployment immediately; PnP readiness polling cannot finish a reboot-pending installation.
 The package also includes `query-ucx-state.ps1`; if the UCX controller starts but
 its USB root hub does not appear, the deploy script prints the HCD's recorded
 initialization statuses before it exits.
 
-## SuperSpeed runtime status
+## SuperSpeed runtime status and candidate
 
-The 2.0.0.28 HCD reserves a dedicated virtual slot on its USB 3 root-hub port,
+The installed 2.0.0.28 HCD reserves one virtual slot on its USB 3 root-hub port,
 uses UCX's SuperSpeed device-speed indication, reports connection and reset state,
 and checks the isochronous endpoint companion's burst/interval bounds. The camera
 uses an additive FOSS-only add IOCTL, then emits USB 3.0 device/BOS descriptors and
@@ -112,12 +120,14 @@ a companion descriptor with `bMaxBurst=7` and `wBytesPerInterval=8,192` bytes pe
 125-microsecond interval. Existing IOCTLs and transaction wire layout stay unchanged;
 older and original drivers reject the additive request and continue through USB 2.0.
 
-The 8,192-byte interval budget provides about 65.5 MB/s after the two-byte UVC header,
+The verified 2.0.0.28 path uses an 8,192-byte interval budget, providing about 65.5 MB/s after the two-byte UVC header,
 enough for 1280×720 YUY2 at 30fps (about 55.3 MB/s). DirectShow capture verified that
 rate on the software virtual bus. USB 2.0 high-speed isochronous YUY2 remains capped at
 3×1,024 bytes per microframe, about 13.3fps at 720p; MJPEG reduces that bandwidth need
 and previously reached about 25fps on this machine. These figures describe this tested
-camera path, not physical USB 3 throughput or compatibility with every USB device.
+camera path, not physical USB 3 throughput or compatibility with every USB device. The
+2.0.0.29 source adds seven SuperSpeed slots on ports 17–23; multi-camera enumeration and
+stream capture are not yet runtime-verified.
 
 ## Uninstall
 

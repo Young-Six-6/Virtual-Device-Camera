@@ -62,6 +62,15 @@ bool CameraSession::start() {
     }
     return false;
 }
+CameraSessionStatus CameraSession::status_snapshot() const {
+    std::lock_guard<std::mutex> lifecycle_lock(lifecycle_);
+    std::lock_guard<std::mutex> frame_lock(frame_mutex_);
+    CameraSessionStatus result;
+    result.size = device_ ? device_->resolution() : Resolution{};
+    result.running = running_.load();
+    if (plugged_) result.usb_mode = transport_->is_superspeed() ? "superspeed" : "high-speed";
+    return result;
+}
 Resolution CameraSession::resolution() const {
     std::lock_guard<std::mutex> lifecycle_lock(lifecycle_);
     std::lock_guard<std::mutex> frame_lock(frame_mutex_);

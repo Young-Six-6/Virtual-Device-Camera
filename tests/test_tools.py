@@ -125,7 +125,10 @@ class WindowsPipeTests(unittest.TestCase):
             connection.request('GET', '/')
             page = connection.getresponse()
             self.assertEqual(page.status, 200)
-            self.assertIn(b'VIRTUAL CAMERA / CONTROL', page.read())
+            page_html = page.read()
+            self.assertIn(b'VIRTUAL CAMERA / CONTROL', page_html)
+            self.assertIn('虚拟链路模式'.encode(), page_html)
+            self.assertIn('摄像头状态'.encode(), page_html)
             connection.close()
 
             connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)

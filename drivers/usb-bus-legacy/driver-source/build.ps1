@@ -4,6 +4,7 @@ param(
     [string] $Configuration = 'Release',
     [ValidateSet('x64')]
     [string] $Platform = 'x64',
+    [string] $WindowsTargetPlatformVersion,
     [switch] $Clean
 )
 
@@ -25,15 +26,23 @@ $kitsRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
 $includeRoot = Join-Path $kitsRoot 'Include'
 $libraryRoot = Join-Path $kitsRoot 'Lib'
 $minimumWdkVersion = [version]'10.0.19041.0'
-$wdkVersion = Get-ChildItem -LiteralPath $includeRoot -Directory -ErrorAction Stop |
+$availableWdkVersions = @(Get-ChildItem -LiteralPath $includeRoot -Directory -ErrorAction Stop |
     Where-Object {
         $_.Name -match '^\d+(\.\d+){2,3}$' -and
         [version]$_.Name -ge $minimumWdkVersion -and
         (Test-Path -LiteralPath (Join-Path $_.FullName 'km\ntddk.h')) -and
         (Test-Path -LiteralPath (Join-Path $libraryRoot "$($_.Name)\km\x64\ntoskrnl.lib"))
     } |
-    Sort-Object { [version]$_.Name } -Descending |
-    Select-Object -First 1
+    Sort-Object { [version]$_.Name } -Descending)
+if ($WindowsTargetPlatformVersion) {
+    $wdkVersion = $availableWdkVersions | Where-Object Name -EQ $WindowsTargetPlatformVersion | Select-Object -First 1
+    if ($null -eq $wdkVersion) {
+        $available = if ($availableWdkVersions.Count) { ($availableWdkVersions.Name -join ', ') } else { 'none' }
+        throw "Requested WDK $WindowsTargetPlatformVersion is unavailable or lacks x64 kernel headers/libraries. Compatible installed versions: $available."
+    }
+} else {
+    $wdkVersion = $availableWdkVersions | Select-Object -First 1
+}
 if ($null -eq $wdkVersion) {
     throw 'A WDK 10.0.19041.0 or newer with x64 kernel headers and libraries was not found.'
 }

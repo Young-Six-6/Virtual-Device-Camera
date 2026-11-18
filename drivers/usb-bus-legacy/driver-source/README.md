@@ -23,7 +23,7 @@ USB-tree role 创建的内部 Host Controller PDO 报告项目专用软件总线
 
 ## 安装包与构建
 
-安装 INF 位于 `package/`，未完成角色 INF 位于 `package/experimental/`。`package.ps1` 会先进行 Release/Debug WDK 构建，将一个 `.sys` 和相应 INF stage 到 Git 忽略的 `build/package/x64/<Configuration>/`，然后运行 Inf2Cat。默认包包含 USB-only enumerator 和 Root Hub；显式给 `-IncludeExperimentalRoles` 才会把 USB-tree 和 Host Controller INF 加入包。
+安装 INF 位于 `package/`，未完成角色 INF 位于 `package/experimental/`。`package.ps1` 会先进行 Release/Debug WDK 构建，再以 UTC 时间槽生成包版本、服务名和 SYS 文件名，将版本化镜像与 INF stage 到 Git 忽略的 `build/package/x64/<Configuration>/`，随后运行 InfVerif 与 Inf2Cat。默认包包含 USB-only enumerator 和 Root Hub；显式给 `-IncludeExperimentalRoles` 才会把 USB-tree 和 Host Controller INF 加入包。
 
 ```powershell
 ./build.ps1 -Configuration Release
@@ -36,7 +36,7 @@ USB-tree role 创建的内部 Host Controller PDO 报告项目专用软件总线
 
 工程使用 WDM x64，要求 Visual Studio C++/WDK 组件以及 10.0.19041.0 或更新的 WDK。驱动运行最低要求为 Windows 10 版本 2004（build 19041），INF 会拒绝更早的系统；这是因为内核使用 `ExAllocatePool2`。`build.ps1` 会从已安装 Kits 中选择版本最高且包含 x64 kernel headers/libraries 的 WDK，不再绑定某一台机器上的单个版本。`-Clean` 只清理此目录的忽略构建产物。`package.ps1` 会从当前 Inf2Cat 支持列表选择 Windows 10 20H2 x64 与最新的 Windows 11 x64 目标，也可通过 `-OsTargets` 显式覆盖。Inf2Cat 检查会验证 INF 可签名性并生成 catalog；catalog 仍需完成 Windows 内核驱动发布签名。源码仓库不含发布私钥；面向当前 Windows 的公开分发需通过 Microsoft Hardware Dev Center 的签名流程，测试证书只适用于隔离测试机。
 
-签名后的包可由 `deploy.ps1` 安装或升级；部署器会校验 catalog 可信状态、用 PnPUtil 暂存 INF，再调用 WDK 的 DevCon 创建/更新 USB-only 根节点，并在存在旧 Root Hub 节点时更新它，避免同一应用接口同时落到新旧驱动。关掉摄像头程序后，在管理员 PowerShell 执行：
+签名后的包可由 `deploy.ps1` 安装或升级；部署器会校验 catalog 可信状态、INF 版本/服务/镜像一致性以及同名镜像 SHA-256，再用 PnPUtil 暂存 INF，调用 WDK 的 DevCon 创建/更新 USB-only 根节点，并确认 PnP 最终绑定到请求的版本服务。不同版本有独立服务和镜像，部署器拒绝覆盖可能仍映射在内存中的旧镜像，不请求系统重启。关掉摄像头程序后，在管理员 PowerShell 执行：
 
 ```powershell
 ./deploy.ps1 -PackageDirectory .\build\package\x64\Release

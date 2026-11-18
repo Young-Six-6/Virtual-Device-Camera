@@ -23,11 +23,18 @@ static volatile LONG gPendingRemovalWorkItems;
 static BOOLEAN gStopping;
 static xusb_ucx_state_t gUcxState;
 #define VHCD_MAX_PORTS 16
-#define VHCD_MAX_USB30_PORTS 1
+#define VHCD_MAX_USB30_PORTS 7
 #define VHCD_MAX_SLOTS (VHCD_MAX_PORTS + VHCD_MAX_USB30_PORTS)
-#define VHCD_USB30_SLOT_INDEX VHCD_MAX_PORTS
-#define VHCD_FIRST_USB30_PORT (VHCD_MAX_PORTS + 1)
-#define VHCD_USB30_PORT_NUMBER VHCD_FIRST_USB30_PORT
+#define VHCD_USB30_FIRST_SLOT_INDEX VHCD_MAX_PORTS
+#define VHCD_USB30_FIRST_PORT_NUMBER (VHCD_MAX_PORTS + 1)
+#define VHCD_USB30_PORT_BITMAP_BYTES ((VHCD_MAX_USB30_PORTS + 1 + 7) / 8)
+#define VHCD_USB20_PORT_BITMAP_BYTES ((VHCD_MAX_PORTS + 1 + 7) / 8)
+#define VHCD_COMBINED_PORT_BITMAP_BYTES ((VHCD_MAX_PORTS + VHCD_MAX_USB30_PORTS + 1 + 7) / 8)
+/* Preserve unique global USB 3 port numbers and fit the combined 1..23 bitmap
+ * in the existing three-byte root-hub buffer. Local USB 3 requests need one byte. */
+C_ASSERT(VHCD_USB30_FIRST_PORT_NUMBER > VHCD_MAX_PORTS);
+C_ASSERT(VHCD_USB30_PORT_BITMAP_BYTES < VHCD_USB20_PORT_BITMAP_BYTES);
+C_ASSERT(VHCD_COMBINED_PORT_BITMAP_BYTES == VHCD_USB20_PORT_BITMAP_BYTES);
 #define VHCD_MAX_TRANSACTION_BYTES (32u * 1024u * 1024u)
 #define VHCD_MAX_SLOT_TRANSACTION_BYTES (64u * 1024u * 1024u)
 #define VHCD_MAX_SLOT_TRANSACTIONS 256u
@@ -38,7 +45,7 @@ static xusb_ucx_state_t gUcxState;
 
 /* Port power belongs to the root hub and must survive virtual-device slot reuse. */
 static BOOLEAN gPortPowerOff[VHCD_MAX_PORTS];
-static BOOLEAN gUsb30PortPowerOff;
+static BOOLEAN gUsb30PortPowerOff[VHCD_MAX_USB30_PORTS];
 
 typedef struct _VHCD_SLOT {
     ULONGLONG Generation;
@@ -283,11 +290,20 @@ static BOOLEAN VhcdSlotMatches(_In_ LONG SlotIndex, _In_ ULONGLONG Generation)
         gSlots[SlotIndex].Allocated && gSlots[SlotIndex].Generation == Generation;
 }
 
-/* Caller holds gSlotLock. The SuperSpeed root port has separate power state. */
+/* Caller holds gSlotLock. SuperSpeed root ports have separate power state. */
 static BOOLEAN VhcdSlotPowerOff(_In_ LONG SlotIndex)
 {
-    return SlotIndex == VHCD_USB30_SLOT_INDEX ? gUsb30PortPowerOff :
-        (SlotIndex >= 0 && SlotIndex < VHCD_MAX_PORTS ? gPortPowerOff[SlotIndex] : TRUE);
+    if (SlotIndex >= VHCD_USB30_FIRST_SLOT_INDEX &&
+        SlotIndex < VHCD_USB30_FIRST_SLOT_INDEX + VHCD_MAX_USB30_PORTS)
+        return gUsb30PortPowerOff[SlotIndex - VHCD_USB30_FIRST_SLOT_INDEX];
+    return SlotIndex >= 0 && SlotIndex < VHCD_MAX_PORTS ? gPortPowerOff[SlotIndex] : TRUE;
+}
+
+static LONG VhcdUsb30SlotFromPort(_In_ USHORT Port)
+{
+    if (Port < VHCD_USB30_FIRST_PORT_NUMBER ||
+        Port >= VHCD_USB30_FIRST_PORT_NUMBER + VHCD_MAX_USB30_PORTS) return -1;
+    return VHCD_USB30_FIRST_SLOT_INDEX + (LONG)(Port - VHCD_USB30_FIRST_PORT_NUMBER);
 }
 
 static BOOLEAN VhcdReleaseSlot(_In_ LONG SlotIndex, _In_ ULONGLONG Generation)
@@ -567,8 +583,10 @@ NTSTATUS VhcdEvtControllerUsbDeviceAdd(UCXCONTROLLER Controller, PUCXUSBDEVICE_I
     ULONG slotIndex;
     if (DeviceInfo == NULL || DeviceInfo->PortPath.PortPathDepth == 0) return STATUS_NOT_SUPPORTED;
     portNumber = DeviceInfo->PortPath.PortPath[0];
-    if (portNumber == VHCD_USB30_PORT_NUMBER && DeviceInfo->DeviceSpeed == UsbSuperSpeed)
-        slotIndex = VHCD_USB30_SLOT_INDEX;
+    if (DeviceInfo->DeviceSpeed == UsbSuperSpeed &&
+        portNumber >= VHCD_USB30_FIRST_PORT_NUMBER &&
+        portNumber < VHCD_USB30_FIRST_PORT_NUMBER + VHCD_MAX_USB30_PORTS)
+        slotIndex = VHCD_USB30_FIRST_SLOT_INDEX + portNumber - VHCD_USB30_FIRST_PORT_NUMBER;
     else if (portNumber > 0 && portNumber <= VHCD_MAX_PORTS && DeviceInfo->DeviceSpeed == UsbHighSpeed)
         slotIndex = portNumber - 1;
     else
@@ -710,21 +728,21 @@ static VOID VhcdReadPort(_In_ USHORT Port, _Out_ PUSHORT Status, _Out_ PUSHORT C
 static VOID VhcdReadUsb30Port(_In_ USHORT Port, _Out_ PUSHORT Status, _Out_ PUSHORT Change)
 {
     USB_30_PORT_STATUS portStatus;
+    LONG slotIndex = VhcdUsb30SlotFromPort(Port);
 
     *Status = 0;
     *Change = 0;
-    if (Port != VHCD_USB30_PORT_NUMBER &&
-        (Port < VHCD_FIRST_USB30_PORT || Port >= VHCD_FIRST_USB30_PORT + VHCD_MAX_USB30_PORTS)) return;
+    if (slotIndex < 0) return;
 
     RtlZeroMemory(&portStatus, sizeof(portStatus));
     WdfSpinLockAcquire(gSlotLock);
     {
-        PVHCD_SLOT slot = &gSlots[VHCD_USB30_SLOT_INDEX];
+        PVHCD_SLOT slot = &gSlots[slotIndex];
         if (slot->ConnectionChanged) *Change |= 0x0001;
         if (slot->ResetChanged) *Change |= 0x0020; /* BH port reset change. */
     }
-    if (!gUsb30PortPowerOff) {
-        PVHCD_SLOT slot = &gSlots[VHCD_USB30_SLOT_INDEX];
+    if (!gUsb30PortPowerOff[slotIndex - VHCD_USB30_FIRST_SLOT_INDEX]) {
+        PVHCD_SLOT slot = &gSlots[slotIndex];
         portStatus.PortPower = 1;
         portStatus.PortLinkState = slot->Present ? PORT_LINK_STATE_U0 : PORT_LINK_STATE_RX_DETECT;
         portStatus.CurrentConnectStatus = slot->Present;
@@ -742,11 +760,10 @@ static BOOLEAN VhcdIsUsb30ControlRequest(_In_ PURB Urb)
     USHORT port = setup[4];
     /* UCX sends both root-hub protocols through the same callback, and the
      * control request itself does not identify which hub owns an aliased
-     * port number. Assign the SuperSpeed root port a distinct number after
+     * port number. Assign SuperSpeed root ports distinct numbers after
      * the USB 2.0 ports. */
     if ((setup[0] & 0x1f) != 3) return FALSE;
-    if (port >= VHCD_FIRST_USB30_PORT &&
-        port < VHCD_FIRST_USB30_PORT + VHCD_MAX_USB30_PORTS) return TRUE;
+    if (VhcdUsb30SlotFromPort(port) >= 0) return TRUE;
     return FALSE;
 }
 
@@ -833,8 +850,7 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
             if (length < sizeof(hubStatus) || data == NULL) urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
             else { RtlCopyMemory(data, &hubStatus, sizeof(hubStatus)); urb->UrbControlTransfer.TransferBufferLength = sizeof(hubStatus); }
         } else if ((setup[0] & 0x1f) == 3 && VhcdIsUsb30ControlRequest(urb) &&
-                   (index == VHCD_USB30_PORT_NUMBER ||
-                    (index >= VHCD_FIRST_USB30_PORT && index < VHCD_FIRST_USB30_PORT + VHCD_MAX_USB30_PORTS))) {
+                   VhcdUsb30SlotFromPort(index) >= 0) {
             VhcdReadUsb30Port(index, &statusWord, &changeWord);
             if (length < sizeof(ULONG) || data == NULL) urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
             else { ULONG portStatus = statusWord | ((ULONG)changeWord << 16); RtlCopyMemory(data, &portStatus, sizeof(portStatus)); urb->UrbControlTransfer.TransferBufferLength = sizeof(portStatus); }
@@ -854,9 +870,9 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
         urb->UrbControlTransfer.TransferBufferLength = 0;
     } else if ((setup[1] == USB_REQUEST_SET_FEATURE || setup[1] == USB_REQUEST_CLEAR_FEATURE) &&
                (setup[0] & 0x1f) == 3 && VhcdIsUsb30ControlRequest(urb) &&
-               (index == VHCD_USB30_PORT_NUMBER ||
-                (index >= VHCD_FIRST_USB30_PORT && index < VHCD_FIRST_USB30_PORT + VHCD_MAX_USB30_PORTS))) {
-        LONG slot = VHCD_USB30_SLOT_INDEX;
+               VhcdUsb30SlotFromPort(index) >= 0) {
+        LONG slot = VhcdUsb30SlotFromPort(index);
+        ULONG portIndex = (ULONG)(slot - VHCD_USB30_FIRST_SLOT_INDEX);
         BOOLEAN supported = TRUE;
         BOOLEAN changed = FALSE;
         BOOLEAN resetRequested = FALSE;
@@ -864,8 +880,8 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
         WdfSpinLockAcquire(gSlotLock);
         generation = gSlots[slot].Generation;
         if (value == 8 && setup[1] == USB_REQUEST_CLEAR_FEATURE) {
-            if (!gUsb30PortPowerOff) {
-                gUsb30PortPowerOff = TRUE;
+            if (!gUsb30PortPowerOff[portIndex]) {
+                gUsb30PortPowerOff[portIndex] = TRUE;
                 gSlots[slot].Enabled = FALSE;
                 if (gSlots[slot].Allocated && gSlots[slot].Present) {
                     gSlots[slot].ConnectionChanged = TRUE;
@@ -874,8 +890,8 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
                 }
             }
         } else if (value == 8 && setup[1] == USB_REQUEST_SET_FEATURE) {
-            if (gUsb30PortPowerOff) {
-                gUsb30PortPowerOff = FALSE;
+            if (gUsb30PortPowerOff[portIndex]) {
+                gUsb30PortPowerOff[portIndex] = FALSE;
                 if (gSlots[slot].Allocated && gSlots[slot].Present) {
                     gSlots[slot].ConnectionChanged = TRUE;
                     changed = TRUE;
@@ -897,7 +913,7 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
             NTSTATUS resetStatus = VhcdQueuePortResetNotification(slot, generation, 1, FALSE);
             if (NT_SUCCESS(resetStatus)) {
                 WdfSpinLockAcquire(gSlotLock);
-                if (VhcdSlotMatches(slot, generation) && gSlots[slot].Present && !gUsb30PortPowerOff) {
+                if (VhcdSlotMatches(slot, generation) && gSlots[slot].Present && !gUsb30PortPowerOff[portIndex]) {
                     gSlots[slot].Enabled = TRUE;
                     gSlots[slot].ResetChanged = TRUE;
                     changed = TRUE;
@@ -1031,6 +1047,7 @@ VOID VhcdEvtRootHubInterruptTx(UCXROOTHUB H, WDFREQUEST R)
     ULONG length, bytes;
     ULONG bitmap = 0;
     LONG i;
+    LONG ssPort;
     UNREFERENCED_PARAMETER(H);
     InterlockedIncrement((volatile LONG*)&gUcxState.RootHubInterruptCount);
     if (urb == NULL || urb->UrbHeader.Function != URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER) {
@@ -1040,21 +1057,24 @@ VOID VhcdEvtRootHubInterruptTx(UCXROOTHUB H, WDFREQUEST R)
     }
     length = urb->UrbBulkOrInterruptTransfer.TransferBufferLength;
     data = VhcdTransferBuffer(length, urb->UrbBulkOrInterruptTransfer.TransferBuffer, urb->UrbBulkOrInterruptTransfer.TransferBufferMDL);
-    bytes = (VHCD_MAX_PORTS + 1 + 7) / 8;
+    bytes = VHCD_USB20_PORT_BITMAP_BYTES;
     if (length < bytes) {
         ULONG superSpeedBitmap = 0;
         InterlockedIncrement((volatile LONG*)&gUcxState.RootHubInterrupt30Count);
-        if (length == 0 || data == NULL) urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
+        if (length < VHCD_USB30_PORT_BITMAP_BYTES || data == NULL)
+            urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
         else {
             WdfSpinLockAcquire(gSlotLock);
-            if (gSlots[VHCD_USB30_SLOT_INDEX].ConnectionChanged ||
-                gSlots[VHCD_USB30_SLOT_INDEX].ResetChanged)
-                superSpeedBitmap = 1u << 1;
+            for (ssPort = 0; ssPort < VHCD_MAX_USB30_PORTS; ++ssPort) {
+                PVHCD_SLOT slot = &gSlots[VHCD_USB30_FIRST_SLOT_INDEX + ssPort];
+                if (slot->ConnectionChanged || slot->ResetChanged)
+                    superSpeedBitmap |= 1u << (ssPort + 1);
+            }
             WdfSpinLockRelease(gSlotLock);
             RtlZeroMemory(data, length);
-            data[0] = (UCHAR)superSpeedBitmap;
+            RtlCopyMemory(data, &superSpeedBitmap, VHCD_USB30_PORT_BITMAP_BYTES);
             urb->UrbHeader.Status = USBD_STATUS_SUCCESS;
-            urb->UrbBulkOrInterruptTransfer.TransferBufferLength = 1;
+            urb->UrbBulkOrInterruptTransfer.TransferBufferLength = VHCD_USB30_PORT_BITMAP_BYTES;
         }
         WdfRequestComplete(R, STATUS_SUCCESS);
         return;
@@ -1065,9 +1085,11 @@ VOID VhcdEvtRootHubInterruptTx(UCXROOTHUB H, WDFREQUEST R)
         if (gSlots[i].ConnectionChanged || gSlots[i].ResetChanged || gSlots[i].SuspendChanged)
             bitmap |= 1u << (i + 1);
     }
-    if (gSlots[VHCD_USB30_SLOT_INDEX].ConnectionChanged ||
-        gSlots[VHCD_USB30_SLOT_INDEX].ResetChanged)
-        bitmap |= 1u << VHCD_USB30_PORT_NUMBER;
+    for (ssPort = 0; ssPort < VHCD_MAX_USB30_PORTS; ++ssPort) {
+        PVHCD_SLOT slot = &gSlots[VHCD_USB30_FIRST_SLOT_INDEX + ssPort];
+        if (slot->ConnectionChanged || slot->ResetChanged)
+            bitmap |= 1u << (VHCD_USB30_FIRST_PORT_NUMBER + ssPort);
+    }
     WdfSpinLockRelease(gSlotLock);
     if (length < bytes || data == NULL) urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
     else { RtlZeroMemory(data, bytes); RtlCopyMemory(data, &bitmap, bytes); urb->UrbHeader.Status = USBD_STATUS_SUCCESS; urb->UrbBulkOrInterruptTransfer.TransferBufferLength = bytes; }
@@ -1126,7 +1148,7 @@ VOID VhcdEvtRootHubGet30PortInfo(UCXROOTHUB H, WDFREQUEST R)
 {
     WDF_REQUEST_PARAMETERS p;
     PROOTHUB_30PORTS_INFO info;
-    PROOTHUB_30PORT_INFO port;
+    USHORT i;
     UNREFERENCED_PARAMETER(H);
     InterlockedIncrement((volatile LONG*)&gUcxState.RootHubGet30PortInfoCount);
     WDF_REQUEST_PARAMETERS_INIT(&p); WdfRequestGetParameters(R, &p);
@@ -1138,19 +1160,21 @@ VOID VhcdEvtRootHubGet30PortInfo(UCXROOTHUB H, WDFREQUEST R)
         gUcxState.RootHubGet30PortInfoSize = info != NULL ? info->PortInfoSize : 0;
         WdfRequestComplete(R, STATUS_INVALID_PARAMETER); return;
     }
-    port = info->PortInfoArray[0];
-    if (port == NULL) {
-        gUcxState.RootHubGet30PortInfoStatus = STATUS_INVALID_PARAMETER;
-        gUcxState.RootHubGet30NumberOfPorts = info->NumberOfPorts;
-        gUcxState.RootHubGet30PortInfoSize = info->PortInfoSize;
-        WdfRequestComplete(R, STATUS_INVALID_PARAMETER); return;
+    /* Keep USB 2.0 and USB 3.0 port numbers disjoint for UCX PortPath mapping. */
+    for (i = 0; i < VHCD_MAX_USB30_PORTS; ++i) {
+        PROOTHUB_30PORT_INFO port = info->PortInfoArray[i];
+        if (port == NULL) {
+            gUcxState.RootHubGet30PortInfoStatus = STATUS_INVALID_PARAMETER;
+            gUcxState.RootHubGet30NumberOfPorts = info->NumberOfPorts;
+            gUcxState.RootHubGet30PortInfoSize = info->PortInfoSize;
+            WdfRequestComplete(R, STATUS_INVALID_PARAMETER); return;
+        }
+        port->PortNumber = VHCD_USB30_FIRST_PORT_NUMBER + i;
+        port->MinorRevision = 0;
+        port->HubDepth = 0;
+        port->Removable = TriStateTrue;
+        port->DebugCapable = TriStateFalse;
     }
-    /* USB 2.0 and USB 3.0 port numbers must not alias in this controller. */
-    port->PortNumber = VHCD_USB30_PORT_NUMBER;
-    port->MinorRevision = 0;
-    port->HubDepth = 0;
-    port->Removable = TriStateTrue;
-    port->DebugCapable = TriStateFalse;
     gUcxState.RootHubGet30NumberOfPorts = info->NumberOfPorts;
     gUcxState.RootHubGet30PortInfoSize = info->PortInfoSize;
     gUcxState.RootHubGet30PortInfoStatus = STATUS_SUCCESS;
@@ -2184,14 +2208,16 @@ VOID VhcdEvtIoDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, size_t OutputLen
             return;
         }
         if (superSpeed) {
-            /* USB 2.0 and USB 3.0 hubs number their ports independently. Keep
-             * USB 2.0 port 1 free while the single SuperSpeed port is active. */
-            if (!gUsb30PortPowerOff && !gSlots[VHCD_USB30_SLOT_INDEX].Allocated &&
-                !gSlots[0].Allocated)
-                slot = VHCD_USB30_SLOT_INDEX;
+            for (i = 0; i < VHCD_MAX_USB30_PORTS; ++i) {
+                LONG candidate = VHCD_USB30_FIRST_SLOT_INDEX + i;
+                if (!gUsb30PortPowerOff[i] && !gSlots[candidate].Allocated) {
+                    slot = candidate;
+                    break;
+                }
+            }
         } else {
-            const LONG firstPort = gSlots[VHCD_USB30_SLOT_INDEX].Allocated ? 1 : 0;
-            for (i = firstPort; i < VHCD_MAX_PORTS; ++i) if (!gSlots[i].Allocated) { slot = i; break; }
+            /* USB 2.0 and USB 3.0 root hubs have separate, non-aliasing port ranges. */
+            for (i = 0; i < VHCD_MAX_PORTS; ++i) if (!gSlots[i].Allocated) { slot = i; break; }
         }
         suggested = create->BusAddress;
         if (suggested < 1 || suggested > 127 || gAddressInUse[suggested]) {
@@ -2448,7 +2474,7 @@ NTSTATUS VhcdEvtDeviceReleaseHardware(_In_ WDFDEVICE Device,
         if (gSlots[slot].Allocated) gSlots[slot].RemoveRequested = TRUE;
         if (slot < VHCD_MAX_PORTS) gPortPowerOff[slot] = FALSE;
     }
-    gUsb30PortPowerOff = FALSE;
+    RtlZeroMemory(gUsb30PortPowerOff, sizeof(gUsb30PortPowerOff));
     WdfSpinLockRelease(gSlotLock);
 
     /* Stop client requests first; then drain all URB and synthetic reset transactions. */
@@ -2506,7 +2532,7 @@ VOID VhcdEvtDeviceCleanup(_In_ WDFOBJECT Object)
         RtlZeroMemory(&gSlots[slot], sizeof(gSlots[slot]));
         if (slot < VHCD_MAX_PORTS) gPortPowerOff[slot] = FALSE;
     }
-    gUsb30PortPowerOff = FALSE;
+    RtlZeroMemory(gUsb30PortPowerOff, sizeof(gUsb30PortPowerOff));
     RtlZeroMemory(gAddressInUse, sizeof(gAddressInUse));
     gDevice = WDF_NO_HANDLE;
     gIoQueue = WDF_NO_HANDLE;

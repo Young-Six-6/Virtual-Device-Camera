@@ -2,6 +2,7 @@
 param(
     [ValidateSet('Debug', 'Release')]
     [string] $Configuration = 'Release',
+    [string] $WindowsTargetPlatformVersion,
     [switch] $Clean
 )
 
@@ -15,6 +16,47 @@ $ucxSys = Join-Path $ucxRoot "build\x64\$Configuration\VirtualCameraUcxHcd.sys"
 $packageDir = Join-Path $root "build\x64\$Configuration"
 $packageParent = [System.IO.Path]::GetFullPath((Join-Path $root 'build\x64'))
 
+$kitsRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
+$includeRoot = Join-Path $kitsRoot 'Include'
+$libraryRoot = Join-Path $kitsRoot 'Lib'
+$minimumWdkVersion = [version]'10.0.19041.0'
+$kmdfVersion = '1.31'
+$kmdfInclude = Join-Path $includeRoot "wdf\kmdf\$kmdfVersion\wdf.h"
+$kmdfLibrary = Join-Path $libraryRoot "wdf\kmdf\x64\$kmdfVersion\wdfdriverentry.lib"
+if (-not (Test-Path -LiteralPath $includeRoot -PathType Container) -or
+    -not (Test-Path -LiteralPath $libraryRoot -PathType Container)) {
+    throw "Windows 10 WDK/SDK include and library roots were not found under $kitsRoot. Install a WDK with UCX 1.1 support."
+}
+if (-not (Test-Path -LiteralPath $kmdfInclude -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $kmdfLibrary -PathType Leaf)) {
+    throw "KMDF $kmdfVersion headers/library were not found under $kitsRoot. Install a WDK with KMDF $kmdfVersion and UCX 1.1 support."
+}
+$compatibleWdkVersions = @(Get-ChildItem -LiteralPath $includeRoot -Directory -ErrorAction Stop |
+    Where-Object {
+        $_.Name -match '^\d+(\.\d+){2,3}$' -and
+        [version]$_.Name -ge $minimumWdkVersion -and
+        (Test-Path -LiteralPath (Join-Path $_.FullName 'km\ntddk.h')) -and
+        (Test-Path -LiteralPath (Join-Path $_.FullName 'km\ucx\1.1\ucxclass.h')) -and
+        (Test-Path -LiteralPath (Join-Path $_.FullName 'km\ucx\1.1\ucxcontroller.h')) -and
+        (Test-Path -LiteralPath (Join-Path $libraryRoot "$($_.Name)\km\x64\ntoskrnl.lib")) -and
+        (Test-Path -LiteralPath (Join-Path $libraryRoot "$($_.Name)\km\x64\ucx\1.1\ucxstub.lib"))
+    } |
+    Sort-Object { [version]$_.Name } -Descending)
+if ($WindowsTargetPlatformVersion) {
+    $selectedWdk = $compatibleWdkVersions | Where-Object Name -EQ $WindowsTargetPlatformVersion | Select-Object -First 1
+    if ($null -eq $selectedWdk) {
+        $available = if ($compatibleWdkVersions.Count) { ($compatibleWdkVersions.Name -join ', ') } else { 'none' }
+        throw "Requested WDK $WindowsTargetPlatformVersion does not contain the required x64 kernel files and UCX 1.1 headers/library. Compatible installed versions: $available."
+    }
+} else {
+    $selectedWdk = $compatibleWdkVersions | Select-Object -First 1
+}
+if ($null -eq $selectedWdk) {
+    throw "No WDK 10.0.19041.0 or newer with UCX 1.1 headers and x64 UCX/kernel libraries was found under $kitsRoot. Install a compatible WDK or pass -WindowsTargetPlatformVersion with a compatible version."
+}
+$WindowsTargetPlatformVersion = $selectedWdk.Name
+Write-Output "Using WDK $WindowsTargetPlatformVersion (UCX 1.1)."
+
 if (-not [string]::Equals(
     [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($packageDir)).TrimEnd('\'),
     $packageParent.TrimEnd('\'),
@@ -22,7 +64,8 @@ if (-not [string]::Equals(
     throw "Refusing to stage outside the expected build directory: $packageDir"
 }
 
-& (Join-Path $legacyRoot 'build.ps1') -Configuration $Configuration -Platform x64 -Clean:$Clean
+& (Join-Path $legacyRoot 'build.ps1') -Configuration $Configuration -Platform x64 `
+    -WindowsTargetPlatformVersion $WindowsTargetPlatformVersion -Clean:$Clean
 if ($LASTEXITCODE -ne 0) {
     throw "Legacy role-3 driver build failed with exit code $LASTEXITCODE"
 }
@@ -38,7 +81,9 @@ if (-not $msbuild -or -not (Test-Path -LiteralPath $msbuild)) {
 }
 
 $target = if ($Clean) { '/t:Rebuild' } else { '/t:Build' }
-& $msbuild (Join-Path $ucxRoot 'ucx_hcd.vcxproj') $target /m "/p:Configuration=$Configuration" /p:Platform=x64 /v:minimal
+& $msbuild (Join-Path $ucxRoot 'ucx_hcd.vcxproj') $target /m `
+    "/p:Configuration=$Configuration" /p:Platform=x64 `
+    "/p:WindowsTargetPlatformVersion=$WindowsTargetPlatformVersion" /v:minimal
 if ($LASTEXITCODE -ne 0) {
     throw "UCX HCD build failed with exit code $LASTEXITCODE"
 }
