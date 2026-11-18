@@ -1,8 +1,8 @@
 # Combined role-3 + UCX role-2 replacement package
 
-Current machine evidence (2026-11-17): tree 1.0.0.11 and HCD 2.0.0.22 are bound in the same Windows boot session. The controller, virtual root hub, and active camera node report OK. DirectShow enumerates `MP4 HD Camera 1` with YUY2 and MJPEG modes; 1280×720 MJPEG capture was requested at 30fps and delivered 60 frames at about 25fps. Stopping the application removes its camera node and drains pending HCD transactions without restarting Windows. This validates the tested camera path, not every legacy URB or full production replacement behavior.
+Current machine evidence (2026-11-18): tree 1.0.0.11 and HCD 2.0.0.28 are bound in the same Windows boot session. The controller, USB 3 root hub, and SuperSpeed camera node report OK. DirectShow captured 120 frames of 1280×720 YUY2 at about 30fps (120 frames in approximately 3.97 seconds). During capture the HCD had 16 pending transactions; after the app stopped, the camera node disappeared and the count returned to zero without restarting Windows. This validates the tested single-camera stream, not every legacy URB or full production replacement behavior. The earlier USB 2.0 MJPEG result (about 25fps) is historical evidence.
 
-The source template now targets HCD 2.0.0.23, which adds the experimental SuperSpeed path described below. This candidate has compiled, passed protocol-level descriptor/negotiation checks, and has been staged as an unsigned package, but has not been installed or tested through Windows PnP/DirectShow. The test machine remains on 2.0.0.22; do not treat USB 3.0 as runtime-verified.
+The source template targets HCD 2.0.0.28. Its SuperSpeed camera path has been installed and verified through Windows PnP and DirectShow on the software virtual bus. This is not a physical USB 3 controller benchmark and does not establish complete compatibility with unrelated USB devices or every legacy protocol path.
 
 This is a separate experimental deployment workflow. It combines:
 
@@ -102,22 +102,22 @@ The package also includes `query-ucx-state.ps1`; if the UCX controller starts bu
 its USB root hub does not appear, the deploy script prints the HCD's recorded
 initialization statuses before it exits.
 
-## SuperSpeed candidate status
+## SuperSpeed runtime status
 
-The 2.0.0.23 HCD reserves a dedicated virtual slot on its USB 3.0 root-hub port,
+The 2.0.0.28 HCD reserves a dedicated virtual slot on its USB 3 root-hub port,
 uses UCX's SuperSpeed device-speed indication, reports connection and reset state,
 and checks the isochronous endpoint companion's burst/interval bounds. The camera
 uses an additive FOSS-only add IOCTL, then emits USB 3.0 device/BOS descriptors and
-a 45,000-byte `wBytesPerInterval` endpoint companion. Existing IOCTLs and transaction
-wire layout stay unchanged; older and original drivers reject the additive request
-and continue through USB 2.0.
+a companion descriptor with `bMaxBurst=7` and `wBytesPerInterval=8,192` bytes per
+125-microsecond interval. Existing IOCTLs and transaction wire layout stay unchanged;
+older and original drivers reject the additive request and continue through USB 2.0.
 
-The selected 45,000-byte microframe budget is based on Microsoft's SuperSpeed isochronous
-example. It is enough for 1280×720 YUY2 at 30fps (about 55.3 MB/s), but this is a
-software-side capacity calculation, not proof of PnP enumeration or capture. Runtime
-validation still needs USB device-tree inspection, DirectShow format negotiation,
-frame-rate measurement, and stop/reconnect checks. Do not install this candidate as a
-known-working USB 3.0 driver until those checks pass.
+The 8,192-byte interval budget provides about 65.5 MB/s after the two-byte UVC header,
+enough for 1280×720 YUY2 at 30fps (about 55.3 MB/s). DirectShow capture verified that
+rate on the software virtual bus. USB 2.0 high-speed isochronous YUY2 remains capped at
+3×1,024 bytes per microframe, about 13.3fps at 720p; MJPEG reduces that bandwidth need
+and previously reached about 25fps on this machine. These figures describe this tested
+camera path, not physical USB 3 throughput or compatibility with every USB device.
 
 ## Uninstall
 
@@ -143,4 +143,4 @@ only when that was the configuration previously in use. Remove corresponding
 - Do not use this as a replacement path for the legacy root hub, USB-only bus,
   or physical host-controller package.
 
-The initialization query supports the prior 64-, 104- and 132-byte responses and a 168-byte lifecycle response. The latest tail records hardware release start/completion counts, D0 entry/exit counts, power/stopping state, pending transactions/removal work and the user queue state. The query script displays unavailable lifecycle fields as blank for older drivers. Snapshots are approximate, and the normal user queue is purged during removal, so this interface cannot be used to poll a stack that is already stalled inside teardown. Earlier 2.0.0.17/132-byte observations are historical and are superseded by the 2.0.0.22 runtime evidence above.
+The initialization query supports the prior 64-, 104- and 132-byte responses and a 168-byte lifecycle response. The latest tail records hardware release start/completion counts, D0 entry/exit counts, power/stopping state, pending transactions/removal work and the user queue state. The query script displays unavailable lifecycle fields as blank for older drivers. Snapshots are approximate, and the normal user queue is purged during removal, so this interface cannot be used to poll a stack that is already stalled inside teardown. Earlier 2.0.0.17/132-byte and 2.0.0.22 observations are historical; current runtime evidence is recorded at the top of this document.

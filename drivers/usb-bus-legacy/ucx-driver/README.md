@@ -1,6 +1,6 @@
 # Virtual Camera UCX host controller
 
-Current machine evidence (2026-11-17): tree 1.0.0.11 and HCD 2.0.0.22 are bound. The controller and ROOT_HUB30 child report OK. The user-mode camera enumerates through this HCD and streams 1280×720 YUY2 and MJPEG; a 30fps MJPEG request delivered 60 frames at about 25fps. Application shutdown removes the camera node and drains pending HCD work without a Windows restart. The camera itself advertises USB 2.0; this result does not validate SuperSpeed. Source candidate 2.0.0.23 adds a SuperSpeed camera path and passes Release build/protocol checks, but has not been installed or runtime-tested.
+Current machine evidence (2026-11-18): tree 1.0.0.11 and HCD 2.0.0.28 are bound. The controller, ROOT_HUB30 child, and SuperSpeed camera node report OK. DirectShow captured 120 frames of 1280×720 YUY2 in about 3.97 seconds (about 30fps); the HCD pending-transaction count returned to zero after the camera app stopped. This validates the single-camera SuperSpeed isochronous path on the software virtual bus, not physical USB 3 throughput or general USB-device compatibility. Earlier USB 2.0 MJPEG capture reached about 25fps.
 
 This is an isolated KMDF + UCX 1.1 host-controller project. It targets the UCX 1.1
 DDI surface, pins KMDF 1.31, and is intended for Windows 10 version 2004
@@ -35,8 +35,8 @@ compatibility target is based on Microsoft's UCX versioning guidance.
 
 ## Limits and validation status
 
-This builds as a Release x64 driver and has passed the camera's tested USB 2.0 control,
-descriptor and isochronous capture path. It remains a partial replacement candidate:
+This builds as a Release x64 driver and has passed the camera's tested control,
+descriptor and isochronous capture paths at USB 2.0 and SuperSpeed. It remains a partial replacement candidate:
 the HCD maps legacy operations into frozen wire types 1–6, while the UVC handler still
 does not implement bulk data or the complete Microsoft OS feature-descriptor path.
 The reconstructed WDM source maps `IOCTL_INTERNAL_USB_CYCLE_PORT` to wire reset type 2.
@@ -58,7 +58,7 @@ The root-hub PDO enumerates after the bus stopped clearing the upper KMDF BusRel
 
 ## USB 3.0 SuperSpeed path
 
-The 2.0.0.23 source candidate adds an additive `IOCTL_PDO_ADD_SUPERSPEED`, reserves a
+The 2.0.0.28 source adds an additive `IOCTL_PDO_ADD_SUPERSPEED`, reserves a
 separate virtual slot on root-hub port 17, maps UCX's `UsbSuperSpeed` device speed, reports
 USB 3 port connect/reset/power state, and validates isochronous endpoint companion limits.
 The user-mode camera tries this FOSS-only add path first; the original `IOCTL_PDO_ADD` and
@@ -67,18 +67,18 @@ fall back to the existing USB 2.0 path.
 
 When SuperSpeed is selected, the camera emits a USB 3.0 device descriptor, BOS with the
 SuperSpeed capability, 1024-byte isochronous packets, and a companion descriptor capped at
-45,000 bytes per microframe. It exposes the same YUY2/MJPEG formats and advertises 30fps
+8,192 bytes per microframe. It exposes the same YUY2/MJPEG formats and advertises 30fps
 for 720p YUY2; raw 1280×720 YUY2 at 30fps requires about 55.3 MB/s. Microsoft documents
 that SuperSpeed isochronous packet limits come from the companion descriptor's
 `wBytesPerInterval`, while high-speed is capped at 3×1024 bytes per microframe:
 [Microsoft isochronous transfer guidance](https://learn.microsoft.com/windows-hardware/drivers/usbcon/transfer-data-to-isochronous-endpoints).
 
-This candidate has passed Release compilation and protocol-level checks for the device,
-BOS, configuration, endpoint companion, and UVC probe budget. It has not been installed
-or tested through Windows PnP, USBView/UsbTreeView, DirectShow capture, or reconnect. The
-test machine remains on HCD 2.0.0.22; do not treat SuperSpeed as runtime-verified until
-those stages pass. USB 2.0 YUY2 720p remains physically limited to about 13.3fps, while
-the already-tested MJPEG path reached about 25fps on this machine.
+Release compilation and protocol-level checks are supplemented by Windows PnP and
+DirectShow capture: 120 frames of 720p YUY2 were delivered in about 3.97 seconds. USB
+2.0 YUY2 720p remains limited to about 13.3fps by its 3×1,024-byte high-speed
+isochronous interval; the MJPEG path previously reached about 25fps on this machine.
+The SuperSpeed measurement is for this software virtual bus and is not a physical USB 3
+controller throughput benchmark.
 
 ## Removal and unload lifecycle
 
@@ -158,4 +158,4 @@ the controller and root-hub objects and enumerated its root-hub PDO. At that sta
 info callbacks succeeded, but USBHUB3 failed with Code 43 before the HCD control callback
 was observed. HCD 2.0.0.22 later passed root-hub startup and camera capture.
 
-The initialization query supports the prior 64-, 104- and 132-byte responses and a 168-byte lifecycle response. The latest tail records hardware release start/completion counts, D0 entry/exit counts, power/stopping state, pending transactions/removal work and the user queue state. The query script displays unavailable lifecycle fields as blank for older drivers. Snapshots are approximate, and the normal user queue is purged during removal, so this interface cannot be used to poll a stack that is already stalled inside teardown. Earlier 2.0.0.17/132-byte observations are historical and superseded by the 2.0.0.22 evidence at the top of this document.
+The initialization query supports the prior 64-, 104- and 132-byte responses and a 168-byte lifecycle response. The latest tail records hardware release start/completion counts, D0 entry/exit counts, power/stopping state, pending transactions/removal work and the user queue state. The query script displays unavailable lifecycle fields as blank for older drivers. Snapshots are approximate, and the normal user queue is purged during removal, so this interface cannot be used to poll a stack that is already stalled inside teardown. Earlier 2.0.0.17/132-byte and 2.0.0.22 observations are historical; current runtime evidence is recorded at the top of this document.

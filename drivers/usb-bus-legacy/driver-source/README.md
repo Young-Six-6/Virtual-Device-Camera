@@ -48,4 +48,4 @@ USB-tree role 创建的内部 Host Controller PDO 报告项目专用软件总线
 
 默认包面向当前应用的两个 `GUID_XUSB_VIRT_INTERFACE` 提供角色。更新/卸载后仍需确认没有额外旧的接口提供者，避免用户态枚举到未更新的驱动实例。部署脚本不会删除 Driver Store 中的旧包。
 
-不要把新 `.sys` 手工覆盖到旧 INF 或旧 catalog。当前测试机绑定 role-3 `1.0.0.11` 与 HCD `2.0.0.22`，控制器和根集线器均为 OK；应用创建的 UVC 摄像头可枚举，并通过 DirectShow 完成 YUY2/MJPEG 720p 抓帧。应用退出后摄像头 PDO 正常移除，系统无需重启。该验证覆盖当前摄像头数据路径，不代表所有 USB URB、卸载/重载和原版所有角色均已替代；实验 Host Controller/USB-tree 角色的剩余范围见本目录的 USB 3.0 与限制说明。实验包不能视为通用 USB 主控驱动。
+不要把新 `.sys` 手工覆盖到旧 INF 或旧 catalog。当前测试机绑定 role-3 `1.0.0.11` 与 HCD `2.0.0.28`，控制器和 USB 3 根集线器均为 OK；SuperSpeed UVC 摄像头通过 DirectShow 抓取 120 帧 720p YUY2，约 30fps。应用退出后摄像头 PDO 移除，HCD 挂起事务归零，无需重启 Windows。该验证覆盖当前单摄像头数据路径，不代表所有 USB URB、卸载/重载和原版所有角色均已替代；实验 Host Controller/USB-tree 角色的剩余范围见本目录的 USB 3.0 与限制说明。实验包不能视为通用 USB 主控驱动。
