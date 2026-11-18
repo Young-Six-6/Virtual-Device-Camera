@@ -1,6 +1,7 @@
 #pragma once
 #include <Windows.h>
 #include <cstdint>
+#include <array>
 #include <vector>
 #include "uvc_vcam.h"
 #include "../common/resolution.h"
@@ -42,6 +43,16 @@ class UvcDevice {
     size_t position_ = 0;
     uint8_t flip_ = 0;
     uint32_t frame_intervals_[2] = {333333, 666667};
+    uint32_t mjpeg_frame_intervals_[2] = {333333, 666667};
+    bool enable_yuy2_ = true;
+    bool enable_mjpeg_ = false;
+    uint8_t yuy2_format_index_ = 1;
+    uint8_t mjpeg_format_index_ = 2;
+    int requested_fps_ = 30;
+    std::array<ULONGLONG, 16> completed_frame_times_{};
+    size_t completed_frame_cursor_ = 0;
+    size_t completed_frame_count_ = 0;
+    double actual_fps_ = 0;
     int delay_ = 33;
     ULONGLONG next_frame_due_ = 0;
     StreamControl stream_;
@@ -62,6 +73,12 @@ public:
     bool set_resolution(Resolution size);
     Resolution resolution() const { return {frames[0].width, frames[0].height}; }
     std::vector<char> frame_copy() const { return pixels_; }
+    double actual_fps() const {
+        if (completed_frame_count_ < 2) return 0;
+        const size_t last = (completed_frame_cursor_ + completed_frame_times_.size() - 1) %
+            completed_frame_times_.size();
+        return GetTickCount64() - completed_frame_times_[last] > 2000 ? 0 : actual_fps_;
+    }
     void handle(usbtx_header_t& request, size_t payload_capacity);
 };
 }

@@ -5,7 +5,9 @@
 #include <sstream>
 #include "app_config.h"
 #include "control_server.h"
+#include "console_log.h"
 #include "runtime_controller.h"
+#include "tray_controller.h"
 #include "web_server.h"
 #include "../camera/camera_session.h"
 #include "../media/frame_source.h"
@@ -47,21 +49,39 @@ bool parse_resolution(std::string text, vcam::Resolution& size) {
 void wait_for_exit() {
     HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
     DWORD mode = 0;
-    if (!GetConsoleMode(input, &mode)) { WaitForSingleObject(application_stop.get(), INFINITE); return; }
+    const bool has_console_input = GetConsoleMode(input, &mode) != FALSE;
     HANDLE events[] = {application_stop.get(), input};
-    while (WaitForMultipleObjects(2, events, FALSE, INFINITE) == WAIT_OBJECT_0+1) {
-        INPUT_RECORD record = {};
-        DWORD count = 0;
-        if (!ReadConsoleInputW(input, &record, 1, &count)) break;
-        if (record.EventType == KEY_EVENT && record.Event.KeyEvent.bKeyDown &&
-            record.Event.KeyEvent.wVirtualKeyCode == VK_RETURN) break;
+    const DWORD handle_count = has_console_input ? 2 : 1;
+    for (;;) {
+        const DWORD result = MsgWaitForMultipleObjects(handle_count, events, FALSE, INFINITE, QS_ALLINPUT);
+        if (result == WAIT_OBJECT_0) break;
+        if (has_console_input && result == WAIT_OBJECT_0 + 1) {
+            INPUT_RECORD record = {};
+            DWORD count = 0;
+            if (!ReadConsoleInputW(input, &record, 1, &count)) break;
+            if (record.EventType == KEY_EVENT && record.Event.KeyEvent.bKeyDown &&
+                record.Event.KeyEvent.wVirtualKeyCode == VK_RETURN) break;
+            continue;
+        }
+        if (result == WAIT_OBJECT_0 + handle_count) {
+            MSG message{};
+            while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+                if (message.message == WM_QUIT) { SetEvent(application_stop.get()); break; }
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            continue;
+        }
+        break;
     }
 }
 }
 
 int wmain(int argc, wchar_t** argv) {
     SetConsoleOutputCP(CP_UTF8);
+    vcam::ConsoleLogCapture log_capture;
     try {
+        if (!log_capture.start()) throw std::runtime_error("Unable to initialize Web UI log capture");
         executable_directory();
         if (!application_stop) throw std::runtime_error("Unable to create shutdown event");
         const std::filesystem::path config_path = std::filesystem::current_path() / "camera.ini";
@@ -93,7 +113,12 @@ int wmain(int argc, wchar_t** argv) {
         if (files.size() > 2) throw std::invalid_argument("At most two video inputs are supported");
         if (!vcam::valid_pipe_path(settings.rgb_pipe) || !vcam::valid_pipe_path(settings.control_pipe) ||
             settings.rgb_pipe == settings.control_pipe) throw std::invalid_argument("Invalid or duplicate pipe name");
-        if (override_size) settings.cameras[0] = settings.cameras[1] = size;
+        if (override_size) {
+            settings.cameras[0].resolution = size;
+            settings.cameras[1].resolution = size;
+        }
+        if (!settings.camera_name_configured[0])
+            settings.cameras[0].name = files.empty() ? "Pipe HD Camera 1" : "MP4 HD Camera 1";
         using Source = std::unique_ptr<frame_source, decltype(&frame_source_destroy)>;
         using Camera = std::unique_ptr<void, decltype(&vcam_destroy)>;
         Source source1(files.empty() ? frame_source_create_pipe(settings.rgb_pipe.c_str()) : frame_source_create_file(files[0].c_str()), frame_source_destroy);
@@ -102,17 +127,21 @@ int wmain(int argc, wchar_t** argv) {
         if (files.empty() && !frame_source_start_pipe_listener(source1.get(), settings.rgb_pipe_access))
             throw std::runtime_error("Unable to start RGB pipe");
         auto create = [&](frame_source* source, int number) {
+            const auto& camera_settings = settings.cameras[number - 1];
             uvc_vcam_t config{};
-            config.pid = number == 1 ? 0xcc10 : 0xcc11;
-            config.vid = number == 1 ? 0xbb10 : 0xbb11;
-            config.manu_fact = "Fanxiushu";
-            config.product = number == 1 ? (files.empty() ? "Pipe HD Camera 1" : "MP4 HD Camera 1") : "MP4 HD Camera 2";
+            config.pid = camera_settings.pid;
+            config.vid = camera_settings.vid;
+            config.manu_fact = camera_settings.manufacturer.c_str();
+            config.product = camera_settings.name.c_str();
             config.frame_callback = frame_source_callback;
             config.param = source;
             config.request_stop = frame_source_interrupt;
             config.resume = frame_source_resume;
-            config.width = settings.cameras[number - 1].width;
-            config.height = settings.cameras[number - 1].height;
+            config.width = camera_settings.resolution.width;
+            config.height = camera_settings.resolution.height;
+            config.fps = camera_settings.fps;
+            config.enable_yuy2 = camera_settings.yuy2;
+            config.enable_mjpeg = camera_settings.mjpeg;
             return Camera(vcam_create_with_mjpeg(&config, frame_source_encode_mjpeg), vcam_destroy);
         };
         Camera camera1 = create(source1.get(), 1);
@@ -130,15 +159,22 @@ int wmain(int argc, wchar_t** argv) {
         if (!server.start(settings.control_pipe, [&router](const std::string& command) {
             return router.execute(command);
         }, settings.control_pipe_access)) throw std::runtime_error("Unable to start camera control pipe");
+        vcam::TrayController tray(application_stop.get());
+        if (!tray.initialize()) throw std::runtime_error("Unable to initialize the system tray controller");
         vcam::RuntimeController runtime(settings, config_path.u8string(), source1.get(), camera1.get(), camera2.get(), server);
         vcam::WebServer web;
         const std::string token = vcam::create_web_token();
         if (!web.start(static_cast<unsigned short>(settings.web_port), token,
             [&runtime, &web] { return runtime.status_json(web.port()); },
             [&runtime](int camera) { return runtime.frame(camera); },
-            [&runtime](const vcam::WebUpdate& update, std::string& error) { return runtime.apply(update, error); }))
+            [&runtime](const vcam::WebUpdate& update, std::string& error) { return runtime.apply(update, error); },
+            [&runtime] { return runtime.theme(); },
+            [&log_capture] { return log_capture.tail(); },
+            [&tray] { return tray.hidden(); },
+            [&tray](bool hidden) { return tray.set_hidden(hidden); }))
             throw std::runtime_error("Unable to start local Web UI; check camera.ini web_port");
         SetConsoleCtrlHandler(console_signal, TRUE);
+        log_capture.set_secret(token);
         printf("Control pipe: %s\n", settings.control_pipe.c_str());
         printf("Web UI: http://127.0.0.1:%u/#%s\n", settings.web_port, token.c_str());
         printf("Press Enter or Ctrl+C to stop.\n");

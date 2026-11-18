@@ -29,6 +29,8 @@
     <ClInclude Include="src\app\app_config.h"><Filter>Application</Filter></ClInclude>
     <ClInclude Include="src\app\runtime_controller.h"><Filter>Application</Filter></ClInclude>
     <ClInclude Include="src\app\web_server.h"><Filter>Application</Filter></ClInclude>
+    <ClInclude Include="src\app\console_log.h"><Filter>Application</Filter></ClInclude>
+    <ClInclude Include="src\app\tray_controller.h"><Filter>Application</Filter></ClInclude>
     <ClInclude Include="src\common\win_handle.h"><Filter>Common</Filter></ClInclude>
     <ClInclude Include="src\common\resolution.h"><Filter>Common</Filter></ClInclude>
     <ClInclude Include="src\common\pipe_io.h"><Filter>Common</Filter></ClInclude>

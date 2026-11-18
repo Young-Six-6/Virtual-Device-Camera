@@ -1,5 +1,6 @@
 #pragma once
 #include "uvc_device.h"
+#include "../common/camera_settings.h"
 #include "../usb/transport.h"
 #include "../common/win_handle.h"
 #include <atomic>
@@ -18,6 +19,7 @@ struct CameraSessionStatus {
     Resolution size;
     bool running = false;
     std::string usb_mode = "disconnected";
+    double actual_fps = 0;
 };
 
 class CameraSession {
@@ -25,6 +27,7 @@ class CameraSession {
     mutable std::mutex frame_mutex_;
     std::string manufacturer_, product_;
     uvc_vcam_t config_;
+    CameraSettings settings_;
     MJPEG_FRAME_CALLBACK mjpeg_callback_ = nullptr;
     Resolution initial_size_;
     std::unique_ptr<UvcDevice> device_;
@@ -43,6 +46,7 @@ public:
     ~CameraSession();
     bool start();
     bool resize(Resolution, std::string& error);
+    bool reconfigure(const CameraSettings&, std::string& error);
     CameraSessionStatus status_snapshot() const;
     Resolution resolution() const;
     CameraFrame snapshot() const;

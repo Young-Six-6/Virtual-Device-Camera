@@ -2,6 +2,17 @@
 #include <cstdio>
 #include <stdexcept>
 
+namespace {
+bool valid_usb_text(const std::string& value) {
+    if (value.empty() || value.size() > 504 || value.find('\0') != std::string::npos ||
+        value.find('\r') != std::string::npos || value.find('\n') != std::string::npos)
+        return false;
+    const int characters = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        value.data(), static_cast<int>(value.size()), nullptr, 0);
+    return characters > 0 && characters <= 126;
+}
+}
+
 namespace vcam {
 CameraSession::CameraSession(const uvc_vcam_t& config, Resolution size, std::unique_ptr<UsbTransport> transport,
                              MJPEG_FRAME_CALLBACK mjpeg_callback)
@@ -13,6 +24,14 @@ CameraSession::CameraSession(const uvc_vcam_t& config, Resolution size, std::uni
     config_.manu_fact = manufacturer_.c_str();
     config_.product = product_.c_str();
     initial_size_ = size;
+    settings_.resolution = size;
+    settings_.fps = config.fps;
+    settings_.vid = static_cast<uint16_t>(config.vid);
+    settings_.pid = static_cast<uint16_t>(config.pid);
+    settings_.manufacturer = manufacturer_;
+    settings_.name = product_;
+    settings_.yuy2 = config.enable_yuy2;
+    settings_.mjpeg = config.enable_mjpeg && mjpeg_callback_ != nullptr;
     char id[64] = {};
     sprintf_s(id, "usb\\vid_%04x&pid_%04x", config.vid, config.pid);
     identity_ = {id, id, "USB\\DevClass_00&SubClass_00\nUSB\\DevClass_00\nUSB\\COMPOSITE"};
@@ -68,6 +87,7 @@ CameraSessionStatus CameraSession::status_snapshot() const {
     CameraSessionStatus result;
     result.size = device_ ? device_->resolution() : Resolution{};
     result.running = running_.load();
+    result.actual_fps = device_ ? device_->actual_fps() : 0;
     if (plugged_) result.usb_mode = transport_->is_superspeed() ? "superspeed" : "high-speed";
     return result;
 }
@@ -83,30 +103,89 @@ CameraFrame CameraSession::snapshot() const {
 }
 bool CameraSession::resize(Resolution size, std::string& error) {
     if (!valid_output(size)) { error = "invalid-resolution"; return false; }
+    CameraSettings replacement;
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_);
+        replacement = settings_;
+    }
+    replacement.resolution = size;
+    return reconfigure(replacement, error);
+}
+bool CameraSession::reconfigure(const CameraSettings& replacement, std::string& error) {
+    if (!valid_output(replacement.resolution) || replacement.fps < 1 || replacement.fps > 60 ||
+        replacement.vid == 0 || replacement.pid == 0 || (!replacement.yuy2 && !replacement.mjpeg) ||
+        !valid_usb_text(replacement.manufacturer) || !valid_usb_text(replacement.name)) {
+        error = "invalid-settings";
+        return false;
+    }
     std::lock_guard<std::mutex> lock(lifecycle_);
     if (!plugged_ || !running_) { error = "camera-not-running"; return false; }
-    {
-        std::lock_guard<std::mutex> frame_lock(frame_mutex_);
-        if (device_->resolution() == size) return true;
-    }
-    // Allocate descriptors and frame storage before disrupting the active device.
-    auto replacement = std::make_unique<UvcDevice>(config_, size, mjpeg_callback_, transport_->is_superspeed());
+    if (settings_.resolution == replacement.resolution && settings_.fps == replacement.fps &&
+        settings_.vid == replacement.vid && settings_.pid == replacement.pid &&
+        settings_.manufacturer == replacement.manufacturer && settings_.name == replacement.name &&
+        settings_.yuy2 == replacement.yuy2 && settings_.mjpeg == replacement.mjpeg) return true;
+
+    uvc_vcam_t nextConfig = config_;
+    nextConfig.vid = replacement.vid;
+    nextConfig.pid = replacement.pid;
+    nextConfig.manu_fact = replacement.manufacturer.c_str();
+    nextConfig.product = replacement.name.c_str();
+    nextConfig.fps = replacement.fps;
+    nextConfig.enable_yuy2 = replacement.yuy2;
+    nextConfig.enable_mjpeg = replacement.mjpeg;
+    auto nextDevice = std::make_unique<UvcDevice>(nextConfig, replacement.resolution,
+        mjpeg_callback_, transport_->is_superspeed());
+    char id[64] = {};
+    sprintf_s(id, "usb\\vid_%04x&pid_%04x", replacement.vid, replacement.pid);
+    DeviceIdentity nextIdentity{id, id, "USB\\DevClass_00&SubClass_00\nUSB\\DevClass_00\nUSB\\COMPOSITE"};
+
+    const CameraSettings previousSettings = settings_;
+    const DeviceIdentity previousIdentity = identity_;
+    const std::string previousManufacturer = manufacturer_;
+    const std::string previousProduct = product_;
+    auto previousDevice = std::move(device_);
     stop_worker();
     transport_->resume();
     if (!transport_->unplug()) {
-        error = "unplug-failed-camera-stopped";
+        device_ = std::move(previousDevice);
+        const bool restored = start_worker();
+        error = restored ? "unplug-failed-restored-previous" : "unplug-failed-camera-stopped";
         return false;
     }
     plugged_ = false;
-    device_.swap(replacement);
+    manufacturer_ = replacement.manufacturer;
+    product_ = replacement.name;
+    config_.vid = replacement.vid;
+    config_.pid = replacement.pid;
+    config_.manu_fact = manufacturer_.c_str();
+    config_.product = product_.c_str();
+    config_.fps = replacement.fps;
+    config_.enable_yuy2 = replacement.yuy2;
+    config_.enable_mjpeg = replacement.mjpeg;
+    settings_ = replacement;
+    identity_ = std::move(nextIdentity);
+    device_ = std::move(nextDevice);
     plugged_ = transport_->plug(identity_);
     if (plugged_ && start_worker()) return true;
+
     transport_->resume();
     if (plugged_) transport_->unplug();
-    device_.swap(replacement);
+    plugged_ = false;
+    manufacturer_ = previousManufacturer;
+    product_ = previousProduct;
+    config_.vid = previousSettings.vid;
+    config_.pid = previousSettings.pid;
+    config_.manu_fact = manufacturer_.c_str();
+    config_.product = product_.c_str();
+    config_.fps = previousSettings.fps;
+    config_.enable_yuy2 = previousSettings.yuy2;
+    config_.enable_mjpeg = previousSettings.mjpeg;
+    settings_ = previousSettings;
+    identity_ = previousIdentity;
+    device_ = std::move(previousDevice);
     plugged_ = transport_->plug(identity_);
     const bool restored = plugged_ && start_worker();
-    error = restored ? "resize-failed-restored-previous" : "resize-and-rollback-failed";
+    error = restored ? "reconfigure-failed-restored-previous" : "reconfigure-and-rollback-failed";
     return false;
 }
 void CameraSession::run() noexcept {

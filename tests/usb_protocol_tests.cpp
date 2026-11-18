@@ -492,6 +492,71 @@ void mjpeg_protocol_tests() {
         "MJPEG end-of-frame flag was not set on the final packet");
 }
 
+void selected_format_tests() {
+    for (const bool mjpeg_only : {false, true}) {
+        auto config = configuration();
+        config.fps = 24;
+        config.enable_yuy2 = !mjpeg_only;
+        config.enable_mjpeg = mjpeg_only;
+        vcam::UvcDevice device(config, {4,2}, mjpeg_only ? mjpeg_fixture : nullptr);
+        auto descriptors = descriptor();
+        device.handle(descriptors.header(), descriptors.capacity);
+        require(descriptors.header().result == 0 && descriptors.intact(),
+            "Single-format UVC descriptor request failed");
+        const auto* bytes = reinterpret_cast<const unsigned char*>(descriptors.header().data);
+        const size_t length = static_cast<size_t>(descriptors.header().data_length);
+        int advertised_formats = 0;
+        bool found_expected = false, found_disabled = false, found_header = false;
+        size_t format_begin = 0, format_end = 0;
+        for (size_t position = 0; position + 2 <= length;) {
+            const size_t item_length = bytes[position];
+            require(item_length >= 2 && position + item_length <= length,
+                "Single-format descriptor chain is malformed");
+            if (item_length >= 3 && bytes[position + 1] == 0x24 && bytes[position + 2] == 0x01 &&
+                item_length == UVC_DT_INPUT_HEADER_SIZE(1,1)) {
+                const auto* header = reinterpret_cast<const uvc_input_header_descriptor*>(bytes + position);
+                advertised_formats = header->bNumFormats;
+                found_header = true;
+                format_begin = position + item_length;
+                format_end = position + header->wTotalLength;
+            }
+            position += item_length;
+        }
+        require(found_header && format_end <= length && format_begin <= format_end,
+            "Single-format stream header has an invalid total length");
+        for (size_t position = format_begin; position + 2 <= format_end;) {
+            const size_t item_length = bytes[position];
+            require(item_length >= 2 && position + item_length <= format_end,
+                "Single-format video-stream section is malformed");
+            if (item_length >= 3 && bytes[position + 1] == 0x24 && bytes[position + 2] == (mjpeg_only ? 0x06 : 0x04)) {
+                found_expected = true;
+                if (mjpeg_only)
+                    require(reinterpret_cast<const uvc_format_mjpeg*>(bytes + position)->bFormatIndex == 1,
+                        "MJPEG-only format index was not compacted to one");
+                else
+                    require(reinterpret_cast<const uvc_format_uncompressed*>(bytes + position)->bFormatIndex == 1,
+                        "YUY2-only format index changed");
+            }
+            if (item_length >= 3 && bytes[position + 1] == 0x24 && bytes[position + 2] == (mjpeg_only ? 0x04 : 0x06))
+                found_disabled = true;
+            position += item_length;
+        }
+        require(found_header && advertised_formats == 1 && found_expected && !found_disabled,
+            "The disabled UVC format remained advertised");
+
+        Packet probe(sizeof(vcam::StreamControl));
+        probe.header().type = 2;
+        probe.header().vendor.index = 1;
+        probe.header().vendor.value = 0x0100;
+        probe.header().vendor.request = UVC_GET_DEF;
+        device.handle(probe.header(), probe.capacity);
+        vcam::StreamControl stream{};
+        std::memcpy(&stream, probe.header().data, sizeof(stream));
+        require(probe.header().result == 0 && stream.format == 1 && stream.interval == 416666,
+            "Single-format default stream negotiation did not honor the configured frame rate");
+    }
+}
+
 void superspeed_protocol_tests() {
     vcam::UvcDevice device(configuration(), {1280,720}, nullptr, true);
 
@@ -570,6 +635,7 @@ struct FakeState {
     bool stopped = false, plugged = false, destroyed = false;
     int plugs = 0, unplugs = 0, fail_plug = -1, cycles = 0;
     bool cancel_next_end = false, fail_next_end = false;
+    std::string device_id;
     std::deque<Packet> requests, responses;
 };
 class FakeTransport final : public vcam::UsbTransport {
@@ -580,9 +646,10 @@ public:
     explicit FakeTransport(std::shared_ptr<FakeState> state, bool super_speed = false)
         : state_(std::move(state)), super_speed_(super_speed) {}
     ~FakeTransport() override { std::lock_guard<std::mutex> lock(state_->mutex); state_->destroyed = true; }
-    bool plug(const vcam::DeviceIdentity&) override {
+    bool plug(const vcam::DeviceIdentity& identity) override {
         std::lock_guard<std::mutex> lock(state_->mutex);
         if (++state_->plugs == state_->fail_plug) return false;
+        state_->device_id = identity.device_id;
         state_->plugged = true; return true;
     }
     bool unplug() override {
@@ -652,6 +719,27 @@ void lifecycle_tests() {
                 require(session.resize(size, error), "Hot resolution failed");
                 auto response = round_trip(state, descriptor());
                 require(descriptor_size(response.header()) == size, "Re-enumeration descriptor mismatch");
+            }
+            vcam::CameraSettings changed;
+            changed.resolution = {640,480};
+            changed.fps = 24;
+            changed.vid = 0x1234;
+            changed.pid = 0x5678;
+            changed.manufacturer = "Updated vendor";
+            changed.name = "Updated camera";
+            changed.yuy2 = true;
+            changed.mjpeg = false;
+            int previous_plugs = 0, previous_unplugs = 0;
+            { std::lock_guard<std::mutex> lock(state->mutex); previous_plugs = state->plugs; previous_unplugs = state->unplugs; }
+            std::string reconfigure_error;
+            require(session.reconfigure(changed, reconfigure_error) && session.running() &&
+                    session.resolution() == vcam::Resolution{640,480},
+                "Hot device identity/format/FPS update failed");
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                require(state->plugs == previous_plugs + 1 && state->unplugs == previous_unplugs + 1 &&
+                        state->device_id.find("vid_1234&pid_5678") != std::string::npos,
+                    "Hot reconfiguration did not only unplug/re-enumerate the virtual camera");
             }
             { std::lock_guard<std::mutex> lock(state->mutex); state->fail_plug = state->plugs+1; }
             std::string error;
@@ -768,18 +856,29 @@ int main(int argc, char** argv) {
         if (argc == 4 && std::string(argv[1]) == "--web-fixture") {
             const auto port = static_cast<unsigned short>(std::stoi(argv[2]));
             vcam::WebServer web;
+            bool hidden = false;
             require(web.start(port, argv[3], [] { return std::string("{\"fixture\":true}"); },
                 [](int camera) -> std::optional<vcam::CameraFrame> {
                     if (camera != 1) return std::nullopt;
                     return vcam::CameraFrame{{2,1}, {char(16), char(128), char(235), char(128)}};
                 }, [](const vcam::WebUpdate& update, std::string& error) {
-                    if (update.camera != 1 || update.resolution != vcam::Resolution{640,480} ||
-                        update.control_access != vcam::PipeAccess::everyone) {
+                    if (update.camera != 1 || update.settings.resolution != vcam::Resolution{640,480} ||
+                        update.control_access != vcam::PipeAccess::everyone || !update.has_camera_settings ||
+                        update.settings.fps != 24 || update.settings.vid != 0x1234 ||
+                        update.settings.pid != 0xabcd || update.settings.manufacturer != "测试厂商" ||
+                        update.settings.name != "测试摄像头" || !update.settings.yuy2 || update.settings.mjpeg ||
+                        !update.has_theme || update.custom_css != "body { color: red; }\n" ||
+                        update.custom_js != "window.testTheme = true;\n") {
                         error = "fixture-rejected";
                         return false;
                     }
                     return true;
-                }), "Web UI fixture start failed");
+                }, [] { return std::pair<std::string, std::string>{
+                    "body { color: blue; } .fixture::after { content: \"</style>\"; }",
+                    "window.fixtureTheme = true; const closeTag = \"</script>\";"}; },
+                [] { return std::string("fixture log line\n"); }, [&] { return hidden; },
+                [&](bool value) { hidden = value; return true; }),
+                "Web UI fixture start failed");
             puts("READY"); fflush(stdout);
             (void)getchar();
             return 0;
@@ -810,15 +909,30 @@ int main(int argc, char** argv) {
             const auto preset = directory / "default_res.txt";
             { std::ofstream output(preset); output << "720\n"; }
             auto settings = vcam::load_app_settings(config.u8string());
-            require(settings.cameras[0] == vcam::Resolution{1280,720}, "Default resolution preset was not loaded");
+            require(settings.cameras[0].resolution == vcam::Resolution{1280,720}, "Default resolution preset was not loaded");
             require(settings.rgb_pipe_access == vcam::PipeAccess::owner &&
                     settings.control_pipe_access == vcam::PipeAccess::everyone,
                 "Default pipe access scopes were not applied independently");
-            settings.cameras[0] = {1024,768};
+            settings.cameras[0].resolution = {1024,768};
+            settings.cameras[0].fps = 24;
+            settings.cameras[0].vid = 0x1234;
+            settings.cameras[0].pid = 0xabcd;
+            settings.cameras[0].manufacturer = "测试厂商";
+            settings.cameras[0].name = "自定义摄像头";
+            settings.camera_name_configured[0] = true;
+            settings.cameras[0].yuy2 = false;
+            settings.custom_css = "body { color: red; }\n";
+            settings.custom_js = "window.testTheme = true;\n";
             std::string error;
             require(vcam::save_app_settings(config.u8string(), settings, error), "Persistent settings save failed");
             auto restored = vcam::load_app_settings(config.u8string());
-            require(restored.cameras[0] == vcam::Resolution{1024,768} && restored.rgb_pipe == settings.rgb_pipe &&
+            require(restored.cameras[0].resolution == vcam::Resolution{1024,768} &&
+                    restored.cameras[0].fps == 24 && restored.cameras[0].vid == 0x1234 &&
+                    restored.cameras[0].pid == 0xabcd && restored.cameras[0].manufacturer == "测试厂商" &&
+                    restored.cameras[0].name == "自定义摄像头" && !restored.cameras[0].yuy2 &&
+                    restored.camera_name_configured[0] &&
+                    restored.cameras[0].mjpeg && restored.custom_css == settings.custom_css &&
+                    restored.custom_js == settings.custom_js && restored.rgb_pipe == settings.rgb_pipe &&
                     restored.rgb_pipe_access == vcam::PipeAccess::owner &&
                     restored.control_pipe_access == vcam::PipeAccess::everyone,
                 "Persistent settings did not round-trip");
@@ -838,12 +952,13 @@ int main(int argc, char** argv) {
         iso_reply_validation_tests();
         protocol_tests();
         mjpeg_protocol_tests();
+        selected_format_tests();
         superspeed_protocol_tests();
         lifecycle_tests();
         cancellation_test();
         GetProcessHandleCount(GetCurrentProcess(), &after);
         require(after <= before+4, "Camera/control lifecycle leaked Windows handles");
-        puts("PASS: USB 2.0/3.0 YUY2/MJPEG descriptors and negotiation, ISO frame reassembly, wire types 2/4/5/6, 20000 malformed requests, lifecycle/replug rollback, and real control pipe.");
+        puts("PASS: USB 2.0/3.0 YUY2/MJPEG descriptors and negotiation, selectable single formats and FPS, ISO frame reassembly, wire types 2/4/5/6, 20000 malformed requests, hot re-enumeration/rollback, and real control pipe.");
         return 0;
     }
     catch (const std::exception& error) { fprintf(stderr, "FAIL: %s\n", error.what()); return 1; }

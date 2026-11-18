@@ -39,6 +39,9 @@ struct uvc_vcam_t {
     int height = 0;
     void (*request_stop)(void*) = nullptr;
     void (*resume)(void*) = nullptr;
+    int fps = 30;  // Preferred default frame rate advertised by the UVC device.
+    bool enable_yuy2 = true;
+    bool enable_mjpeg = true;
 };
 
 void* vcam_create(uvc_vcam_t* uvc);
