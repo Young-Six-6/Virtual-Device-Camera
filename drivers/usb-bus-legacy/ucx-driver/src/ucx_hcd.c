@@ -52,7 +52,7 @@ typedef struct _VHCD_SLOT {
     BOOLEAN Allocated;
     BOOLEAN Present;
     BOOLEAN Enabled;
-    BOOLEAN SuperSpeed;
+    USB_DEVICE_SPEED DeviceSpeed;
     BOOLEAN Suspended;
     BOOLEAN SuspendChanged;
     BOOLEAN ConnectionChanged;
@@ -81,7 +81,7 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VHCD_FILE_CONTEXT, VhcdGetFileContext)
 typedef struct _VHCD_USBDEVICE_CONTEXT {
     ULONG SlotIndex;
     ULONGLONG Generation;
-    BOOLEAN SuperSpeed;
+    USB_DEVICE_SPEED DeviceSpeed;
 } VHCD_USBDEVICE_CONTEXT, *PVHCD_USBDEVICE_CONTEXT;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VHCD_USBDEVICE_CONTEXT, VhcdGetUsbDeviceContext)
 
@@ -537,8 +537,26 @@ static VOID VhcdEndpointAbortComplete(WDFQUEUE Queue, WDFCONTEXT Context)
 NTSTATUS VhcdEvtUsbDeviceDefaultEndpointAdd(UCXCONTROLLER Controller, UCXUSBDEVICE UsbDevice, ULONG MaxPacketSize, PUCXENDPOINT_INIT EndpointInit)
 {
     UCXENDPOINT endpoint;
+    PVHCD_USBDEVICE_CONTEXT deviceContext = VhcdGetUsbDeviceContext(UsbDevice);
     UNREFERENCED_PARAMETER(Controller);
-    UNREFERENCED_PARAMETER(MaxPacketSize);
+    if (deviceContext == NULL) return STATUS_INVALID_DEVICE_STATE;
+    switch (deviceContext->DeviceSpeed) {
+    case UsbLowSpeed:
+        if (MaxPacketSize != 8) return STATUS_INVALID_PARAMETER;
+        break;
+    case UsbFullSpeed:
+        if (MaxPacketSize != 8 && MaxPacketSize != 16 && MaxPacketSize != 32 && MaxPacketSize != 64)
+            return STATUS_INVALID_PARAMETER;
+        break;
+    case UsbHighSpeed:
+        if (MaxPacketSize != 64) return STATUS_INVALID_PARAMETER;
+        break;
+    case UsbSuperSpeed:
+        if (MaxPacketSize != 512) return STATUS_INVALID_PARAMETER;
+        break;
+    default:
+        return STATUS_NOT_SUPPORTED;
+    }
     return VhcdCreateEndpoint(UsbDevice, EndpointInit, TRUE, 0, UsbdPipeTypeControl, 0, &endpoint);
 }
 NTSTATUS VhcdEvtUsbDeviceEndpointAdd(UCXCONTROLLER Controller, UCXUSBDEVICE UsbDevice, PUSB_ENDPOINT_DESCRIPTOR Descriptor, ULONG DescriptorLength, PUSB_SUPERSPEED_ENDPOINT_COMPANION_DESCRIPTOR Companion, PUCXENDPOINT_INIT EndpointInit)
@@ -546,14 +564,20 @@ NTSTATUS VhcdEvtUsbDeviceEndpointAdd(UCXCONTROLLER Controller, UCXUSBDEVICE UsbD
     UCXENDPOINT endpoint;
     PVHCD_USBDEVICE_CONTEXT deviceContext;
     ULONG maxIsoPacketBytes = 0;
+    ULONG packetSize;
+    ULONG encodedTransactions;
     UCHAR pipeType;
-    if (Descriptor == NULL || DescriptorLength < sizeof(*Descriptor) || Descriptor->bLength < sizeof(*Descriptor))
+    if (Descriptor == NULL || DescriptorLength < sizeof(*Descriptor) ||
+        Descriptor->bLength < sizeof(*Descriptor) || Descriptor->bLength > DescriptorLength ||
+        Descriptor->bDescriptorType != USB_ENDPOINT_DESCRIPTOR_TYPE)
         return STATUS_INVALID_PARAMETER;
     UNREFERENCED_PARAMETER(Controller);
     pipeType = (UCHAR)(Descriptor->bmAttributes & 0x03);
     deviceContext = VhcdGetUsbDeviceContext(UsbDevice);
-    if (deviceContext->SuperSpeed) {
-        ULONG packetSize = Descriptor->wMaxPacketSize & 0x07ff;
+    if (deviceContext == NULL) return STATUS_INVALID_DEVICE_STATE;
+    packetSize = Descriptor->wMaxPacketSize & 0x07ff;
+    encodedTransactions = (Descriptor->wMaxPacketSize >> 11) & 0x03;
+    if (deviceContext->DeviceSpeed == UsbSuperSpeed) {
         ULONG maxBurst;
         ULONG mult;
         ULONG theoreticalMaximum;
@@ -588,12 +612,46 @@ NTSTATUS VhcdEvtUsbDeviceEndpointAdd(UCXCONTROLLER Controller, UCXUSBDEVICE UsbD
         default:
             return STATUS_NOT_SUPPORTED;
         }
-    } else if (pipeType == UsbdPipeTypeIsochronous) {
-        ULONG packetSize = Descriptor->wMaxPacketSize & 0x07ff;
-        ULONG transactions = (Descriptor->wMaxPacketSize >> 11) & 0x03;
-        if (packetSize == 0 || packetSize > 1024 || transactions > 2)
+    } else {
+        if ((Descriptor->wMaxPacketSize & 0xe000) != 0 || packetSize == 0)
             return STATUS_INVALID_PARAMETER;
-        maxIsoPacketBytes = packetSize * (transactions + 1);
+        switch (deviceContext->DeviceSpeed) {
+        case UsbLowSpeed:
+            if (pipeType != UsbdPipeTypeInterrupt || packetSize > 8 || encodedTransactions != 0 ||
+                Descriptor->bInterval < 10)
+                return STATUS_INVALID_PARAMETER;
+            break;
+        case UsbFullSpeed:
+            if (encodedTransactions != 0) return STATUS_INVALID_PARAMETER;
+            if (pipeType == UsbdPipeTypeBulk) {
+                if (packetSize != 8 && packetSize != 16 && packetSize != 32 && packetSize != 64)
+                    return STATUS_INVALID_PARAMETER;
+            } else if (pipeType == UsbdPipeTypeInterrupt) {
+                if (packetSize > 64 || Descriptor->bInterval == 0) return STATUS_INVALID_PARAMETER;
+            } else if (pipeType == UsbdPipeTypeIsochronous) {
+                if (packetSize > 1023 || Descriptor->bInterval == 0 || Descriptor->bInterval > 16)
+                    return STATUS_INVALID_PARAMETER;
+                maxIsoPacketBytes = packetSize;
+            } else {
+                return STATUS_NOT_SUPPORTED;
+            }
+            break;
+        case UsbHighSpeed:
+            if (pipeType == UsbdPipeTypeBulk) {
+                if (packetSize != 512 || encodedTransactions != 0) return STATUS_INVALID_PARAMETER;
+            } else if (pipeType == UsbdPipeTypeInterrupt || pipeType == UsbdPipeTypeIsochronous) {
+                if (packetSize > 1024 || encodedTransactions > 2 ||
+                    Descriptor->bInterval == 0 || Descriptor->bInterval > 16)
+                    return STATUS_INVALID_PARAMETER;
+                if (pipeType == UsbdPipeTypeIsochronous)
+                    maxIsoPacketBytes = packetSize * (encodedTransactions + 1);
+            } else {
+                return STATUS_NOT_SUPPORTED;
+            }
+            break;
+        default:
+            return STATUS_NOT_SUPPORTED;
+        }
     }
     return VhcdCreateEndpoint(UsbDevice, EndpointInit, FALSE, Descriptor->bEndpointAddress,
         pipeType, maxIsoPacketBytes, &endpoint);
@@ -614,13 +672,15 @@ NTSTATUS VhcdEvtControllerUsbDeviceAdd(UCXCONTROLLER Controller, PUCXUSBDEVICE_I
         portNumber >= VHCD_USB30_FIRST_PORT_NUMBER &&
         portNumber < VHCD_USB30_FIRST_PORT_NUMBER + VHCD_MAX_USB30_PORTS)
         slotIndex = VHCD_USB30_FIRST_SLOT_INDEX + portNumber - VHCD_USB30_FIRST_PORT_NUMBER;
-    else if (portNumber > 0 && portNumber <= VHCD_MAX_PORTS && DeviceInfo->DeviceSpeed == UsbHighSpeed)
+    else if (portNumber > 0 && portNumber <= VHCD_MAX_PORTS &&
+             (DeviceInfo->DeviceSpeed == UsbLowSpeed || DeviceInfo->DeviceSpeed == UsbFullSpeed ||
+              DeviceInfo->DeviceSpeed == UsbHighSpeed))
         slotIndex = portNumber - 1;
     else
         return STATUS_NOT_SUPPORTED;
     WdfSpinLockAcquire(gSlotLock);
     if (gStopping || !gSlots[slotIndex].Allocated || !gSlots[slotIndex].Present ||
-        gSlots[slotIndex].SuperSpeed != (DeviceInfo->DeviceSpeed == UsbSuperSpeed) ||
+        gSlots[slotIndex].DeviceSpeed != DeviceInfo->DeviceSpeed ||
         VhcdSlotPowerOff((LONG)slotIndex)) {
         WdfSpinLockRelease(gSlotLock);
         return STATUS_DEVICE_DOES_NOT_EXIST;
@@ -637,7 +697,7 @@ NTSTATUS VhcdEvtControllerUsbDeviceAdd(UCXCONTROLLER Controller, PUCXUSBDEVICE_I
         deviceContext = VhcdGetUsbDeviceContext(usbDevice);
         deviceContext->SlotIndex = slotIndex;
         deviceContext->Generation = generation;
-        deviceContext->SuperSpeed = DeviceInfo->DeviceSpeed == UsbSuperSpeed;
+        deviceContext->DeviceSpeed = DeviceInfo->DeviceSpeed;
         WdfSpinLockAcquire(gSlotLock);
         if (gStopping || VhcdSlotPowerOff((LONG)slotIndex) || !VhcdSlotMatches((LONG)slotIndex, generation) ||
             !gSlots[slotIndex].Present) {
@@ -742,7 +802,11 @@ static VOID VhcdReadPort(_In_ USHORT Port, _Out_ PUSHORT Status, _Out_ PUSHORT C
     WdfSpinLockAcquire(gSlotLock);
     if (!gPortPowerOff[i]) {
         *Status |= USB_PORT_STATUS_POWER;
-        if (gSlots[i].Present) *Status |= USB_PORT_STATUS_CONNECT | USB_PORT_STATUS_HIGH_SPEED;
+        if (gSlots[i].Present) {
+            *Status |= USB_PORT_STATUS_CONNECT;
+            if (gSlots[i].DeviceSpeed == UsbHighSpeed) *Status |= USB_PORT_STATUS_HIGH_SPEED;
+            else if (gSlots[i].DeviceSpeed == UsbLowSpeed) *Status |= USB_PORT_STATUS_LOW_SPEED;
+        }
         if (gSlots[i].Enabled) *Status |= USB_PORT_STATUS_ENABLE;
         if (gSlots[i].Suspended) *Status |= USB_PORT_STATUS_SUSPEND;
     }
@@ -1895,6 +1959,7 @@ VOID VhcdEvtIoInCallerContext(WDFDEVICE Device, WDFREQUEST Request)
     if (parameters.Type != WdfRequestTypeDeviceControl ||
         (parameters.Parameters.DeviceIoControl.IoControlCode != IOCTL_PDO_ADD &&
          parameters.Parameters.DeviceIoControl.IoControlCode != IOCTL_PDO_ADD_SUPERSPEED &&
+         parameters.Parameters.DeviceIoControl.IoControlCode != IOCTL_PDO_ADD_WITH_USB_SPEED &&
          parameters.Parameters.DeviceIoControl.IoControlCode != IOCTL_PDO_REMOVE &&
          parameters.Parameters.DeviceIoControl.IoControlCode != IOCTL_BEGIN_TRANS_USB_DATA &&
          parameters.Parameters.DeviceIoControl.IoControlCode != IOCTL_END_TRANS_USB_DATA)) {
@@ -1904,12 +1969,26 @@ VOID VhcdEvtIoInCallerContext(WDFDEVICE Device, WDFREQUEST Request)
     }
     if (WdfRequestGetRequestorMode(Request) != UserMode) { WdfRequestComplete(Request, STATUS_INVALID_DEVICE_REQUEST); return; }
     if (parameters.Parameters.DeviceIoControl.IoControlCode == IOCTL_PDO_ADD ||
-        parameters.Parameters.DeviceIoControl.IoControlCode == IOCTL_PDO_ADD_SUPERSPEED) {
+        parameters.Parameters.DeviceIoControl.IoControlCode == IOCTL_PDO_ADD_SUPERSPEED ||
+        parameters.Parameters.DeviceIoControl.IoControlCode == IOCTL_PDO_ADD_WITH_USB_SPEED) {
         ioctl_pdo_create_t* create;
+        PVOID inputBuffer;
+        size_t requiredLength = parameters.Parameters.DeviceIoControl.IoControlCode == IOCTL_PDO_ADD_WITH_USB_SPEED
+            ? sizeof(ioctl_pdo_create_with_speed_t) : sizeof(ioctl_pdo_create_t);
         PKSEMAPHORE semaphore = NULL;
         PKEVENT removeEvent = NULL;
-        status = WdfRequestRetrieveInputBuffer(Request, sizeof(*create), (PVOID*)&create, &bufferLength);
+        status = WdfRequestRetrieveInputBuffer(Request, requiredLength, &inputBuffer, &bufferLength);
         if (!NT_SUCCESS(status)) { WdfRequestComplete(Request, status); return; }
+        create = parameters.Parameters.DeviceIoControl.IoControlCode == IOCTL_PDO_ADD_WITH_USB_SPEED
+            ? &((ioctl_pdo_create_with_speed_t*)inputBuffer)->Create
+            : (ioctl_pdo_create_t*)inputBuffer;
+        if (parameters.Parameters.DeviceIoControl.IoControlCode == IOCTL_PDO_ADD_WITH_USB_SPEED) {
+            ULONG requestedSpeed = ((ioctl_pdo_create_with_speed_t*)inputBuffer)->UsbSpeed;
+            if (requestedSpeed != XUSB_USB_SPEED_LOW && requestedSpeed != XUSB_USB_SPEED_FULL) {
+                WdfRequestComplete(Request, STATUS_INVALID_PARAMETER);
+                return;
+            }
+        }
         if (create->hSemaphore == 0 || create->hSemaphore > MAXULONG_PTR) { WdfRequestComplete(Request, STATUS_INVALID_HANDLE); return; }
         status = ObReferenceObjectByHandle((HANDLE)(ULONG_PTR)create->hSemaphore, SEMAPHORE_MODIFY_STATE,
             *ExSemaphoreObjectType, UserMode, (PVOID*)&semaphore, NULL);
@@ -2202,8 +2281,10 @@ VOID VhcdEvtIoDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, size_t OutputLen
     if (IoControlCode == IOCTL_BEGIN_TRANS_USB_DATA) { VhcdBeginTransaction(Request, OutputLength); return; }
     if (IoControlCode == IOCTL_END_TRANS_USB_DATA) { VhcdEndTransaction(Request, InputLength); return; }
     UNREFERENCED_PARAMETER(Queue);
-    if (IoControlCode == IOCTL_PDO_ADD || IoControlCode == IOCTL_PDO_ADD_SUPERSPEED) {
+    if (IoControlCode == IOCTL_PDO_ADD || IoControlCode == IOCTL_PDO_ADD_SUPERSPEED ||
+        IoControlCode == IOCTL_PDO_ADD_WITH_USB_SPEED) {
         ioctl_pdo_create_t* create;
+        PVOID inputBuffer;
         PVHCD_FILE_CONTEXT fileContext;
         PVHCD_USER_IO_CONTEXT ioContext = VhcdGetUserIoContext(Request);
         PKSEMAPHORE semaphore;
@@ -2213,8 +2294,20 @@ VOID VhcdEvtIoDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, size_t OutputLen
         LONG slot = -1;
         LONG i;
         BOOLEAN superSpeed = IoControlCode == IOCTL_PDO_ADD_SUPERSPEED;
-        status = WdfRequestRetrieveInputBuffer(Request, sizeof(*create), (PVOID*)&create, &length);
+        USB_DEVICE_SPEED deviceSpeed = superSpeed ? UsbSuperSpeed : UsbHighSpeed;
+        size_t requiredLength = IoControlCode == IOCTL_PDO_ADD_WITH_USB_SPEED
+            ? sizeof(ioctl_pdo_create_with_speed_t) : sizeof(*create);
+        status = WdfRequestRetrieveInputBuffer(Request, requiredLength, &inputBuffer, &length);
         if (!NT_SUCCESS(status)) { WdfRequestComplete(Request, status); return; }
+        create = IoControlCode == IOCTL_PDO_ADD_WITH_USB_SPEED
+            ? &((ioctl_pdo_create_with_speed_t*)inputBuffer)->Create
+            : (ioctl_pdo_create_t*)inputBuffer;
+        if (IoControlCode == IOCTL_PDO_ADD_WITH_USB_SPEED) {
+            ULONG requestedSpeed = ((ioctl_pdo_create_with_speed_t*)inputBuffer)->UsbSpeed;
+            if (requestedSpeed == XUSB_USB_SPEED_LOW) deviceSpeed = UsbLowSpeed;
+            else if (requestedSpeed == XUSB_USB_SPEED_FULL) deviceSpeed = UsbFullSpeed;
+            else { WdfRequestComplete(Request, STATUS_INVALID_PARAMETER); return; }
+        }
         status = WdfRequestRetrieveOutputBuffer(Request, sizeof(address), &buffer, &length);
         if (!NT_SUCCESS(status)) { WdfRequestComplete(Request, status); return; }
         if (length < sizeof(address)) { WdfRequestComplete(Request, STATUS_BUFFER_TOO_SMALL); return; }
@@ -2257,7 +2350,7 @@ VOID VhcdEvtIoDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, size_t OutputLen
             gSlots[slot].Allocated = TRUE;
             gSlots[slot].Present = TRUE;
             gSlots[slot].Enabled = FALSE;
-            gSlots[slot].SuperSpeed = superSpeed;
+            gSlots[slot].DeviceSpeed = deviceSpeed;
             gSlots[slot].ConnectionChanged = TRUE;
             gSlots[slot].BusAddress = suggested;
             gSlots[slot].Semaphore = semaphore;

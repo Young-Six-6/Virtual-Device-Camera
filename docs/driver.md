@@ -6,9 +6,9 @@
 
 ## 当前运行验证（2026-11-18）
 
-目标机 Windows 10 build 19045 以本机测试证书签名运行重建总线 `1.0.0.14` 和版本隔离 HCD `2.0.0.30`。控制器、USB 3 根集线器和 SuperSpeed 摄像头节点状态均为 OK。应用退出会移除摄像头子设备；挂起事务和移除工作项均归零，不需要重启 Windows。本轮更新驱动与性能验证均未重启系统。
+目标机 Windows 10 build 19045 以本机测试证书签名运行重建总线 `1.0.0.16` 和版本隔离 HCD `2.0.0.32`。控制器、USB 3 根集线器和 SuperSpeed 摄像头节点状态均为 OK。单摄像头 720p YUY2 120 帧采集耗时约 3.97 秒；双摄像头同时采集时每路请求 120 帧，也在约 3.97 秒完成。应用退出后两个摄像头 PDO 消失，HCD 挂起事务和移除工作项均归零；本轮更新、采集和清理均未重启系统。
 
-FFmpeg/DirectShow 以 1280×720、30fps、YUY2 抓取 120 帧，耗时 3.976 秒，约 30.2fps。运行时 UVC 端点按 8,192 字节/125 微秒服务间隔传输，足以覆盖约 55.3 MB/s 的 720p YUY2 负载；抓流期间抽样的 HCD 挂起事务数为 16，结束后挂起事务和移除工作项均归零。USB 2.0 高速等时传输的理论有效负载约 24.6 MB/s，对应 720p YUY2 约 13.3fps；压缩 MJPEG 可降低 USB 2.0 带宽需求。
+FFmpeg/DirectShow 以 1280×720、30fps、YUY2 单路抓取 120 帧，耗时约 3.97 秒（约 30.2fps）。随后同一应用同时枚举两台摄像头，并在一个 FFmpeg 进程中同时打开两路 720p YUY2，各请求 120 帧，约 3.97 秒完成（约 30fps）。运行时 UVC 端点按 8,192 字节/125 微秒服务间隔传输，足以覆盖每路约 55.3 MB/s 的负载；应用退出后挂起事务和移除工作项都为 0。USB 2.0 高速等时传输的理论有效负载约 24.6 MB/s，对应 720p YUY2 约 13.3fps；压缩 MJPEG 可降低 USB 2.0 带宽需求。
 
 此验证证明的是重建软件 HCD 上的虚拟 USB 摄像头完整枚举和抓帧链路，不是物理 USB 3 控制器带宽测量。它也不证明所有原版驱动角色、URB 家族或生产签名包完全可替代。HCD catalog 尚未完成生产签名，不能作为面向公众的正式签名包发布。更多使用命令见[运行说明](usage.md)。
 
@@ -34,9 +34,9 @@ x64 `xusb_virt.sys` 大小为 51,368 字节；其 Git blob SHA-1 为 `fb62e68217
 - 配置/接口选择会校验当前配置。Pipe 和 interface 句柄带有代际信息，避免 alternate setting 切换后旧句柄误指向新端点。每个父设备最多创建 256 个子 PDO；每个子 PDO 最多允许 256 个事务和 64 MiB 事务预算，父设备总上限为 1024 个事务和 256 MiB。
 - 子 PDO 使用从旧二进制恢复的 `IoCreateDeviceSecure` 默认 SDDL 和 class GUID：SY 完全访问，BA/WD/RC 读写执行；相同 class GUID 保留 Windows 类注册表安全覆盖机制。子 PDO 处理基础 query/set power IRP。父 FDO 已实现 WMI provider 注册和 8 字节数据块回调。
 
-当前已在目标 Windows 上通过虚拟根集线器运行用户态摄像头，Windows UVC 驱动可协商并抓取 YUY2 与 MJPEG 等时流。尚未实现或验证的边界包括 bulk/interrupt 用户态数据处理与端到端传输、Microsoft OS feature descriptor 的完整处理、完整多端口/电源行为、所有 Host Controller URB 家族和生产签名发布。重建版实现 USB bus type 查询，并在 Root Hub FDO 本地响应 Hub name、节点描述符/能力、连接信息、设备描述符转发、DriverKeyName 与 `IOCTL_INTERNAL_USB_GET_HUB_COUNT`；descriptor proxy 等待用户态最多 5 秒后取消。Host Controller 返回 Root Hub PDO/栈顶，子 PDO 根据 present 状态响应 `IOCTL_INTERNAL_USB_GET_PORT_STATUS`。USBDI 查询按原版提供 V0–V3 接口槽和回调返回值；PDO 处理设备文本和 usage notification，明确不支持 Eject，并复用用户态建议的 BusAddress（分配限制在 USB 1–127 地址范围）。子 PDO 的 PnP STOP/START 与 D3/D0 暂停/恢复事务队列并清理停止状态下的 pipe 配置。WMI MOF schema/resource 已嵌入镜像并通过 `mofcomp -WMI` 检查，WMI 消费者是否能发现 class 尚未在目标系统验证。常规 USB 用户态事务仍无单请求超时；完整 Host Controller 兼容性仍需逐项验证。
+当前已在目标 Windows 上通过虚拟根集线器运行用户态摄像头，Windows UVC 驱动可协商并抓取 YUY2 与 MJPEG 等时流。HCD `2.0.0.32` 新增 USB 2.0 低/全速 PDO 添加 IOCTL，并按速度校验 EP0 与端点参数；该扩展已通过 ABI 静态断言和 WDK Release 构建，临时调用器实测 low/full 的 add/remove 请求成功且移除事件触发。调用器没有 USB 事务响应端，因此没有枚举出 PnP 设备，端点回调和数据传输尚未实测。低速仅允许控制与中断端点，全速支持控制、bulk、中断与等时端点。其余未实现或验证的边界包括 bulk/interrupt 用户态数据处理与端到端传输、Microsoft OS feature descriptor 的完整处理、完整多端口/电源行为、所有 Host Controller URB 家族和生产签名发布。重建版实现 USB bus type 查询，并在 Root Hub FDO 本地响应 Hub name、节点描述符/能力、连接信息、设备描述符转发、DriverKeyName 与 `IOCTL_INTERNAL_USB_GET_HUB_COUNT`；descriptor proxy 等待用户态最多 5 秒后取消。Host Controller 返回 Root Hub PDO/栈顶，子 PDO 根据 present 状态响应 `IOCTL_INTERNAL_USB_GET_PORT_STATUS`。USBDI 查询按原版提供 V0–V3 接口槽和回调返回值；PDO 处理设备文本和 usage notification，明确不支持 Eject，并复用用户态建议的 BusAddress（分配限制在 USB 1–127 地址范围）。子 PDO 的 PnP STOP/START 与 D3/D0 暂停/恢复事务队列并清理停止状态下的 pipe 配置。WMI MOF schema/resource 已嵌入镜像并通过 `mofcomp -WMI` 检查，WMI 消费者是否能发现 class 尚未在目标系统验证。常规 USB 用户态事务仍无单请求超时；完整 Host Controller 兼容性仍需逐项验证。
 
-当前 Release 驱动源码可构建；部署包通过 InfVerif/Inf2Cat 并生成 catalog。catalog 未完成生产签名，不能作为面向公众的正式签名包发布。新驱动最低要求 Windows 10 2004（build 19041）。构建脚本会自动选择具备 UCX 1.1/KMDF 1.31 的 WDK，也可显式指定版本。`replacement-package/replacement-deploy.ps1` 用于版本化 HCD 部署，`driver-source/deploy.ps1` 用于默认包设备创建/更新/移除；均需管理员权限并会阻止同名镜像冲突，不自动重启。测试机已安装本机测试签名的 HCD `2.0.0.30` 与 role-3 `1.0.0.14`，完成根集线器、单个 SuperSpeed 摄像头枚举和 720p30 抓帧验证；多摄像头 PnP 抓流尚未验证。HCD 支持 USB 端点类型检查与 bulk/interrupt URB 转发，但当前用户态 handler 尚无对应数据传输实现，因此这些传输尚未端到端打通。重建驱动仍未覆盖原版所有角色、URB 和 Root Hub 行为。角色划分和限制见[重建驱动说明](../drivers/usb-bus-legacy/driver-source/README.md)。上游 `x86/`、`x64/` 二进制保持原样。反编译清单和函数分析保存在本机 `source-reconstruction/` 目录，由 `.gitignore` 排除，不属于项目源码。
+当前 Release 驱动源码可构建；部署包通过 InfVerif/Inf2Cat 并生成 catalog。catalog 未完成生产签名，不能作为面向公众的正式签名包发布。新驱动最低要求 Windows 10 2004（build 19041）。构建脚本会自动选择具备 UCX 1.1/KMDF 1.31 的 WDK，也可显式指定版本。`replacement-package/replacement-deploy.ps1` 用于版本化 HCD 部署，`driver-source/deploy.ps1` 用于默认包设备创建/更新/移除；均需管理员权限并会阻止同名镜像冲突，不自动重启。测试机已安装本机测试签名的 HCD `2.0.0.32` 与 role-3 `1.0.0.16`，完成根集线器、单/双 SuperSpeed 摄像头枚举和 720p30 抓帧验证。低/全速新增 IOCTL 目前只完成静态 ABI 与构建检查，尚未运行验证；当前用户态程序仍只选择 USB 2.0 高速或 SuperSpeed。HCD 支持 USB 端点类型检查与 bulk/interrupt URB 转发，但当前用户态 handler 尚无对应数据传输实现，因此这些传输尚未端到端打通。重建驱动仍未覆盖原版所有角色、URB 和 Root Hub 行为。角色划分和限制见[重建驱动说明](../drivers/usb-bus-legacy/driver-source/README.md)。上游 `x86/`、`x64/` 二进制保持原样。反编译清单和函数分析保存在本机 `source-reconstruction/` 目录，由 `.gitignore` 排除，不属于项目源码。
 
 ## INF 中的复制与改名
 
@@ -49,7 +49,7 @@ INF 的 `CopyFiles` 文件列表使用“目标文件名，源文件名”语法
 | `xusb_ctrl.inf` 的 Root HUB 安装项 | `xusb_roothub.sys` | `xusb_virt.sys` |
 | `xusb_ctrl.inf` 的 Host Controller 安装项 | `xusb_controller.sys` | `xusb_virt.sys` |
 
-本包为这些安装项提供了对应源文件，不能仅因目录中没有上述目标名称就判断包不完整。HCD `2.0.0.7` 重绑后曾重复触发 Code 38（`STATUS_DRIVER_FAILED_PRIOR_UNLOAD`，`0xC000038E`）；清理多个旧 INF 并重启后仍复现。为避免每次代码迭代都重启，打包器按 `DriverVer` 为每个 HCD 版本生成独立服务名和镜像名。HCD `2.0.0.10` 首次使用 `ucx_hcd_2_0_0_10` 与 `VirtualCameraUcxHcd_2_0_0_10.sys`，在同一启动周期替换失败的旧实例并启动成功。相同版本卸载/重绑仍可能遇到 Code 38，因此调试新版本时递增 `DriverVer` 并使用新服务。部署脚本按 INF 读取服务名、镜像和 catalog。2026-11-16 的 HCD `2.0.0.17` 曾枚举 `USB\\ROOT_HUB30` 但子设备报 Code 43；该历史故障已由当前 `2.0.0.30` 运行状态取代，见本文顶部验证记录。
+本包为这些安装项提供了对应源文件，不能仅因目录中没有上述目标名称就判断包不完整。HCD `2.0.0.7` 重绑后曾重复触发 Code 38（`STATUS_DRIVER_FAILED_PRIOR_UNLOAD`，`0xC000038E`）；清理多个旧 INF 并重启后仍复现。为避免每次代码迭代都重启，打包器按 `DriverVer` 为每个 HCD 版本生成独立服务名和镜像名。HCD `2.0.0.10` 首次使用 `ucx_hcd_2_0_0_10` 与 `VirtualCameraUcxHcd_2_0_0_10.sys`，在同一启动周期替换失败的旧实例并启动成功。相同版本卸载/重绑仍可能遇到 Code 38，因此调试新版本时递增 `DriverVer` 并使用新服务。部署脚本按 INF 读取服务名、镜像和 catalog。2026-11-16 的 HCD `2.0.0.17` 曾枚举 `USB\\ROOT_HUB30` 但子设备报 Code 43；该历史故障已由当前 `2.0.0.32` 运行状态取代，见本文顶部验证记录。
 
 ## UCX 根集线器启动故障排查（2026-11-16）
 
@@ -65,7 +65,7 @@ UCX 已成功准备根集线器并完成 USB 2.0/3.0 端口信息回调；HCD �
   -RestartRootHub
 ```
 
-只有在准备好采集完整启动链路时才运行该命令；无需为了被动观察而重启。驱动在 `ReleaseHardware` 中清理根集线器缓存句柄和端口电源状态，以避免 PnP 停止/启动后复用旧状态。此段记录的 HCD `2.0.0.18` / tree `1.0.0.13` 是 2026-11-16 的未安装候选；当前测试机已运行 HCD `2.0.0.30` 与 tree `1.0.0.14` 并通过摄像头抓帧验证。后续设备更新按具体修复需要执行，不安排整机重启。
+只有在准备好采集完整启动链路时才运行该命令；无需为了被动观察而重启。驱动在 `ReleaseHardware` 中清理根集线器缓存句柄和端口电源状态，以避免 PnP 停止/启动后复用旧状态。此段记录的 HCD `2.0.0.18` / tree `1.0.0.13` 是 2026-11-16 的未安装候选；当前测试机已运行 HCD `2.0.0.32` 与 tree `1.0.0.16` 并通过双摄像头抓帧验证。后续设备更新按具体修复需要执行，不安排整机重启。
 
 部署脚本若收到 PnPUtil 返回码 `3010`（Windows 要求重启）会立即停止并报告具体命令，不会继续执行后续设备变更，也不会自动重启。此返回码意味着刚执行的操作可能已部分改变 PnP 状态；先检查设备和 DriverStore，再决定是否继续，避免在待重启状态下反复叠加安装。
 

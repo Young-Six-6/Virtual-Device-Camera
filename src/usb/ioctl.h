@@ -19,6 +19,15 @@ DEFINE_GUID(GUID_XUSB_VIRT_INTERFACE,
 #define IOCTL_PDO_ADD_SUPERSPEED \
 	CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80c, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+// Additive FOSS-only path for USB 2.0 low/full-speed devices. The original
+// IOCTL_PDO_ADD keeps its historical high-speed behavior and request layout.
+#define IOCTL_PDO_ADD_WITH_USB_SPEED \
+	CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80d, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+// Values intentionally match USB_DEVICE_SPEED in the Windows USB DDI.
+#define XUSB_USB_SPEED_LOW  0UL
+#define XUSB_USB_SPEED_FULL 1UL
+
 
 #define IOCTL_BEGIN_TRANS_USB_DATA \
 	CTL_CODE(FILE_DEVICE_UNKNOWN, 0x808, METHOD_NEITHER, FILE_ANY_ACCESS)
@@ -121,6 +130,12 @@ typedef struct ioctl_pdo_create_t
 	WCHAR compatible_ids[HW_IDS_COUNT];
 
 } ioctl_pdo_create_t;
+
+typedef struct ioctl_pdo_create_with_speed_t
+{
+	ioctl_pdo_create_t Create;
+	ULONG UsbSpeed; // XUSB_USB_SPEED_LOW or XUSB_USB_SPEED_FULL
+} ioctl_pdo_create_with_speed_t;
 
 #pragma pack(1)
 

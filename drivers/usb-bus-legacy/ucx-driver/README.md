@@ -1,8 +1,8 @@
 # Virtual Camera UCX host controller
 
-Latest runtime measurement (2026-11-18): tree 1.0.0.14 and HCD 2.0.0.30 were bound. The controller, ROOT_HUB30 child, and SuperSpeed camera node reported OK. DirectShow captured 120 frames of 1280×720 YUY2 in 3.976 seconds (about 30.2fps); pending transactions and removal work items returned to zero after the camera app stopped. This validates one SuperSpeed isochronous camera on the software virtual bus, not physical USB 3 throughput or general USB-device compatibility. Earlier tree 1.0.0.11/HCD 2.0.0.28 and USB 2.0 MJPEG capture (about 25fps) are historical results.
+Latest runtime measurement (2026-11-18): tree 1.0.0.16 and HCD 2.0.0.32 were bound. The controller, ROOT_HUB30 child, and SuperSpeed camera nodes reported OK. DirectShow captured 120 frames of 1280×720 YUY2 from one camera in about 3.97 seconds (about 30fps); a simultaneous two-camera run also reached 120 frames per stream in about 3.97 seconds. Both camera nodes disappeared after the application stopped, with zero pending transactions/removal work items and no system restart. This validates the tested isochronous camera paths on the software virtual bus, not physical USB 3 throughput or general USB-device compatibility. Earlier tree 1.0.0.11/HCD 2.0.0.28 and USB 2.0 MJPEG capture (about 25fps) are historical results.
 
-Latest read-only PnP/SCM query (2026-11-18) reports tree 1.0.0.14 and HCD 2.0.0.30 in `OK` state, with both services running and no active camera node or stream. HCD 2.0.0.30 adds multiple SuperSpeed slots and validates SuperSpeed isochronous, bulk and interrupt endpoint companions. Single-camera capture is runtime-verified; multi-camera PnP capture remains unverified.
+Latest read-only PnP/SCM query (2026-11-18) reports tree 1.0.0.16 and HCD 2.0.0.32 in `OK` state, with both services running and no active camera node or stream. HCD 2.0.0.32 retains seven SuperSpeed slots, validates endpoint descriptors, and adds an FOSS-only USB 2.0 low/full-speed add path. Single- and dual-camera SuperSpeed capture are runtime-verified. A temporary low/full caller verified add/remove IOCTLs and removal notification; it did not enumerate a PnP device or exercise endpoint/data paths.
 
 This is an isolated KMDF + UCX 1.1 host-controller project. It targets the UCX 1.1
 DDI surface, pins KMDF 1.31, and is intended for Windows 10 version 2004
@@ -24,6 +24,9 @@ compatibility target is based on Microsoft's UCX versioning guidance.
   `IOCTL_INTERNAL_USB_SUBMIT_URB`.
 - Exposes the existing `GUID_XUSB_VIRT_INTERFACE` and the frozen legacy PDO add/remove
   and FOSS identity query IOCTL codes.
+- Preserves the original high-speed `IOCTL_PDO_ADD` and SuperSpeed extension. Adds
+  `IOCTL_PDO_ADD_WITH_USB_SPEED` (`0x222034`) with an appended speed field for USB 2.0
+  low/full-speed slots; its ABI layout is checked at build time.
 - Maintains up to 16 dynamic USB 2.0 root-hub ports with per-open-file slots, unique
   USB addresses, connection/reset status and change bits, hub/port status requests,
   and the hub interrupt bitmap.
@@ -58,6 +61,23 @@ raw URB, so unsupported URB types cannot be passed through unchanged.
 
 The root-hub PDO enumerates after the bus stopped clearing the upper KMDF BusRelations result. This also preserves the PDO references owned by that result. Same-version unload/reload remains unverified.
 
+## USB 2.0 low/full-speed extension
+
+The `2.0.0.32` source accepts low- and full-speed device additions on the existing
+USB 2.0 root-hub ports. `UsbSpeed` values are `0` for low speed and `1` for full
+speed. The 1,584-byte frozen create structure stays intact; the new request appends a
+32-bit speed value and is 1,592 bytes on the x64 target. The original add IOCTL keeps
+its high-speed behavior and the SuperSpeed add IOCTL is unchanged.
+
+The HCD reports the proper root-hub speed bits and checks endpoint limits by speed:
+low speed permits control and interrupt endpoints only, while full speed permits
+control, bulk, interrupt, and isochronous endpoints within USB packet/interval limits.
+The existing camera handler still selects high speed or SuperSpeed; it does not yet
+use this API. ABI assertions and the Release WDK build pass, and a temporary caller
+verified that both speed values add and remove a slot and receive the removal event.
+That caller has no USB transaction responder, so PnP enumeration, endpoint callbacks,
+and data transfers remain unverified.
+
 ## USB 3.0 SuperSpeed path
 
 The 2.0.0.30 source adds an additive `IOCTL_PDO_ADD_SUPERSPEED`, reserves seven
@@ -77,9 +97,11 @@ that SuperSpeed isochronous packet limits come from the companion descriptor's
 `wBytesPerInterval`, while high-speed is capped at 3×1024 bytes per microframe:
 [Microsoft isochronous transfer guidance](https://learn.microsoft.com/windows-hardware/drivers/usbcon/transfer-data-to-isochronous-endpoints).
 
-The 2.0.0.30 Release build passed Windows PnP and DirectShow capture: 120 frames
-of 720p YUY2 were delivered in 3.976 seconds. Single-device operation is verified;
-multi-device Windows PnP capture is still pending. USB
+The 2.0.0.32 Release build passed Windows PnP and DirectShow capture: one camera
+delivered 120 frames of 720p YUY2 in about 3.97 seconds. A second test opened two
+cameras at once and requested 120 frames per stream; both completed in about 3.97
+seconds with no buffer warning. Both camera nodes disappeared after the application
+stopped, and pending transactions/removal work items returned to zero. USB
 2.0 YUY2 720p remains limited to about 13.3fps by its 3×1,024-byte high-speed
 isochronous interval; the MJPEG path previously reached about 25fps on this machine.
 The SuperSpeed measurement is for this software virtual bus and is not a physical USB 3
