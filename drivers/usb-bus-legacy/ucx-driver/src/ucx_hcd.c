@@ -559,14 +559,35 @@ NTSTATUS VhcdEvtUsbDeviceEndpointAdd(UCXCONTROLLER Controller, UCXUSBDEVICE UsbD
         ULONG theoreticalMaximum;
         if (Companion == NULL || Companion->bLength != sizeof(*Companion) ||
             Companion->bDescriptorType != USB_SUPERSPEED_ENDPOINT_COMPANION_DESCRIPTOR_TYPE ||
-            packetSize != 1024 || pipeType != UsbdPipeTypeIsochronous) return STATUS_NOT_SUPPORTED;
+            (Descriptor->wMaxPacketSize & 0xf800) != 0 || packetSize == 0 || packetSize > 1024)
+            return STATUS_NOT_SUPPORTED;
         maxBurst = Companion->bMaxBurst;
-        mult = Companion->bmAttributes.Isochronous.Mult;
-        theoreticalMaximum = (maxBurst + 1) * (mult + 1) * packetSize;
-        if (maxBurst > 15 || mult > USB_SUPERSPEED_ISOCHRONOUS_MAX_MULTIPLIER ||
-            Companion->wBytesPerInterval == 0 || Companion->wBytesPerInterval > theoreticalMaximum)
-            return STATUS_INVALID_PARAMETER;
-        maxIsoPacketBytes = Companion->wBytesPerInterval;
+        if (maxBurst > 15) return STATUS_INVALID_PARAMETER;
+        switch (pipeType) {
+        case UsbdPipeTypeIsochronous:
+            mult = Companion->bmAttributes.Isochronous.Mult;
+            theoreticalMaximum = (maxBurst + 1) * (mult + 1) * packetSize;
+            if (packetSize != 1024 || mult > USB_SUPERSPEED_ISOCHRONOUS_MAX_MULTIPLIER ||
+                Companion->bmAttributes.Isochronous.Reserved2 != 0 ||
+                Companion->bmAttributes.Isochronous.SspCompanion != 0 ||
+                Companion->wBytesPerInterval == 0 || Companion->wBytesPerInterval > theoreticalMaximum)
+                return STATUS_INVALID_PARAMETER;
+            maxIsoPacketBytes = Companion->wBytesPerInterval;
+            break;
+        case UsbdPipeTypeBulk:
+            if (packetSize != 1024 || Companion->bmAttributes.Bulk.Reserved1 != 0 ||
+                Companion->bmAttributes.Bulk.MaxStreams > 16 || Companion->wBytesPerInterval != 0)
+                return STATUS_INVALID_PARAMETER;
+            break;
+        case UsbdPipeTypeInterrupt:
+            theoreticalMaximum = (maxBurst + 1) * packetSize;
+            if (Companion->bmAttributes.AsUchar != 0 || Companion->wBytesPerInterval == 0 ||
+                Companion->wBytesPerInterval > theoreticalMaximum)
+                return STATUS_INVALID_PARAMETER;
+            break;
+        default:
+            return STATUS_NOT_SUPPORTED;
+        }
     } else if (pipeType == UsbdPipeTypeIsochronous) {
         ULONG packetSize = Descriptor->wMaxPacketSize & 0x07ff;
         ULONG transactions = (Descriptor->wMaxPacketSize >> 11) & 0x03;

@@ -2,9 +2,9 @@
 
 Runtime measurement (2026-11-18): tree 1.0.0.11 and HCD 2.0.0.28 were bound in the same Windows boot session. The controller, USB 3 root hub, and SuperSpeed camera node reported OK. DirectShow captured 120 frames of 1280×720 YUY2 at about 30fps (120 frames in approximately 3.97 seconds). During capture the HCD had 16 pending transactions; after the app stopped, the camera node disappeared and the count returned to zero without restarting Windows. This validates the tested single-camera stream, not every legacy URB or full production replacement behavior. The earlier USB 2.0 MJPEG result (about 25fps) is historical evidence.
 
-Latest read-only PnP/SCM query (2026-11-18) reports tree 1.0.0.13 and HCD 2.0.0.28 in `OK` state, with the HCD service running. The camera application was not running, so there was no active stream or live frame-rate measurement. HCD 2.0.0.29 remains a source/package candidate and has not been installed.
+Latest read-only PnP/SCM query (2026-11-18) reports tree 1.0.0.13 and HCD 2.0.0.28 in `OK` state, with the HCD service running. The camera application was not running, so there was no active stream or live frame-rate measurement. HCD 2.0.0.30 remains a source/package candidate and has not been installed.
 
-The installed and runtime-verified HCD is 2.0.0.28. The source template now targets 2.0.0.29, which adds seven SuperSpeed device slots and has passed Release build plus static package checks; it has not yet been installed for multi-camera PnP capture. Runtime throughput claims below refer to the verified 2.0.0.28 single-camera path. This is not a physical USB 3 controller benchmark and does not establish complete compatibility with unrelated USB devices or every legacy protocol path.
+The installed and runtime-verified HCD is 2.0.0.28. The source template now targets 2.0.0.30, which adds seven SuperSpeed device slots and validates SuperSpeed isochronous, bulk and interrupt endpoint companions; it has passed Release build plus static package checks but has not been installed for multi-camera PnP capture. Runtime throughput claims below refer to the verified 2.0.0.28 single-camera path. This is not a physical USB 3 controller benchmark and does not establish complete compatibility with unrelated USB devices or every legacy protocol path.
 
 This is a separate experimental deployment workflow. It combines:
 
@@ -126,7 +126,7 @@ rate on the software virtual bus. USB 2.0 high-speed isochronous YUY2 remains ca
 3×1,024 bytes per microframe, about 13.3fps at 720p; MJPEG reduces that bandwidth need
 and previously reached about 25fps on this machine. These figures describe this tested
 camera path, not physical USB 3 throughput or compatibility with every USB device. The
-2.0.0.29 source adds seven SuperSpeed slots on ports 17–23; multi-camera enumeration and
+2.0.0.30 source adds seven SuperSpeed slots on ports 17–23; multi-camera enumeration and
 stream capture are not yet runtime-verified.
 
 ## Uninstall

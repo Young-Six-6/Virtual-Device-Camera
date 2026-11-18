@@ -2,7 +2,7 @@
 
 Runtime measurement (2026-11-18): tree 1.0.0.11 and HCD 2.0.0.28 were bound. The controller, ROOT_HUB30 child, and SuperSpeed camera node reported OK. DirectShow captured 120 frames of 1280×720 YUY2 in about 3.97 seconds (about 30fps); the HCD pending-transaction count returned to zero after the camera app stopped. This validates one SuperSpeed isochronous camera on the software virtual bus, not physical USB 3 throughput or general USB-device compatibility. Earlier USB 2.0 MJPEG capture reached about 25fps.
 
-Latest read-only PnP/SCM query (2026-11-18) reports tree 1.0.0.13 and HCD 2.0.0.28 in `OK` state, with no active camera application or stream. Source 2.0.0.29 adds multiple SuperSpeed slots and has passed Release build and static package checks, but has not been installed for multi-camera PnP validation.
+Latest read-only PnP/SCM query (2026-11-18) reports tree 1.0.0.13 and HCD 2.0.0.28 in `OK` state, with no active camera application or stream. Source 2.0.0.30 adds multiple SuperSpeed slots and validates SuperSpeed isochronous, bulk and interrupt endpoint companions. It has passed Release build and static package checks, but has not been installed for multi-camera PnP validation.
 
 This is an isolated KMDF + UCX 1.1 host-controller project. It targets the UCX 1.1
 DDI surface, pins KMDF 1.31, and is intended for Windows 10 version 2004
@@ -60,9 +60,11 @@ The root-hub PDO enumerates after the bus stopped clearing the upper KMDF BusRel
 
 ## USB 3.0 SuperSpeed path
 
-The 2.0.0.29 source adds an additive `IOCTL_PDO_ADD_SUPERSPEED`, reserves seven
+The 2.0.0.30 source adds an additive `IOCTL_PDO_ADD_SUPERSPEED`, reserves seven
 independent virtual slots on root-hub ports 17–23, maps UCX's `UsbSuperSpeed` device speed,
-reports per-port USB 3 connect/reset/power state, and validates isochronous endpoint companion limits.
+reports per-port USB 3 connect/reset/power state, and validates SuperSpeed isochronous,
+bulk and interrupt endpoint companion descriptors. Bulk/interrupt URBs still need matching
+user-mode transport support for end-to-end device operation.
 The user-mode camera tries this FOSS-only add path first; the original `IOCTL_PDO_ADD` and
 the frozen BEGIN/END wire structures are unchanged, and unsupported older/original drivers
 fall back to the existing USB 2.0 path.
@@ -76,7 +78,7 @@ that SuperSpeed isochronous packet limits come from the companion descriptor's
 [Microsoft isochronous transfer guidance](https://learn.microsoft.com/windows-hardware/drivers/usbcon/transfer-data-to-isochronous-endpoints).
 
 The prior 2.0.0.28 Release build passed Windows PnP and DirectShow capture: 120 frames
-of 720p YUY2 were delivered in about 3.97 seconds. The 2.0.0.29 multi-slot changes pass
+of 720p YUY2 were delivered in about 3.97 seconds. The 2.0.0.30 multi-slot changes pass
 Release build and static deployment/package checks; multi-device Windows PnP capture is
 still pending. USB
 2.0 YUY2 720p remains limited to about 13.3fps by its 3×1,024-byte high-speed

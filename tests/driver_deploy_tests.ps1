@@ -49,6 +49,12 @@ if (-not $callerContextMatch.Success -or
     $ucxText -notmatch 'bitmap\s*\|=\s*1u\s*<<\s*\(VHCD_USB30_FIRST_PORT_NUMBER\s*\+\s*ssPort\)') {
     throw 'SuperSpeed slot ranges, root-hub port numbering, and interrupt bitmaps must support distinct USB 2 and USB 3 ports.'
 }
+if ($ucxText -notmatch 'case\s+UsbdPipeTypeBulk\s*:' -or
+    $ucxText -notmatch 'case\s+UsbdPipeTypeInterrupt\s*:' -or
+    $ucxText -notmatch 'Companion->bmAttributes\.Bulk\.Reserved1\s*!=\s*0' -or
+    $ucxText -notmatch 'Companion->wBytesPerInterval\s*!=\s*0') {
+    throw 'SuperSpeed endpoint admission must validate bulk and interrupt companion descriptors as well as isochronous limits.'
+}
 
 # Import only pure preflight/wrapper functions. Never execute the elevated
 # script bodies, and replace native/CIM/PnP calls made by those functions.
