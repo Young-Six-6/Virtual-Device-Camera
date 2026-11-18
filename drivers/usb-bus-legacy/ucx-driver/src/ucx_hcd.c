@@ -345,7 +345,13 @@ static VOID VhcdNotifySlotRemoval(_In_opt_ PKEVENT RemoveEvent, _In_opt_ PKSEMAP
     if (!NT_SUCCESS(status)) {
         DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
                    "VirtualCameraUcxHcd: unable to queue removal notification (0x%08X)\n", status);
-        if (RemoveEvent != NULL) ObDereferenceObject(RemoveEvent);
+        /* Work-item allocation can fail under memory pressure. Signal the
+         * already-referenced event inline so the user-mode unplug waiter is
+         * not stranded. Wait=FALSE keeps this legal through DISPATCH_LEVEL. */
+        if (RemoveEvent != NULL) {
+            KeSetEvent(RemoveEvent, IO_NO_INCREMENT, FALSE);
+            ObDereferenceObject(RemoveEvent);
+        }
         if (Semaphore != NULL) ObDereferenceObject(Semaphore);
         WdfSpinLockAcquire(gSlotLock);
         if (--gPendingRemovalWorkItems == 0)

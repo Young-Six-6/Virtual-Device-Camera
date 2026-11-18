@@ -17,6 +17,12 @@ if ($defaultErrors.Count) { throw ($defaultErrors | Out-String) }
 
 $ucxText = [IO.File]::ReadAllText($ucxSource)
 $replacementText = [IO.File]::ReadAllText($deployScript)
+$removeNotify = [regex]::Match($ucxText,
+    '(?s)static\s+VOID\s+VhcdNotifySlotRemoval\s*\([^)]*\)\s*\{(?<body>.*?)\n\}').Groups['body'].Value
+if (-not $removeNotify -or
+    $removeNotify -notmatch 'if\s*\(RemoveEvent\s*!=\s*NULL\)\s*\{\s*KeSetEvent\(RemoveEvent,\s*IO_NO_INCREMENT,\s*FALSE\);\s*ObDereferenceObject\(RemoveEvent\);') {
+    throw 'Failed removal-work-item allocation must still signal and release the client remove event.'
+}
 $firstPackageStage = $replacementText.IndexOf("Invoke-PnpUtil @('/add-driver', `$ucxInf)", [StringComparison]::Ordinal)
 if ($firstPackageStage -lt 0) { throw 'Replacement package staging call was not found.' }
 $cleanupAfterValidation = $replacementText.IndexOf('Remove-ObsoleteUcxDriverPackages', $firstPackageStage, [StringComparison]::Ordinal)
