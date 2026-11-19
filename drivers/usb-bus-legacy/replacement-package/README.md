@@ -1,12 +1,12 @@
 # Combined role-3 + UCX role-2 replacement package
 
-Latest runtime measurement (2026-11-18): tree 1.0.0.16 and HCD 2.0.0.32 were installed and bound in the same Windows boot session using a local test-signing certificate. The controller, USB 3 root hub, and SuperSpeed camera nodes reported OK. DirectShow captured 120 frames of 1280×720 YUY2 in about 3.97 seconds (about 30fps), both for one camera and for two simultaneous camera streams. The control pipe also changed a running camera 1280×720→640×480→1280×720; a newly opened DirectShow client captured each new mode at about 30fps. After the app stopped, camera nodes disappeared and pending transactions/removal work items returned to zero without restarting Windows. This validates these camera stream cases, not every legacy URB or full production replacement behavior. The earlier tree 1.0.0.11/HCD 2.0.0.28 capture is historical; the earlier USB 2.0 MJPEG result (about 25fps) is also historical.
+Latest runtime validation (2026-11-19): role-3 tree 1.0.0.18 and HCD 2.0.0.34 were installed and bound in the same Windows boot session using the local test-signing certificate. The virtual controller, its USB 3 root hub, and camera nodes reported OK. FFmpeg/DirectShow captured 120 frames of 1280×720 YUY2 from one stream in 3.93 seconds (about 30.5fps). Two concurrent streams each delivered 120 frames in 3.96 seconds (about 30.3fps per stream) with the test client's receive buffer sized to avoid startup drops. After the app stopped, both camera nodes disappeared and HCD pending transactions/removal work items returned to zero. No Windows restart was needed.
 
-Latest read-only PnP/SCM query (2026-11-18) reports tree 1.0.0.16 and HCD 2.0.0.32 in `OK` state, with both services running. The camera application had been stopped, so no camera function node or stream remained; pending transactions and removal work items were zero. No system restart was needed for the update.
+The latest read-only PnP/SCM query reports tree 1.0.0.18 and HCD 2.0.0.34 in `OK` state, with both services running. After the capture run, no camera function node or stream remained; pending transactions and removal work items were zero.
 
 Tree 1.0.0.14 and 1.0.0.15 were assigned new versions after earlier image collisions. Tree 1.0.0.16 was then required because its rebuilt image differed from the image already loaded under the `.15` service name; advancing `DriverVer` let the deployment guard install it without reusing that resident image name.
 
-HCD 2.0.0.32 is installed and runtime-verified for single- and dual-camera SuperSpeed capture. It keeps seven SuperSpeed device slots, validates endpoint descriptors, and adds a low/full-speed USB 2.0 add IOCTL. A temporary caller verified that low/full add/remove IOCTLs return successfully and signal removal; it had no USB transaction responder, so no PnP device or stream was enumerated. Runtime throughput claims below refer to the tested SuperSpeed camera path. This is not a physical USB 3 controller benchmark and does not establish complete compatibility with unrelated USB devices or every legacy protocol path.
+HCD 2.0.0.34 keeps seven SuperSpeed device slots, validates endpoint descriptors, and paces periodic interrupt transactions according to endpoint `bInterval`. Low- and full-speed HID fixtures enumerated as `HIDClass` devices with status `OK`; over five seconds the low-speed fixture generated 498 interrupt-IN requests and the full-speed fixture 495. Removal notifications arrived in 772ms and 780ms respectively, and neither fixture left a PnP node. Repeated runs remained close to 100 requests/second per fixture. These fixtures send zero-filled keyboard reports and do not validate real keyboard input. The camera measurements exercise the software virtual SuperSpeed path, not a physical USB 3 controller, and do not establish complete compatibility with unrelated USB devices or every legacy protocol path.
 
 This is a separate experimental deployment workflow. It combines:
 
@@ -114,7 +114,7 @@ initialization statuses before it exits.
 
 ## SuperSpeed runtime status and remaining coverage
 
-The installed 2.0.0.32 HCD reserves seven virtual slots on USB 3 root-hub ports 17–23,
+The installed 2.0.0.34 HCD reserves seven virtual slots on USB 3 root-hub ports 17–23,
 uses UCX's SuperSpeed device-speed indication, reports connection and reset state,
 and checks the isochronous endpoint companion's burst/interval bounds. The camera
 uses an additive FOSS-only add IOCTL, then emits USB 3.0 device/BOS descriptors and
@@ -122,7 +122,7 @@ a companion descriptor with `bMaxBurst=7` and `wBytesPerInterval=8,192` bytes pe
 125-microsecond interval. Existing IOCTLs and transaction wire layout stay unchanged;
 older and original drivers reject the additive request and continue through USB 2.0.
 
-The verified 2.0.0.32 path uses an 8,192-byte interval budget, providing about 65.5 MB/s after the two-byte UVC header,
+The verified 2.0.0.34 path uses an 8,192-byte interval budget, providing about 65.5 MB/s after the two-byte UVC header,
 enough for 1280×720 YUY2 at 30fps (about 55.3 MB/s). DirectShow captured 120 frames from one camera in
 about 3.97 seconds (about 30fps); two simultaneous camera streams also completed a 120-frame request per stream in about 3.97 seconds. USB 2.0 high-speed isochronous YUY2 remains capped at
 3×1,024 bytes per microframe, about 13.3fps at 720p; MJPEG reduces that bandwidth need

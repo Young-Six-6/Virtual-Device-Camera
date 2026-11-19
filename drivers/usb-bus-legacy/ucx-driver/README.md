@@ -1,8 +1,8 @@
 # Virtual Camera UCX host controller
 
-Latest runtime measurement (2026-11-18): tree 1.0.0.16 and HCD 2.0.0.32 were bound. The controller, ROOT_HUB30 child, and SuperSpeed camera nodes reported OK. DirectShow captured 120 frames of 1280×720 YUY2 from one camera in about 3.97 seconds (about 30fps); a simultaneous two-camera run also reached 120 frames per stream in about 3.97 seconds. The control pipe changed one running camera 1280×720→640×480→1280×720; each update returned `REOPEN_REQUIRED`, and a newly opened DirectShow client captured the new mode at about 30fps. Both camera nodes disappeared after the application stopped, with zero pending transactions/removal work items and no system restart. This validates the tested isochronous camera paths on the software virtual bus, not physical USB 3 throughput or general USB-device compatibility. Earlier tree 1.0.0.11/HCD 2.0.0.28 and USB 2.0 MJPEG capture (about 25fps) are historical results.
+Latest runtime validation (2026-11-19): tree 1.0.0.18 and HCD 2.0.0.34 are bound in the same Windows boot session. The controller and ROOT_HUB30 child report OK. DirectShow captured 120 frames of 1280×720 YUY2 in 3.93 seconds (about 30.5fps); two concurrent streams each delivered 120 frames in 3.96 seconds (about 30.3fps per stream). After the app stopped, both camera nodes disappeared and the HCD reported zero pending transactions and removal work items. Low- and full-speed HID fixtures also enumerated with status OK; their periodic interrupt requests were paced, and both fixtures removed cleanly. No system restart was needed. This validates the tested software virtual-bus paths, not physical USB 3 throughput or general USB-device compatibility. Earlier hot-resolution and USB 2.0 MJPEG measurements are historical results.
 
-Latest read-only PnP/SCM query (2026-11-18) reports tree 1.0.0.16 and HCD 2.0.0.32 in `OK` state, with both services running and no active camera node or stream. HCD 2.0.0.32 retains seven SuperSpeed slots, validates endpoint descriptors, and adds an FOSS-only USB 2.0 low/full-speed add path. Single- and dual-camera SuperSpeed capture are runtime-verified. A temporary low/full caller verified add/remove IOCTLs and removal notification; it did not enumerate a PnP device or exercise endpoint/data paths.
+Latest read-only PnP/SCM query reports tree 1.0.0.18 and HCD 2.0.0.34 in `OK` state, with both services running and no active camera node or stream. HCD 2.0.0.34 retains seven SuperSpeed slots, validates endpoint descriptors, supports the FOSS-only USB 2.0 low/full-speed add path, and paces interrupt requests from `bInterval`. Single- and dual-camera SuperSpeed capture and low/full-speed HID PnP, interrupt, and removal paths have been runtime-verified. These results do not cover all URBs or USB classes.
 
 This is an isolated KMDF + UCX 1.1 host-controller project. It targets the UCX 1.1
 DDI surface, pins KMDF 1.31, and is intended for Windows 10 version 2004
@@ -63,7 +63,7 @@ The root-hub PDO enumerates after the bus stopped clearing the upper KMDF BusRel
 
 ## USB 2.0 low/full-speed extension
 
-The `2.0.0.32` source accepts low- and full-speed device additions on the existing
+The driver accepts low- and full-speed device additions on the existing
 USB 2.0 root-hub ports. `UsbSpeed` values are `0` for low speed and `1` for full
 speed. The 1,584-byte frozen create structure stays intact; the new request appends a
 32-bit speed value and is 1,592 bytes on the x64 target. The original add IOCTL keeps
@@ -75,8 +75,10 @@ control, bulk, interrupt, and isochronous endpoints within USB packet/interval l
 The existing camera handler still selects high speed or SuperSpeed; it does not yet
 use this API. ABI assertions and the Release WDK build pass, and a temporary caller
 verified that both speed values add and remove a slot and receive the removal event.
-That caller has no USB transaction responder, so PnP enumeration, endpoint callbacks,
-and data transfers remain unverified.
+HCD 2.0.0.34 was subsequently tested with a small HID transaction responder: low- and
+full-speed keyboard fixtures enumerated as `HIDClass`, received periodic interrupt-IN
+requests, and removed without leaving a PnP node. The responder sends zero-filled
+reports; it does not simulate useful keyboard input or qualify arbitrary HID devices.
 
 ## USB 3.0 SuperSpeed path
 
@@ -97,11 +99,12 @@ that SuperSpeed isochronous packet limits come from the companion descriptor's
 `wBytesPerInterval`, while high-speed is capped at 3×1024 bytes per microframe:
 [Microsoft isochronous transfer guidance](https://learn.microsoft.com/windows-hardware/drivers/usbcon/transfer-data-to-isochronous-endpoints).
 
-The 2.0.0.32 Release build passed Windows PnP and DirectShow capture: one camera
-delivered 120 frames of 720p YUY2 in about 3.97 seconds. A second test opened two
-cameras at once and requested 120 frames per stream; both completed in about 3.97
-seconds with no buffer warning. Both camera nodes disappeared after the application
-stopped, and pending transactions/removal work items returned to zero. USB
+The 2.0.0.34 Release build passed Windows PnP and DirectShow capture: one camera
+delivered 120 frames of 720p YUY2 in 3.93 seconds. A second test opened two
+cameras at once and requested 120 frames per stream; both completed in 3.96
+seconds with the DirectShow receive buffers sized for simultaneous startup. Both
+camera nodes disappeared after the application stopped, and pending transactions/removal
+work items returned to zero. USB
 2.0 YUY2 720p remains limited to about 13.3fps by its 3×1,024-byte high-speed
 isochronous interval; the MJPEG path previously reached about 25fps on this machine.
 The SuperSpeed measurement is for this software virtual bus and is not a physical USB 3

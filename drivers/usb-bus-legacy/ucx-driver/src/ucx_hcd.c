@@ -91,6 +91,10 @@ typedef struct _VHCD_QUEUE_CONTEXT {
     UCHAR EndpointAddress;
     UCHAR PipeType;
     ULONG MaxIsoPacketBytes;
+    /* A periodic interrupt request is not visible to user mode before this interval. */
+    ULONGLONG InterruptInterval100ns;
+    /* Atomic deadline reservation serializes concurrently queued endpoint requests. */
+    volatile LONG64 NextInterruptDueTime100ns;
     UCXENDPOINT Endpoint;
 } VHCD_QUEUE_CONTEXT, *PVHCD_QUEUE_CONTEXT;
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(VHCD_QUEUE_CONTEXT, VhcdGetQueueContext)
@@ -138,6 +142,8 @@ typedef struct _VHCD_TRANSACTION {
     BOOLEAN Begun;
     BOOLEAN NeedsRetry;
     BOOLEAN Linked;
+    /* BEGIN may return this transaction only after its endpoint interval expires. */
+    BOOLEAN Ready;
     BOOLEAN Isochronous;
     BOOLEAN IsRead;
     BOOLEAN Ending;
@@ -153,6 +159,11 @@ typedef struct _VHCD_TRANSACTION {
     ULONG PayloadCapacity;
     ULONG AllocationBytes;
     KDPC CancelDpc;
+    /* The ready timer owns a transaction reference until cancellation or DPC exit. */
+    KTIMER ReadyTimer;
+    KDPC ReadyDpc;
+    ULONGLONG ReadyTime100ns;
+    volatile LONG ReadyTimerReferenceHeld;
     UCHAR Buffer[1];
 } VHCD_TRANSACTION, *PVHCD_TRANSACTION;
 
@@ -211,6 +222,7 @@ static NTSTATUS VhcdQueuePortResetNotification(_In_ LONG SlotIndex, _In_ ULONGLO
                                                _In_ BOOLEAN AllowPoweredOffPort);
 /* UCX URB queue requests must complete on a separate DPC, even on fast failures. */
 static KDEFERRED_ROUTINE VhcdTransactionCancelDpc;
+static KDEFERRED_ROUTINE VhcdInterruptReadyDpc;
 static KDEFERRED_ROUTINE VhcdCompleteRequestDpc;
 static EVT_WDF_IO_QUEUE_STATE VhcdEndpointPurgeComplete;
 static EVT_WDF_IO_QUEUE_STATE VhcdEndpointAbortComplete;
@@ -468,6 +480,7 @@ VOID VhcdUserIoContextCleanup(WDFOBJECT Object)
 
 static NTSTATUS VhcdCreateEndpoint(UCXUSBDEVICE UsbDevice, PUCXENDPOINT_INIT EndpointInit, BOOLEAN IsDefault,
                                    UCHAR EndpointAddress, UCHAR PipeType, ULONG MaxIsoPacketBytes,
+                                   ULONGLONG InterruptInterval100ns,
                                    UCXENDPOINT* Endpoint)
 {
     WDF_IO_QUEUE_CONFIG q;
@@ -497,6 +510,8 @@ static NTSTATUS VhcdCreateEndpoint(UCXUSBDEVICE UsbDevice, PUCXENDPOINT_INIT End
     VhcdGetQueueContext(queue)->EndpointAddress = EndpointAddress;
     VhcdGetQueueContext(queue)->PipeType = PipeType;
     VhcdGetQueueContext(queue)->MaxIsoPacketBytes = MaxIsoPacketBytes;
+    VhcdGetQueueContext(queue)->InterruptInterval100ns = InterruptInterval100ns;
+    VhcdGetQueueContext(queue)->NextInterruptDueTime100ns = 0;
     VhcdGetQueueContext(queue)->Endpoint = NULL;
     if (IsDefault) {
         UCX_DEFAULT_ENDPOINT_EVENT_CALLBACKS_INIT(&defaultCallbacks, VhcdEvtEndpointPurge, VhcdEvtEndpointStart, VhcdEvtEndpointAbort, VhcdEvtEndpointOkToCancelTransfers, VhcdEvtDefaultEndpointUpdate);
@@ -557,13 +572,25 @@ NTSTATUS VhcdEvtUsbDeviceDefaultEndpointAdd(UCXCONTROLLER Controller, UCXUSBDEVI
     default:
         return STATUS_NOT_SUPPORTED;
     }
-    return VhcdCreateEndpoint(UsbDevice, EndpointInit, TRUE, 0, UsbdPipeTypeControl, 0, &endpoint);
+    return VhcdCreateEndpoint(UsbDevice, EndpointInit, TRUE, 0, UsbdPipeTypeControl, 0, 0, &endpoint);
 }
+
+static ULONGLONG VhcdInterruptInterval100ns(USB_DEVICE_SPEED Speed, UCHAR Interval)
+{
+    if (Interval == 0) return 0;
+    if (Speed == UsbLowSpeed || Speed == UsbFullSpeed)
+        return (ULONGLONG)Interval * 10000ULL;
+    if ((Speed == UsbHighSpeed || Speed == UsbSuperSpeed) && Interval <= 16)
+        return 1250ULL << (Interval - 1);
+    return 0;
+}
+
 NTSTATUS VhcdEvtUsbDeviceEndpointAdd(UCXCONTROLLER Controller, UCXUSBDEVICE UsbDevice, PUSB_ENDPOINT_DESCRIPTOR Descriptor, ULONG DescriptorLength, PUSB_SUPERSPEED_ENDPOINT_COMPANION_DESCRIPTOR Companion, PUCXENDPOINT_INIT EndpointInit)
 {
     UCXENDPOINT endpoint;
     PVHCD_USBDEVICE_CONTEXT deviceContext;
     ULONG maxIsoPacketBytes = 0;
+    ULONGLONG interruptInterval100ns = 0;
     ULONG packetSize;
     ULONG encodedTransactions;
     UCHAR pipeType;
@@ -606,8 +633,11 @@ NTSTATUS VhcdEvtUsbDeviceEndpointAdd(UCXCONTROLLER Controller, UCXUSBDEVICE UsbD
         case UsbdPipeTypeInterrupt:
             theoreticalMaximum = (maxBurst + 1) * packetSize;
             if (Companion->bmAttributes.AsUchar != 0 || Companion->wBytesPerInterval == 0 ||
-                Companion->wBytesPerInterval > theoreticalMaximum)
+                Companion->wBytesPerInterval > theoreticalMaximum || Descriptor->bInterval == 0 ||
+                Descriptor->bInterval > 16)
                 return STATUS_INVALID_PARAMETER;
+            interruptInterval100ns = VhcdInterruptInterval100ns(
+                deviceContext->DeviceSpeed, Descriptor->bInterval);
             break;
         default:
             return STATUS_NOT_SUPPORTED;
@@ -620,6 +650,8 @@ NTSTATUS VhcdEvtUsbDeviceEndpointAdd(UCXCONTROLLER Controller, UCXUSBDEVICE UsbD
             if (pipeType != UsbdPipeTypeInterrupt || packetSize > 8 || encodedTransactions != 0 ||
                 Descriptor->bInterval < 10)
                 return STATUS_INVALID_PARAMETER;
+            interruptInterval100ns = VhcdInterruptInterval100ns(
+                deviceContext->DeviceSpeed, Descriptor->bInterval);
             break;
         case UsbFullSpeed:
             if (encodedTransactions != 0) return STATUS_INVALID_PARAMETER;
@@ -628,6 +660,8 @@ NTSTATUS VhcdEvtUsbDeviceEndpointAdd(UCXCONTROLLER Controller, UCXUSBDEVICE UsbD
                     return STATUS_INVALID_PARAMETER;
             } else if (pipeType == UsbdPipeTypeInterrupt) {
                 if (packetSize > 64 || Descriptor->bInterval == 0) return STATUS_INVALID_PARAMETER;
+                interruptInterval100ns = VhcdInterruptInterval100ns(
+                    deviceContext->DeviceSpeed, Descriptor->bInterval);
             } else if (pipeType == UsbdPipeTypeIsochronous) {
                 if (packetSize > 1023 || Descriptor->bInterval == 0 || Descriptor->bInterval > 16)
                     return STATUS_INVALID_PARAMETER;
@@ -645,6 +679,9 @@ NTSTATUS VhcdEvtUsbDeviceEndpointAdd(UCXCONTROLLER Controller, UCXUSBDEVICE UsbD
                     return STATUS_INVALID_PARAMETER;
                 if (pipeType == UsbdPipeTypeIsochronous)
                     maxIsoPacketBytes = packetSize * (encodedTransactions + 1);
+                else
+                    interruptInterval100ns = VhcdInterruptInterval100ns(
+                        deviceContext->DeviceSpeed, Descriptor->bInterval);
             } else {
                 return STATUS_NOT_SUPPORTED;
             }
@@ -654,7 +691,7 @@ NTSTATUS VhcdEvtUsbDeviceEndpointAdd(UCXCONTROLLER Controller, UCXUSBDEVICE UsbD
         }
     }
     return VhcdCreateEndpoint(UsbDevice, EndpointInit, FALSE, Descriptor->bEndpointAddress,
-        pipeType, maxIsoPacketBytes, &endpoint);
+        pipeType, maxIsoPacketBytes, interruptInterval100ns, &endpoint);
 }
 NTSTATUS VhcdEvtControllerUsbDeviceAdd(UCXCONTROLLER Controller, PUCXUSBDEVICE_INFO DeviceInfo, PUCXUSBDEVICE_INIT UsbDeviceInit)
 {
@@ -1316,11 +1353,75 @@ static VOID VhcdTransactionCancelDpc(_In_ PKDPC Dpc, _In_opt_ PVOID DeferredCont
     VhcdFinishTransfer(transaction, STATUS_CANCELLED, USBD_STATUS_CANCELED);
 }
 
+static VOID VhcdInterruptReadyDpc(_In_ PKDPC Dpc, _In_opt_ PVOID DeferredContext,
+                                  _In_opt_ PVOID SystemArgument1, _In_opt_ PVOID SystemArgument2)
+{
+    PVHCD_TRANSACTION transaction = (PVHCD_TRANSACTION)DeferredContext;
+    PKSEMAPHORE semaphore = NULL;
+    LONG slot;
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArgument1);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+    if (transaction == NULL) return;
+
+    slot = transaction->SlotIndex;
+    WdfSpinLockAcquire(gSlotLock);
+    if (!gStopping && VhcdSlotMatches(slot, transaction->Generation) &&
+        gSlots[slot].Present && transaction->Linked && !transaction->Ending) {
+        transaction->Ready = TRUE;
+        semaphore = gSlots[slot].Semaphore;
+        if (semaphore != NULL) ObReferenceObject(semaphore);
+    }
+    WdfSpinLockRelease(gSlotLock);
+
+    if (semaphore != NULL) {
+        KeReleaseSemaphore(semaphore, IO_NO_INCREMENT, 1, FALSE);
+        ObDereferenceObject(semaphore);
+    }
+    if (InterlockedExchange(&transaction->ReadyTimerReferenceHeld, 0) == 1)
+        VhcdTxRelease(transaction);
+}
+
+static VOID VhcdCancelReadyTimer(_Inout_ PVHCD_TRANSACTION Transaction)
+{
+    BOOLEAN removed;
+    if (InterlockedCompareExchange(&Transaction->ReadyTimerReferenceHeld, 0, 0) == 0)
+        return;
+    /* If cancellation races a running DPC, the DPC releases the timer reference. */
+    removed = KeCancelTimer(&Transaction->ReadyTimer);
+    if (!removed) removed = KeRemoveQueueDpc(&Transaction->ReadyDpc);
+    if (removed && InterlockedExchange(&Transaction->ReadyTimerReferenceHeld, 0) == 1)
+        VhcdTxRelease(Transaction);
+}
+
 static VOID VhcdQueueTransactionCancellation(PVHCD_TRANSACTION Transaction)
 {
     if (InterlockedCompareExchange(&Transaction->CancelCompletionQueued, 1, 0) != 0) return;
+    VhcdCancelReadyTimer(Transaction);
     KeInitializeDpc(&Transaction->CancelDpc, VhcdTransactionCancelDpc, Transaction);
     KeInsertQueueDpc(&Transaction->CancelDpc, NULL, NULL);
+}
+
+static ULONGLONG VhcdReserveInterruptDeadline(_Inout_ PVHCD_QUEUE_CONTEXT QueueContext)
+{
+    ULONGLONG now;
+    ULONGLONG interval = QueueContext->InterruptInterval100ns;
+    LONG64 observed;
+    if (interval == 0) return 0;
+    /* Keep concurrent requests on one endpoint at least one interval apart. */
+    now = KeQueryInterruptTime();
+    observed = InterlockedCompareExchange64(&QueueContext->NextInterruptDueTime100ns, 0, 0);
+    for (;;) {
+        ULONGLONG base = observed > 0 && (ULONGLONG)observed > now
+            ? (ULONGLONG)observed : now;
+        ULONGLONG due = base + interval;
+        LONG64 previous = InterlockedCompareExchange64(
+            &QueueContext->NextInterruptDueTime100ns,
+            (LONG64)due,
+            observed);
+        if (previous == observed) return due;
+        observed = previous;
+    }
 }
 
 static NTSTATUS VhcdQueuePortResetNotification(_In_ LONG SlotIndex, _In_ ULONGLONG Generation, _In_ LONG ResetType,
@@ -1341,6 +1442,7 @@ static NTSTATUS VhcdQueuePortResetNotification(_In_ LONG SlotIndex, _In_ ULONGLO
     transaction->EndpointAddress = 0;
     transaction->AllocationBytes = allocationBytes;
     transaction->PayloadCapacity = 0;
+    transaction->Ready = TRUE;
     transaction->References = 1; /* Owned until END or port teardown. */
     outer = (ioctl_usbtx_header_t*)transaction->Buffer;
     inner = (PVHCD_WIRE_REQUEST)((PUCHAR)transaction->Buffer + FIELD_OFFSET(ioctl_usbtx_header_t, type));
@@ -1654,6 +1756,12 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
     transaction->IsRead = isRead;
     transaction->Isochronous = isIso;
     transaction->References = 1;
+    transaction->Ready = TRUE;
+    KeInitializeTimer(&transaction->ReadyTimer);
+    KeInitializeDpc(&transaction->ReadyDpc, VhcdInterruptReadyDpc, transaction);
+    if (function == URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER &&
+        queueContext->PipeType == UsbdPipeTypeInterrupt)
+        transaction->ReadyTime100ns = VhcdReserveInterruptDeadline(queueContext);
     if (transferLength != 0 && transaction->TransferBuffer == NULL) { ExFreePoolWithTag(transaction, VHCD_TX_SIGNATURE); return STATUS_INVALID_USER_BUFFER; }
 
     {
@@ -1851,7 +1959,20 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
         transaction->Linked = FALSE;
         transaction->Ending = TRUE;
     } else {
-        KeReleaseSemaphore(signalSemaphore, IO_NO_INCREMENT, 1, FALSE);
+        ULONGLONG now = KeQueryInterruptTime();
+        if (transaction->ReadyTime100ns != 0 &&
+            transaction->ReadyTime100ns > now) {
+            LARGE_INTEGER dueTime;
+            ULONGLONG delay = transaction->ReadyTime100ns - now;
+            transaction->Ready = FALSE;
+            VhcdTxAddRef(transaction);
+            InterlockedExchange(&transaction->ReadyTimerReferenceHeld, 1);
+            dueTime.QuadPart = -(LONGLONG)delay;
+            KeSetTimer(&transaction->ReadyTimer, dueTime, &transaction->ReadyDpc);
+        } else {
+            transaction->Ready = TRUE;
+            KeReleaseSemaphore(signalSemaphore, IO_NO_INCREMENT, 1, FALSE);
+        }
     }
     WdfSpinLockRelease(gSlotLock);
     /* A failed MarkCancelableEx registration has no cancellation callback; the
@@ -2172,7 +2293,8 @@ static VOID VhcdBeginTransaction(WDFREQUEST Request, size_t OutputLength)
     if (!gStopping && VhcdSlotMatches(fileContext->SlotIndex, fileContext->Generation)) {
         for (PLIST_ENTRY entry = gSlots[fileContext->SlotIndex].Transactions.Flink; entry != &gSlots[fileContext->SlotIndex].Transactions; entry = entry->Flink) {
             PVHCD_TRANSACTION candidate = CONTAINING_RECORD(entry, VHCD_TRANSACTION, Link);
-            if (!candidate->Ending && (!candidate->Begun || candidate->NeedsRetry)) {
+            if (candidate->Ready && !candidate->Ending &&
+                (!candidate->Begun || candidate->NeedsRetry)) {
                 candidate->Begun = TRUE;
                 candidate->NeedsRetry = FALSE;
                 VhcdTxAddRef(candidate);

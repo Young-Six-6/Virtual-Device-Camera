@@ -48,4 +48,4 @@ USB-tree role 创建的内部 Host Controller PDO 报告项目专用软件总线
 
 默认包面向当前应用的两个 `GUID_XUSB_VIRT_INTERFACE` 提供角色。更新/卸载后仍需确认没有额外旧的接口提供者，避免用户态枚举到未更新的驱动实例。部署脚本不会删除 Driver Store 中的旧包。
 
-不要把新 `.sys` 手工覆盖到旧 INF 或旧 catalog。当前测试机绑定 role-3 `1.0.0.16` 与 HCD `2.0.0.32`，控制器和 USB 3 根集线器均为 OK；单个及两个并行 SuperSpeed UVC 摄像头均通过 DirectShow 在约 3.97 秒内完成各自 120 帧的 720p YUY2 采集（约 30fps）。应用退出后摄像头 PDO 移除，HCD 挂起事务和移除工作项归零，无需重启 Windows。role-3 升至 `1.0.0.16` 是因为新构建镜像与已加载的 `.15` 服务镜像哈希不同；部署保护要求使用新的服务名。新增低/全速 IOCTL 已通过 ABI 静态断言、Release WDK 构建及临时 add/remove 冒烟验证，但尚未接入用户态；测试器没有枚举出 PnP 设备或传输数据。当前验证覆盖 SuperSpeed 相机流和双设备清理，不代表所有 USB URB、卸载/重载和原版所有角色均已替代；实验 Host Controller/USB-tree 角色的剩余范围见本目录的 USB 3.0 与限制说明。实验包不能视为通用 USB 主控驱动。
+不要把新 `.sys` 手工覆盖到旧 INF 或旧 catalog。当前测试机绑定 role-3 `1.0.0.18` 与 HCD `2.0.0.34`，控制器和 USB 3 根集线器均为 OK；单路 720p YUY2 120 帧用时 3.93 秒，两路同时采集时每路 120 帧用时 3.96 秒（约 30fps）。应用退出后摄像头 PDO 移除，HCD 挂起事务和移除工作项归零，无需重启 Windows。低/全速 HID 夹具均已完成 PnP 枚举、周期 interrupt-IN 和移除清理测试。HCD 更新使用独立服务名与镜像名，并在本次 `.33`→`.34` 安装中无须重启；相同版本卸载/重绑仍未作为常规工作流验证。当前验证覆盖已测 SuperSpeed 摄像头路径与低/全速 HID 夹具，不代表所有 USB URB、卸载/重载和原版所有角色均已替代；实验 Host Controller/USB-tree 角色的剩余范围见本目录的 USB 3.0 与限制说明。实验包不能视为通用 USB 主控驱动或物理 USB 3 带宽测试。
