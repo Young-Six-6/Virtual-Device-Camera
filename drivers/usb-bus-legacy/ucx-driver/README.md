@@ -4,6 +4,8 @@ Latest runtime validation (2026-11-19): tree 1.0.0.18 and HCD 2.0.0.34 are bound
 
 Latest read-only PnP/SCM query reports tree 1.0.0.18 and HCD 2.0.0.34 in `OK` state, with both services running and no active camera node or stream. HCD 2.0.0.34 retains seven SuperSpeed slots, validates endpoint descriptors, supports the FOSS-only USB 2.0 low/full-speed add path, and paces interrupt requests from `bInterval`. Single- and dual-camera SuperSpeed capture and low/full-speed HID PnP, interrupt, and removal paths have been runtime-verified. These results do not cover all URBs or USB classes.
 
+After a targeted `pnputil /restart-device "ROOT\SYSTEM\0003"` (without `/reboot`), the same tree/HCD versions and the child USB 3 root hub returned to `OK` without restarting Windows. The Release camera app then re-enumerated and DirectShow captured 60 frames of 1280×720 YUY2 at 30fps in 1.98 seconds. After stopping the app, its virtual camera PDO disappeared and HCD pending transactions/removal work items returned to zero. This verifies one tree-device PnP restart and camera recovery; system sleep/resume and every power transition remain unverified.
+
 This is an isolated KMDF + UCX 1.1 host-controller project. It targets the UCX 1.1
 DDI surface, pins KMDF 1.31, and is intended for Windows 10 version 2004
 (build 19041) or newer.
