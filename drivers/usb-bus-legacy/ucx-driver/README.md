@@ -1,5 +1,7 @@
 # Virtual Camera UCX host controller
 
+With the Release camera app left running, only its virtual root hub (USB\ROOT_HUB30\2&87D351D&0&0) was restarted through PnP. The root hub and camera PDO returned to OK without restarting Windows or the app. DirectShow reopened the camera and captured 60 frames at 1280×720 YUY2/30fps in 1.992 seconds. After the app exited, the camera PDO disappeared and the HCD reported zero pending transactions and removal work items; the tree and HCD remained OK. This covers one root-hub PnP restart and stream reopen, not sleep/resume or every power/URB path.
+
 Latest runtime validation (2026-11-19): tree 1.0.0.18 and HCD 2.0.0.34 are bound in the same Windows boot session. The controller and ROOT_HUB30 child report OK. DirectShow captured 120 frames of 1280×720 YUY2 in 3.93 seconds (about 30.5fps); two concurrent streams each delivered 120 frames in 3.96 seconds (about 30.3fps per stream). After the app stopped, both camera nodes disappeared and the HCD reported zero pending transactions and removal work items. Low- and full-speed HID fixtures also enumerated with status OK; their periodic interrupt requests were paced, and both fixtures removed cleanly. No system restart was needed. This validates the tested software virtual-bus paths, not physical USB 3 throughput or general USB-device compatibility. Earlier hot-resolution and USB 2.0 MJPEG measurements are historical results.
 
 Latest read-only PnP/SCM query reports tree 1.0.0.18 and HCD 2.0.0.34 in `OK` state, with both services running and no active camera node or stream. HCD 2.0.0.34 retains seven SuperSpeed slots, validates endpoint descriptors, supports the FOSS-only USB 2.0 low/full-speed add path, and paces interrupt requests from `bInterval`. Single- and dual-camera SuperSpeed capture and low/full-speed HID PnP, interrupt, and removal paths have been runtime-verified. These results do not cover all URBs or USB classes.
@@ -41,6 +43,10 @@ compatibility target is based on Microsoft's UCX versioning guidance.
   cancellable and bounded to 32 MiB each, with per-slot and controller aggregate limits.
 
 ## Limits and validation status
+
+### Scope of the remaining USB paths
+
+The current virtual camera exposes a UVC control endpoint and an isochronous video-IN endpoint; its descriptors declare no bulk or interrupt endpoint and no Microsoft OS string at index 0xEE. The user-mode responder therefore does not need bulk/interrupt transactions or Microsoft OS feature descriptors for the camera configuration tested here. Those gaps still prevent treating this UVC-specific application as a general-purpose USB-device emulator; a future HID, serial, storage, or other class backend would need to define and implement its own transaction handling and descriptors. Root-hub callbacks and URB families outside the tested camera path also remain only partially verified.
 
 This builds as a Release x64 driver and has passed the camera's tested control,
 descriptor and isochronous capture paths at USB 2.0 and SuperSpeed. It remains a partial replacement candidate:

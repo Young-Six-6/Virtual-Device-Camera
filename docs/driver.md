@@ -6,6 +6,8 @@
 
 ## 当前运行验证（2026-11-19）
 
+在 Release 摄像头应用运行时，单独以管理员权限执行 pnputil /restart-device "USB\ROOT_HUB30\2&87D351D&0&0"，未重启 Windows，也未退出应用。虚拟 Root Hub 与摄像头 PDO USB\VID_BB10&PID_CC10&MI_00\4&263B9AAE&0&0000 均恢复为 OK，应用进程仍在运行；DirectShow 在重启后重新打开摄像头并抓取 60 帧 1280×720 YUY2，耗时 1.992 秒（约 30fps）。退出应用后虚拟摄像头 PDO 消失，UCX 状态查询显示 PendingTransactions=0、PendingRemovalWorkItems=0，树和 HCD 仍为 OK。这验证了单次 Root Hub PnP 重启期间的摄像头重枚举与重新打开，不覆盖睡眠/唤醒、所有电源状态切换或全部 URB 行为。
+
 目标机 Windows 10 build 19045 以本机测试证书签名运行重建总线 `1.0.0.18` 和版本隔离 HCD `2.0.0.34`。控制器、USB 3 根集线器和 SuperSpeed 摄像头节点状态均为 OK。FFmpeg/DirectShow 单路抓取 720p YUY2 120 帧耗时 3.93 秒（约 30.5fps）；双路同时抓取时每路 120 帧耗时 3.96 秒（约 30.3fps/路）。应用退出后摄像头 PDO 消失，HCD 挂起事务和移除工作项均归零。更新、抓取和清理都在同一 Windows 启动周期完成。
 
 FFmpeg/DirectShow 以 1280×720、30fps、YUY2 单路抓取 120 帧，耗时 3.93 秒（约 30.5fps）。随后同一应用同时枚举两台摄像头，并在一个 FFmpeg 进程中打开两路 720p YUY2；每路 120 帧在 3.96 秒内完成（约 30.3fps/路）。运行时 UVC SuperSpeed 端点描述符按 8,192 字节/125 微秒报告间隔预算；每路 720p YUY2 30fps 需要约 55.3 MB/s。USB 2.0 高速等时端点的理论有效负载约 24.6 MB/s，对应 720p YUY2 约 13.3fps；压缩 MJPEG 可降低 USB 2.0 带宽需求。这些是软件虚拟总线上的端到端测试，不是物理 USB 3 链路测速。
