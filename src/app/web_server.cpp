@@ -32,6 +32,7 @@ label{display:block;color:var(--muted);font-size:12px;margin:14px 0 6px}input,se
 .state{display:flex;gap:8px;align-items:center}.dot{width:8px;height:8px;border:1px solid var(--accent);border-radius:50%;display:inline-block}.dot.off{border-color:var(--bad);background:var(--bad)}.statgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px}.stat{border-top:1px solid var(--line);padding:10px 0}.stat b{display:block;font-weight:500;margin-top:3px}.preview-meta{display:flex;justify-content:space-between;border:1px solid var(--line);border-bottom:0;padding:10px 12px;color:var(--muted)}.preview-meta b{color:var(--accent);font-weight:500;margin-left:6px}.preview{min-height:280px;border:1px solid var(--line);background:#0a0d0e;display:grid;place-items:center;overflow:hidden}.preview canvas{width:100%;height:auto;max-height:65vh;object-fit:contain}.message{min-height:22px;margin-top:12px;color:var(--accent)}.message.error{color:var(--bad)}
 textarea{width:100%;min-height:120px;resize:vertical;background:#101517;color:var(--text);border:1px solid #3a484e;padding:10px;font:12px/1.45 Consolas,monospace}.formats label{display:flex;align-items:center;gap:8px}.formats input{width:auto}details{border-top:1px solid var(--line);margin-top:18px;padding-top:12px}summary{color:var(--accent);cursor:pointer}
 .toggle{display:flex;align-items:center;gap:8px}.toggle input{width:auto}.logs{max-width:1100px;margin:18px auto;padding:16px 20px;background:var(--panel);border:1px solid var(--line)}.log-tools{display:flex;justify-content:space-between;align-items:center}.logs pre{max-height:38vh;min-height:90px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#0b0e10;border:1px solid var(--line);padding:12px;color:#c7d4d6;font:12px/1.45 Consolas,monospace}
+.network-access{margin-top:16px;border:1px solid var(--line);padding:12px}.network-row{grid-template-columns:1fr auto;align-items:center}.network-row button.danger{color:var(--bad);border-color:var(--bad)}.network-warning{margin:10px 0 0;padding:9px 11px;border-left:2px solid var(--bad);background:#2a1717;color:var(--bad)}.network-warning[hidden]{display:none}
 @media(max-width:760px){main{margin:20px auto}.layout{grid-template-columns:1fr}.top{align-items:start;gap:8px;flex-direction:column}}
 </style><!--VCAM_THEME--></head><body><main>
 <header class="top"><div><h1>VIRTUAL CAMERA / CONTROL</h1><div class="sub">本机设备状态与运行参数</div></div><div id="webstate" class="state"><i class="dot"></i><span>连接中</span></div></header>
@@ -45,6 +46,7 @@ textarea{width:100%;min-height:120px;resize:vertical;background:#101517;color:va
 <label for="rgb">RGB 输入管道名</label><input id="rgb" autocomplete="off">
 <label for="control">控制管道名</label><input id="control" autocomplete="off">
 <label for="access">控制管道访问范围</label><select id="access"><option value="everyone">Everyone + SYSTEM</option><option value="owner">当前用户 + SYSTEM</option><option value="users">本机 Users 组 + SYSTEM</option></select>
+<div class="network-access"><div class="row network-row"><div><b>WebUI 网络监听</b><div class="sub">默认仅本机访问；可临时允许其他设备连接。</div></div><button id="networkToggle" class="secondary" type="button">允许网络访问</button></div><div id="networkWarning" class="network-warning" hidden>危险：WebUI 正在监听所有 IPv4 网络接口。访问仍需本次启动令牌，但 HTTP 不加密；请只在可信网络开启。其他设备使用本机 IPv4 地址、端口和控制台中的令牌访问。</div></div>
 <label class="toggle"><input id="hideWindow" type="checkbox">隐藏控制台窗口到系统托盘</label><div class="sub">隐藏后程序继续运行并收集日志；双击托盘图标或右键菜单可切回。此开关只影响当前运行进程。</div>
 <details><summary>自定义页面主题</summary><label for="customCss">CSS</label><textarea id="customCss" spellcheck="false" maxlength="65536" placeholder="/* CSS 注入到页面 head */"></textarea><label for="customJs">JavaScript</label><textarea id="customJs" spellcheck="false" maxlength="65536" placeholder="// JavaScript 注入到页面 head"></textarea><div class="sub">JavaScript 在 head 中同步执行，DOM 操作可放进 DOMContentLoaded 回调。自定义脚本可改写本机管理页行为，只粘贴自己信任的代码。</div></details>
 <div class="actions"><button id="apply">应用并保存</button><button id="refresh" class="secondary">刷新状态</button></div><div id="message" class="message"></div>
@@ -54,17 +56,19 @@ const fragment=location.hash.slice(1).split(':');const token=fragment[0]||'';con
 const $=id=>document.getElementById(id);const api=async(path,opts={})=>fetch(path,{...opts,headers:{Authorization:`Bearer ${token}`,...(opts.headers||{})}});
 $("camera").value=initialCamera;
 function state(ok,text){$("webstate").innerHTML=`<i class="dot ${ok?"":"off"}"></i><span>${text}</span>`}
+function updateNetworkUI(enabled){$("networkToggle").textContent=enabled?'关闭网络访问':'允许网络访问';$("networkToggle").classList.toggle('danger',enabled);$("networkWarning").hidden=!enabled}
 function escapeHtml(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))}
-async function refresh(loadConfig=false){try{const r=await api('/api/status');if(!r.ok)throw Error('接口未授权或不可用');current=await r.json();state(true,'本机服务在线');const cam=current.cameras.find(c=>c.index===Number($("camera").value));if(loadConfig&&cam){$("width").value=cam.width;$("height").value=cam.height;$("fps").value=cam.fps;$("vid").value=cam.vid;$("pid").value=cam.pid;$("manufacturer").value=cam.manufacturer;$("name").value=cam.name;$("yuy2").checked=cam.yuy2;$("mjpeg").checked=cam.mjpeg}if(loadConfig){$("camera").options[1].disabled=!current.cameras[1].present;$("rgb").value=current.rgbPipe.name;$("control").value=current.controlPipe.name;$("access").value=current.controlPipeAccess;const themeResponse=await api('/api/theme');if(themeResponse.ok){const theme=await themeResponse.json();$("customCss").value=theme.css;$("customJs").value=theme.js}const windowResponse=await api('/api/window');if(windowResponse.ok){const windowState=await windowResponse.json();$("hideWindow").checked=windowState.hidden}}
+async function refresh(loadConfig=false){try{const r=await api('/api/status');if(!r.ok)throw Error('接口未授权或不可用');current=await r.json();state(true,'本机服务在线');updateNetworkUI(Boolean(current.webNetworkAccess));const cam=current.cameras.find(c=>c.index===Number($("camera").value));if(loadConfig&&cam){$("width").value=cam.width;$("height").value=cam.height;$("fps").value=cam.fps;$("vid").value=cam.vid;$("pid").value=cam.pid;$("manufacturer").value=cam.manufacturer;$("name").value=cam.name;$("yuy2").checked=cam.yuy2;$("mjpeg").checked=cam.mjpeg}if(loadConfig){$("camera").options[1].disabled=!current.cameras[1].present;$("rgb").value=current.rgbPipe.name;$("control").value=current.controlPipe.name;$("access").value=current.controlPipeAccess;const themeResponse=await api('/api/theme');if(themeResponse.ok){const theme=await themeResponse.json();$("customCss").value=theme.css;$("customJs").value=theme.js}const windowResponse=await api('/api/window');if(windowResponse.ok){const windowState=await windowResponse.json();$("hideWindow").checked=windowState.hidden}}
 const pipeState=!current.rgbPipe.active?'当前输入源未使用':current.rgbPipe.connected?'客户端已连接':current.rgbPipe.listening?'监听中，等待客户端连接':'监听未运行';const frameState=current.rgbPipe.frames?`${current.rgbPipe.frames} 帧 · 最近 ${Math.round(current.rgbPipe.frameAgeMs/1000)} 秒`:'尚未收到帧';
 const driverLabel={foss:'FOSS 重建版',original:'原版驱动',unknown:'已发现·无法识别',unavailable:'未发现'}[current.driverKind]||'无法识别';const modeLabel={superspeed:'SuperSpeed','high-speed':'USB 2.0 高速',disconnected:'未连接'}[cam?.usbMode]||'未知';const cameraState=cam?.running?'运行中':cam?.present?'已停止':'未连接';$("previewMode").textContent=modeLabel;$("actualFps").textContent=`${Number(cam?.actualFps||0).toFixed(1)} fps`;
-$("stats").innerHTML=`<div class="stat"><span class="muted">虚拟 USB 驱动</span><b>${escapeHtml(driverLabel)}</b></div><div class="stat"><span class="muted">摄像头状态</span><b>${escapeHtml(cameraState)}</b></div><div class="stat"><span class="muted">USB 身份</span><b>${escapeHtml(cam?.manufacturer||'')} ${escapeHtml(cam?.vid||'')}:${escapeHtml(cam?.pid||'')}</b></div><div class="stat"><span class="muted">RGB 输入管道</span><b>${escapeHtml(pipeState)}</b><small class="muted">${escapeHtml(frameState)}</small></div><div class="stat"><span class="muted">控制管道</span><b>${current.controlPipe.running?'监听中':'未运行'}</b></div><div class="stat"><span class="muted">Web UI</span><b>127.0.0.1:${escapeHtml(current.webPort)}</b></div>`
+$("stats").innerHTML=`<div class="stat"><span class="muted">虚拟 USB 驱动</span><b>${escapeHtml(driverLabel)}</b></div><div class="stat"><span class="muted">摄像头状态</span><b>${escapeHtml(cameraState)}</b></div><div class="stat"><span class="muted">USB 身份</span><b>${escapeHtml(cam?.manufacturer||'')} ${escapeHtml(cam?.vid||'')}:${escapeHtml(cam?.pid||'')}</b></div><div class="stat"><span class="muted">RGB 输入管道</span><b>${escapeHtml(pipeState)}</b><small class="muted">${escapeHtml(frameState)}</small></div><div class="stat"><span class="muted">控制管道</span><b>${current.controlPipe.running?'监听中':'未运行'}</b></div><div class="stat"><span class="muted">Web UI</span><b>${current.webNetworkAccess?'网络监听·所有 IPv4 接口':'仅本机·127.0.0.1'}:${escapeHtml(current.webPort)}</b></div>`
 }catch(e){state(false,'状态读取失败');$("message").textContent=e.message}}
 function clip(v){return Math.max(0,Math.min(255,v))}
 function draw(bytes,w,h){const canvas=$("frame"),ctx=canvas.getContext('2d');canvas.width=w;canvas.height=h;const image=ctx.createImageData(w,h),out=image.data;for(let i=0,j=0;i<w*h*2;i+=4,j+=8){const u=bytes[i+1]-128,v=bytes[i+3]-128;for(let p=0;p<2;p++){const y=Math.max(0,bytes[i+p*2]-16),c=298*y;out[j+p*4]=clip((c+409*v+128)>>8);out[j+p*4+1]=clip((c-100*u-208*v+128)>>8);out[j+p*4+2]=clip((c+516*u+128)>>8);out[j+p*4+3]=255}}ctx.putImageData(image,0,0)}
 async function preview(){try{const r=await api(`/api/frame?camera=${$("camera").value}`);if(!r.ok)return;const w=Number(r.headers.get('X-Frame-Width')),h=Number(r.headers.get('X-Frame-Height'));draw(new Uint8Array(await r.arrayBuffer()),w,h)}catch(_){}}
 async function refreshLogs(){try{const r=await api('/api/logs');if(!r.ok)return;const value=await r.json();const output=$("logOutput"),stick=output.scrollTop+output.clientHeight>=output.scrollHeight-8;output.textContent=value.text||'';if(stick)output.scrollTop=output.scrollHeight}catch(_){}}
 $("camera").onchange=()=>refresh(true);$("refresh").onclick=()=>refresh(true);$("apply").onclick=async()=>{const message=$("message");message.className='message';message.textContent='应用中…';const body=new URLSearchParams({camera:$("camera").value,width:$("width").value,height:$("height").value,fps:$("fps").value,vid:$("vid").value,pid:$("pid").value,manufacturer:$("manufacturer").value,name:$("name").value,yuy2:String($("yuy2").checked),mjpeg:String($("mjpeg").checked),rgb_pipe:$("rgb").value,control_pipe:$("control").value,control_pipe_access:$("access").value,custom_css:$("customCss").value,custom_js:$("customJs").value});try{const r=await api('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const result=await r.json();if(!r.ok||!result.ok)throw Error(result.error||'应用失败');message.textContent='设置已保存。摄像头由用户态摘除并重新枚举，无需重新安装驱动；视频客户端可能需要重新打开。主题正在刷新。';location.replace('/#'+token+':'+$("camera").value)}catch(e){message.className='message error';message.textContent=e.message}};
+$("networkToggle").onclick=async()=>{const button=$("networkToggle"),message=$("message"),enabled=!Boolean(current?.webNetworkAccess);button.disabled=true;message.className='message';message.textContent=enabled?'正在开启网络监听…':'正在关闭网络监听…';try{const r=await api('/api/network',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({enabled:String(enabled)})});const result=await r.json();if(!r.ok||!result.ok)throw Error(result.error||'网络访问设置失败');current.webNetworkAccess=result.enabled;updateNetworkUI(result.enabled);message.textContent=result.enabled?'网络访问已开启。其他设备请使用本机 IPv4 地址、当前端口和启动令牌。':'网络访问已关闭，仅允许本机连接。'}catch(e){message.className='message error';message.textContent=e.message}finally{button.disabled=false}};
 $("hideWindow").onchange=async()=>{const requested=$("hideWindow").checked;try{const r=await api('/api/window',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({hidden:String(requested)})});const value=await r.json();if(!r.ok||!value.ok)throw Error(value.error||'托盘切换失败');$("hideWindow").checked=value.hidden}catch(e){$("hideWindow").checked=!requested;$("message").className='message error';$("message").textContent=e.message}};
 $("logDetails").addEventListener('toggle',()=>{if($("logDetails").open)refreshLogs()});$("refreshLogs").onclick=refreshLogs;
 if(!token)state(false,'请从程序控制台打开带令牌的地址');refresh(true);setInterval(()=>{refresh();preview()},1000);setInterval(()=>{if($("logDetails").open)refreshLogs()},2000);preview();
@@ -73,6 +77,38 @@ if(!token)state(false,'请从程序控制台打开带令牌的地址');refresh(t
 std::string lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return value;
+}
+SOCKET create_listener(unsigned short port, bool network_access) {
+    SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listener == INVALID_SOCKET) return INVALID_SOCKET;
+    BOOL exclusive = TRUE;
+    if (setsockopt(listener, SOL_SOCKET, SO_EXCLUSIVEADDRUSE,
+        reinterpret_cast<const char*>(&exclusive), sizeof(exclusive)) == SOCKET_ERROR) {
+        closesocket(listener);
+        return INVALID_SOCKET;
+    }
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    address.sin_addr.s_addr = htonl(network_access ? INADDR_ANY : INADDR_LOOPBACK);
+    if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == SOCKET_ERROR ||
+        listen(listener, 4) == SOCKET_ERROR) {
+        closesocket(listener);
+        return INVALID_SOCKET;
+    }
+    return listener;
+}
+bool request_host_allowed(SOCKET client, const std::string& host, unsigned short port, bool network_access) {
+    const std::string loopback = "127.0.0.1:" + std::to_string(port);
+    sockaddr_in local{};
+    int local_length = sizeof(local);
+    if (getsockname(client, reinterpret_cast<sockaddr*>(&local), &local_length) == SOCKET_ERROR) return false;
+    if (ntohl(local.sin_addr.s_addr) >> 24 == 127)
+        return host == loopback || host == "localhost:" + std::to_string(port);
+    if (!network_access) return false;
+    char address[INET_ADDRSTRLEN]{};
+    if (!InetNtopA(AF_INET, &local.sin_addr, address, sizeof(address))) return false;
+    return host == std::string(address) + ":" + std::to_string(port);
 }
 std::string protect_raw_text_close(std::string source, const char* closing_tag) {
     const size_t length = std::char_traits<char>::length(closing_tag);
@@ -250,20 +286,15 @@ bool WebServer::start(unsigned short port, std::string token,
                       std::function<std::pair<std::string, std::string>()> theme,
                       std::function<std::string()> logs,
                       std::function<bool()> window_hidden,
-                      std::function<bool(bool)> set_window_hidden) {
+                      std::function<bool(bool)> set_window_hidden,
+                      bool network_access,
+                      std::function<bool(bool, std::string&)> set_network_access) {
     if (worker_.joinable() || token.size() < 32 || !status || !frame || !update) return false;
     WSADATA data{};
     if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return false;
     winsock_initialized_.store(true);
-    SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (listener == INVALID_SOCKET) { winsock_initialized_.store(false); WSACleanup(); return false; }
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (bind(listener, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == SOCKET_ERROR ||
-        listen(listener, 4) == SOCKET_ERROR) {
-        closesocket(listener);
+    SOCKET listener = create_listener(port, network_access);
+    if (listener == INVALID_SOCKET) {
         winsock_initialized_.store(false);
         WSACleanup();
         return false;
@@ -277,6 +308,8 @@ bool WebServer::start(unsigned short port, std::string token,
     logs_ = std::move(logs);
     window_hidden_ = std::move(window_hidden);
     set_window_hidden_ = std::move(set_window_hidden);
+    set_network_access_ = std::move(set_network_access);
+    network_access_.store(network_access);
     stopping_.store(false);
     running_.store(true);
     listener_.store(static_cast<uintptr_t>(listener));
@@ -293,24 +326,80 @@ bool WebServer::start(unsigned short port, std::string token,
 }
 void WebServer::stop() noexcept {
     stopping_.store(true);
-    const uintptr_t value = listener_.exchange(invalid_socket);
-    if (value != invalid_socket) {
-        const SOCKET listener = static_cast<SOCKET>(value);
-        shutdown(listener, SD_BOTH);
-        closesocket(listener);
+    {
+        std::lock_guard<std::mutex> lock(listener_mutex_);
+        const uintptr_t value = listener_.exchange(invalid_socket);
+        if (value != invalid_socket) {
+            const SOCKET listener = static_cast<SOCKET>(value);
+            shutdown(listener, SD_BOTH);
+            closesocket(listener);
+        }
     }
     if (worker_.joinable()) worker_.join();
     running_.store(false);
     if (winsock_initialized_.exchange(false)) WSACleanup();
 }
+
+bool WebServer::rebind_network_access(bool enabled, std::string& error) {
+    std::lock_guard<std::mutex> lock(listener_mutex_);
+    if (stopping_.load()) { error = "web-server-stopping"; return false; }
+    const bool previous = network_access_.load();
+    if (enabled == previous) return true;
+    if (!set_network_access_) { error = "network-setting-unavailable"; return false; }
+
+    const uintptr_t old_value = listener_.exchange(invalid_socket);
+    if (old_value != invalid_socket) {
+        const SOCKET old_listener = static_cast<SOCKET>(old_value);
+        shutdown(old_listener, SD_BOTH);
+        closesocket(old_listener);
+    }
+    auto restore_listener = [&] {
+        SOCKET restored = create_listener(port_, previous);
+        if (restored == INVALID_SOCKET) {
+            stopping_.store(true);
+            error += "; previous-listener-restore-failed";
+            return false;
+        }
+        listener_.store(static_cast<uintptr_t>(restored));
+        return true;
+    };
+
+    SOCKET replacement = create_listener(port_, enabled);
+    if (replacement == INVALID_SOCKET) {
+        error = "web-listener-rebind-failed";
+        restore_listener();
+        return false;
+    }
+    if (stopping_.load()) {
+        closesocket(replacement);
+        error = "web-server-stopping";
+        return false;
+    }
+    if (!set_network_access_(enabled, error)) {
+        closesocket(replacement);
+        if (error.empty()) error = "network-setting-save-failed";
+        restore_listener();
+        return false;
+    }
+    network_access_.store(enabled);
+    listener_.store(static_cast<uintptr_t>(replacement));
+    return true;
+}
+
 void WebServer::run() noexcept {
-    const SOCKET listener = static_cast<SOCKET>(listener_.load());
     try {
         while (!stopping_.load()) {
+            const uintptr_t listener_value = listener_.load();
+            if (listener_value == invalid_socket) break;
+            const SOCKET listener = static_cast<SOCKET>(listener_value);
             sockaddr_in client_address{};
             int address_size = sizeof(client_address);
             SOCKET client = accept(listener, reinterpret_cast<sockaddr*>(&client_address), &address_size);
-            if (client == INVALID_SOCKET) break;
+            if (client == INVALID_SOCKET) {
+                if (stopping_.load()) break;
+                if (listener_.load() != listener_value) continue;
+                break;
+            }
             DWORD timeout = 5000;
             setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
             setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof(timeout));
@@ -320,12 +409,13 @@ void WebServer::run() noexcept {
                 closesocket(client);
                 continue;
             }
-            const std::string expected_host = "127.0.0.1:" + std::to_string(port_);
             const auto host = request.headers.find("host");
             const auto origin = request.headers.find("origin");
-            const std::string expected_origin = "http://127.0.0.1:" + std::to_string(port_);
-            if (host == request.headers.end() || host->second != expected_host ||
-                (origin != request.headers.end() && origin->second != expected_origin)) {
+            const bool host_allowed = host != request.headers.end() &&
+                request_host_allowed(client, host->second, port_, network_access_.load());
+            const bool origin_allowed = origin == request.headers.end() ||
+                (host != request.headers.end() && origin->second == "http://" + host->second);
+            if (!host_allowed || !origin_allowed) {
                 respond(client, 403, "Forbidden", "text/plain; charset=utf-8", "forbidden");
                 closesocket(client);
                 continue;
@@ -381,6 +471,25 @@ void WebServer::run() noexcept {
                         "application/json; charset=utf-8", body);
                 } else respond(client, 400, "Bad Request", "application/json; charset=utf-8",
                     "{\"ok\":false,\"error\":\"invalid-window-setting\"}");
+            }
+            else if (request.method == "GET" && request.target == "/api/network") {
+                const std::string body = std::string("{\"enabled\":") +
+                    (network_access_.load() ? "true}" : "false}");
+                respond(client, 200, "OK", "application/json; charset=utf-8", body);
+            }
+            else if (request.method == "POST" && request.target == "/api/network") {
+                std::map<std::string, std::string> fields;
+                bool enabled = false;
+                if (form_decode(request.body, fields) && parse_bool(fields, "enabled", enabled)) {
+                    std::string error;
+                    const bool success = rebind_network_access(enabled, error);
+                    const std::string body = success ?
+                        (std::string("{\"ok\":true,\"enabled\":") + (enabled ? "true}" : "false}")) :
+                        ("{\"ok\":false,\"error\":\"" + json_escape(error.empty() ? "network-rebind-failed" : error) + "\"}");
+                    respond(client, success ? 200 : 400, success ? "OK" : "Bad Request",
+                        "application/json; charset=utf-8", body);
+                } else respond(client, 400, "Bad Request", "application/json; charset=utf-8",
+                    "{\"ok\":false,\"error\":\"invalid-network-setting\"}");
             }
             else if (request.method == "GET" && request.target.rfind("/api/frame?camera=", 0) == 0) {
                 int camera = 0;

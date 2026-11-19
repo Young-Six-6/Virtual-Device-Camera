@@ -10,6 +10,7 @@ struct AppSettings {
     PipeAccess rgb_pipe_access = PipeAccess::owner;
     PipeAccess control_pipe_access = PipeAccess::everyone;
     int web_port = 8765;
+    bool web_allow_network = false;
     CameraSettings cameras[2]{};
     bool camera_name_configured[2]{};
     std::string custom_css;

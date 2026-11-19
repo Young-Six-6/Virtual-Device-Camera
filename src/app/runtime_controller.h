@@ -18,6 +18,8 @@ public:
     RuntimeController(AppSettings settings, std::string config_path, frame_source* source,
                       void* camera1, void* camera2, ControlServer& control);
     std::string status_json(unsigned short web_port) const;
+    bool web_network_access() const;
+    bool set_web_network_access(bool enabled, std::string& error);
     std::pair<std::string, std::string> theme() const;
     std::optional<CameraFrame> frame(int camera) const;
     bool apply(const WebUpdate& update, std::string& error);

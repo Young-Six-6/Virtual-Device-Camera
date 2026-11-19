@@ -139,6 +139,7 @@ AppSettings load_app_settings(const std::string& config_name) {
         parse_access("rgb_pipe_access", settings.rgb_pipe_access);
         parse_access("control_pipe_access", settings.control_pipe_access);
         settings.web_port = integer_value(values, "web_port", settings.web_port);
+        settings.web_allow_network = bool_value(values, "web_allow_network", settings.web_allow_network);
         for (int i = 0; i < 2; ++i) {
             CameraSettings& camera = settings.cameras[i];
             const std::string prefix = "camera" + std::to_string(i + 1) + "_";
@@ -190,6 +191,7 @@ bool save_app_settings(const std::string& config_name, const AppSettings& settin
                << "rgb_pipe_access=" << access_value(settings.rgb_pipe_access) << "\n"
                << "control_pipe_access=" << access_value(settings.control_pipe_access) << "\n"
                << "web_port=" << settings.web_port << "\n"
+               << "web_allow_network=" << (settings.web_allow_network ? "true" : "false") << "\n"
                << "camera1_width=" << settings.cameras[0].resolution.width << "\n"
                << "camera1_height=" << settings.cameras[0].resolution.height << "\n"
                << "camera1_fps=" << settings.cameras[0].fps << "\n"
