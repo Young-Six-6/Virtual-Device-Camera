@@ -1,7 +1,7 @@
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
-    [ValidateSet('Install', 'Uninstall')]
+    [ValidateSet('Install', 'Uninstall', 'Cleanup')]
     [string] $Action = 'Install',
     [string] $PackagePath = (Join-Path $PSScriptRoot 'build\x64\Release'),
     [ValidateRange(5, 300)]
@@ -260,6 +260,11 @@ function Remove-ObsoleteUcxDriverPackages {
     foreach ($packageEntry in $packages) {
         $publishedInf = [string]$packageEntry.Driver
         if ($activeInfs -contains $publishedInf.ToLowerInvariant()) { continue }
+        if ($publishedInf -notmatch '^oem\d+\.inf$') {
+            Write-Warning "Could not validate published UCX INF '$publishedInf'; preserving it."
+            continue
+        }
+        if (-not (Export-StaleDriverPackage $publishedInf 'xusb_ucx_hcd.inf')) { continue }
         $output = & $pnputil /delete-driver $publishedInf 2>&1
         if ($LASTEXITCODE -eq 3010) {
             throw "pnputil /delete-driver $publishedInf returned 3010 (reboot required). Deployment stopped; no reboot was started. $($output -join ' ')"
@@ -268,6 +273,108 @@ function Remove-ObsoleteUcxDriverPackages {
             Write-Output "Removed stale UCX driver package $publishedInf (version $($packageEntry.Version))."
         } else {
             Write-Warning "Kept UCX driver package $publishedInf (version $($packageEntry.Version)); PnP reports it is still in use or cannot be removed. $($output -join ' ')"
+        }
+    }
+}
+
+function Export-StaleDriverPackage([string] $PublishedInf, [string] $ExpectedInfName) {
+    $backupRoot = Join-Path $PSScriptRoot 'build\stale-package-backup'
+    $backupDirectory = Join-Path $backupRoot `
+        (([IO.Path]::GetFileNameWithoutExtension($PublishedInf)) + '-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
+    $output = & $pnputil /export-driver $PublishedInf $backupDirectory 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "Could not back up $PublishedInf; it was preserved. $($output -join ' ')"
+        return $false
+    }
+    $exportedInf = Get-ChildItem -LiteralPath $backupDirectory -Filter $ExpectedInfName `
+        -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $exportedInf) {
+        Write-Warning "The export of $PublishedInf did not contain $ExpectedInfName; the package was preserved."
+        return $false
+    }
+    Write-Verbose "Backed up $PublishedInf to $backupDirectory before removal."
+    return $true
+}
+
+function Remove-ObsoleteTreeDriverPackages {
+    # Keep the active role-3 package and any newer/equal candidate. For older
+    # packages, preflight present PnP bindings and let PnPUtil make the final
+    # in-use decision. Never use /uninstall or /force here.
+    $treeDevices = @(Get-TargetDevices).Tree
+    if ($treeDevices.Count -eq 0) {
+        Write-Warning 'Could not identify a present role-3 tree device; preserving all reconstructed tree packages.'
+        return
+    }
+
+    $activeBindings = foreach ($device in $treeDevices) {
+        $inf = (Get-PnpDeviceProperty -InstanceId $device.InstanceId `
+            -KeyName 'DEVPKEY_Device_DriverInfPath' -ErrorAction SilentlyContinue).Data
+        $versionText = (Get-PnpDeviceProperty -InstanceId $device.InstanceId `
+            -KeyName 'DEVPKEY_Device_DriverVersion' -ErrorAction SilentlyContinue).Data
+        if ($inf -and $versionText) {
+            [pscustomobject]@{ Inf = [string]$inf; Version = [version]$versionText }
+        }
+    }
+    $activeInfs = @($activeBindings | ForEach-Object { $_.Inf } | Select-Object -Unique)
+    $activeVersions = @($activeBindings | ForEach-Object { $_.Version } | Select-Object -Unique)
+    if ($activeBindings.Count -ne $treeDevices.Count -or $activeInfs.Count -ne 1 -or
+        $activeVersions.Count -ne 1 -or @($treeDevices | Where-Object { $_.Status -ne 'OK' }).Count -gt 0) {
+        Write-Warning 'The active role-3 package/version or device state is ambiguous; preserving all reconstructed tree packages.'
+        return
+    }
+    $activeInf = [string]$activeInfs[0]
+    $activeVersion = [version]$activeVersions[0]
+
+    $packages = @(Get-WindowsDriver -Online -All | Where-Object {
+        [IO.Path]::GetFileName([string]$_.OriginalFileName) -ieq 'xusb_reconstructed_tree.inf' -and
+        $_.ProviderName -eq 'Virtual Device Camera reconstructed driver'
+    })
+    if ($packages.Count -eq 0) { return }
+
+    # PnPUtil also refuses a package that is still in use. This explicit
+    # present-device check avoids asking it to remove known bindings.
+    $boundInfs = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    try {
+        foreach ($device in (Get-PnpDevice -PresentOnly -ErrorAction Stop)) {
+            $inf = (Get-PnpDeviceProperty -InstanceId $device.InstanceId `
+                -KeyName 'DEVPKEY_Device_DriverInfPath' -ErrorAction SilentlyContinue).Data
+            if ($inf) { [void]$boundInfs.Add([string]$inf) }
+        }
+    }
+    catch {
+        Write-Warning "Could not complete the present-device INF preflight; preserving all inactive tree packages. $($_.Exception.Message)"
+        return
+    }
+
+    foreach ($packageEntry in $packages) {
+        $publishedInf = [string]$packageEntry.Driver
+        if ($publishedInf -ieq $activeInf) { continue }
+        if ($publishedInf -notmatch '^oem\d+\.inf$') {
+            Write-Warning "Could not validate published INF '$publishedInf'; preserving it."
+            continue
+        }
+        try { $packageVersion = [version]$packageEntry.Version }
+        catch {
+            Write-Warning "Could not parse version for $publishedInf; preserving it."
+            continue
+        }
+        if ($packageVersion -ge $activeVersion) { continue }
+        if ($boundInfs.Contains($publishedInf)) {
+            Write-Output "Kept bound role-3 package $publishedInf (version $packageVersion)."
+            continue
+        }
+
+        if (-not (Export-StaleDriverPackage $publishedInf 'xusb_reconstructed_tree.inf')) { continue }
+
+        $output = & $pnputil /delete-driver $publishedInf 2>&1
+        if ($LASTEXITCODE -eq 3010) {
+            throw "pnputil /delete-driver $publishedInf returned 3010 (reboot required). Cleanup stopped; no reboot was started. $($output -join ' ')"
+        }
+        if ($LASTEXITCODE -eq 0) {
+            Write-Output "Removed stale role-3 driver package $publishedInf (version $packageVersion; active version $activeVersion)."
+        } else {
+            Write-Warning "Kept role-3 driver package $publishedInf (version $packageVersion); PnP reports it is still in use or cannot be removed. $($output -join ' ')"
         }
     }
 }
@@ -286,6 +393,20 @@ if ($Action -eq 'Uninstall') {
     }
     Write-Output 'Removed matching role-2, role-3 and previous GUID_XUSB_VIRT_INTERFACE provider device nodes. Driver packages remain staged in the Windows Driver Store.'
     Write-Warning 'Rollback requires re-adding the original root enumerator device with its preserved legacy INF; the old package remains in DriverStore but its removed root device is not recreated automatically.'
+    return
+}
+
+if ($Action -eq 'Cleanup') {
+    Assert-CameraAppClosed
+    $devices = Get-TargetDevices
+    if ($devices.Tree.Count -eq 0 -or $devices.Controller.Count -eq 0 -or
+        @($devices.Tree | Where-Object { $_.Status -ne 'OK' }).Count -gt 0 -or
+        @($devices.Controller | Where-Object { $_.Status -ne 'OK' }).Count -gt 0) {
+        throw 'Cleanup requires the reconstructed tree and UCX controller to be present and in OK state. No package was removed.'
+    }
+    Remove-ObsoleteTreeDriverPackages
+    Remove-ObsoleteUcxDriverPackages
+    Write-Output 'Cleanup finished. Active and newer packages were preserved; PnP refused packages still in use. No reboot was started.'
     return
 }
 
@@ -419,6 +540,7 @@ catch {
 
 Assert-InstalledImage $treeServiceName $treeImagePath
 Assert-InstalledImage $ucxServiceName $ucxImagePath
+Remove-ObsoleteTreeDriverPackages
 Remove-ObsoleteUcxDriverPackages
 
 # Keep the old control-interface provider available until the replacement has a

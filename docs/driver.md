@@ -42,6 +42,8 @@ x64 `xusb_virt.sys` 大小为 51,368 字节；其 Git blob SHA-1 为 `fb62e68217
 
 当前 Release 驱动源码可构建；部署包通过 InfVerif/Inf2Cat 并生成 catalog。catalog 未完成生产签名，不能作为面向公众的正式签名包发布。新驱动最低要求 Windows 10 2004（build 19041）。构建脚本会自动选择具备 UCX 1.1/KMDF 1.31 的 WDK，也可显式指定版本。`replacement-package/replacement-deploy.ps1` 用于版本化 HCD 部署，`driver-source/deploy.ps1` 用于默认包设备创建/更新/移除；均需管理员权限并会阻止同名镜像冲突，不自动重启。测试机已安装本机测试签名的 HCD `2.0.0.34` 与 role-3 `1.0.0.18`，完成根集线器、单/双 SuperSpeed 摄像头枚举、720p30 抓帧和热分辨率往返验证。低/全速新增 IOCTL 通过 ABI 静态断言和 Release 构建；当前 HCD 还以 HID 夹具验证了低/全速 PnP 枚举、interrupt-IN 和移除清理。夹具只发送零填充报告。当前用户态程序仍只选择 USB 2.0 高速或 SuperSpeed。HCD 支持 USB 端点类型检查与 bulk/interrupt URB 转发，但当前用户态 handler 尚无对应数据传输实现，因此这些传输尚未端到端打通。重建驱动仍未覆盖原版所有角色、URB 和 Root Hub 行为。角色划分和限制见[重建驱动说明](../drivers/usb-bus-legacy/driver-source/README.md)。上游 `x86/`、`x64/` 二进制保持原样。反编译清单和函数分析保存在本机 `source-reconstruction/` 目录，由 `.gitignore` 排除，不属于项目源码。
 
+`replacement-deploy.ps1 -Action Cleanup` 可在不重新安装驱动的情况下清理旧的重建 role-3/UCX 包。它要求当前树设备和控制器处于 `OK`，保留活动及更新的树版本、任何当前 PnP 节点正在使用的 INF，并且只用不带 `/uninstall`、`/force` 的 PnPUtil 删除旧包；删除前会先将包导出到 Git 忽略目录。若 Windows 拒绝删除，脚本保留该包并继续处理；若 PnPUtil 报告需重启，则立即停止，不会自动重启。
+
 ## INF 中的复制与改名
 
 INF 的 `CopyFiles` 文件列表使用“目标文件名，源文件名”语法。因此同一个 `xusb_virt.sys` 会在安装时复制成不同服务需要的目标名称；这些目标名称不是必须随包提供的额外源文件。[Microsoft CopyFiles 文档](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/inf-copyfiles-directive)说明了该字段顺序。

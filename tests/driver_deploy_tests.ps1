@@ -60,7 +60,7 @@ if ($ucxText -notmatch 'case\s+UsbdPipeTypeBulk\s*:' -or
 # script bodies, and replace native/CIM/PnP calls made by those functions.
 foreach ($functionName in @(
     'Invoke-PnpUtil', 'Assert-NoImageVersionCollision', 'Assert-InstalledImage',
-    'Assert-TreePackageCandidates'
+    'Assert-TreePackageCandidates', 'Remove-ObsoleteTreeDriverPackages'
 )) {
     $definition = $ast.Find({
         param($node)
@@ -79,9 +79,17 @@ foreach ($functionName in @('Get-NormalizedServiceImagePath', 'Assert-DeviceUses
 }
 
 $pnputil = 'Invoke-MockPnpUtil'
+$script:MockPnpCalls = @()
+$script:MockBackups = @()
+function Export-StaleDriverPackage {
+    param([string] $PublishedInf, [string] $ExpectedInfName)
+    $script:MockBackups += $PublishedInf
+    return $true
+}
 function Invoke-MockPnpUtil {
     [CmdletBinding()]
     param([Parameter(ValueFromRemainingArguments = $true)][string[]] $Arguments)
+    $script:MockPnpCalls += ,@($Arguments)
     if ($Arguments.Count -ge 3 -and $Arguments[0] -eq '/export-driver') {
         $destination = $Arguments[2]
         $script:MockExportDirectory = $destination
@@ -217,12 +225,19 @@ ServiceBinary = %13%\$treeImageName
     function Get-PnpDevice {
         [CmdletBinding()]
         param([switch] $PresentOnly, [string] $InstanceId)
-        return $script:MockDevice
+        $devices = if ($script:MockPresentDevices) { @($script:MockPresentDevices) } else { @($script:MockDevice) }
+        if ($InstanceId) { return @($devices | Where-Object { $_.InstanceId -eq $InstanceId }) }
+        return $devices
     }
     function Get-PnpDeviceProperty {
         [CmdletBinding()]
         param([string] $InstanceId, [string] $KeyName)
-        return [pscustomobject]@{ Data = $script:MockDeviceService }
+        switch ($KeyName) {
+            'DEVPKEY_Device_Service' { return [pscustomobject]@{ Data = $script:MockDeviceService } }
+            'DEVPKEY_Device_DriverInfPath' { return [pscustomobject]@{ Data = $script:MockDeviceInfMap[$InstanceId] } }
+            'DEVPKEY_Device_DriverVersion' { return [pscustomobject]@{ Data = '1.0.0.18' } }
+            default { return [pscustomobject]@{ Data = $null } }
+        }
     }
     $script:MockRuntimeService.Status = 'Running'
     Assert-DeviceUsesService -InstancePrefix 'ROOT\TEST' -ExpectedService 'mock-service' `
@@ -254,6 +269,40 @@ ServiceBinary = %13%\$treeImageName
     }
     if (-not $didThrow) { throw 'A bound service using different image bytes passed the default deploy check.' }
 
+    $script:MockTreeDevice = [pscustomobject]@{ InstanceId = 'ROOT\TREE'; Status = 'OK' }
+    $script:MockPresentDevices = @(
+        $script:MockTreeDevice,
+        [pscustomobject]@{ InstanceId = 'ROOT\OTHER'; Status = 'OK' }
+    )
+    $script:MockDeviceInfMap = @{
+        'ROOT\TREE' = 'oem18.inf'
+        'ROOT\OTHER' = 'oem16.inf'
+    }
+    function Get-TargetDevices {
+        return [pscustomobject]@{
+            Tree = @($script:MockTreeDevice)
+            Controller = @()
+            PreviousControlProviders = @()
+        }
+    }
+    $script:MockDriverPackages = @(
+        [pscustomobject]@{ OriginalFileName = 'C:\store\xusb_reconstructed_tree.inf'; ProviderName = 'Virtual Device Camera reconstructed driver'; Version = [version]'1.0.0.18'; Driver = 'oem18.inf' },
+        [pscustomobject]@{ OriginalFileName = 'C:\store\xusb_reconstructed_tree.inf'; ProviderName = 'Virtual Device Camera reconstructed driver'; Version = [version]'1.0.0.17'; Driver = 'oem17.inf' },
+        [pscustomobject]@{ OriginalFileName = 'C:\store\xusb_reconstructed_tree.inf'; ProviderName = 'Virtual Device Camera reconstructed driver'; Version = [version]'1.0.0.16'; Driver = 'oem16.inf' },
+        [pscustomobject]@{ OriginalFileName = 'C:\store\xusb_reconstructed_tree.inf'; ProviderName = 'Virtual Device Camera reconstructed driver'; Version = [version]'1.0.0.19'; Driver = 'oem19.inf' },
+        [pscustomobject]@{ OriginalFileName = 'C:\store\xusb_reconstructed_tree.inf'; ProviderName = 'Original Vendor'; Version = [version]'1.0.0.1'; Driver = 'oem1.inf' }
+    )
+    $script:MockPnpCalls = @()
+    $script:MockBackups = @()
+    $script:MockNativeExit = 0
+    Remove-ObsoleteTreeDriverPackages
+    $deletedPackages = @($script:MockPnpCalls | Where-Object { $_.Count -ge 2 -and $_[0] -eq '/delete-driver' })
+    if ($deletedPackages.Count -ne 1 -or $deletedPackages[0][1] -ne 'oem17.inf' -or
+        $deletedPackages[0] -contains '/force' -or $deletedPackages[0] -contains '/uninstall' -or
+        $script:MockBackups.Count -ne 1 -or $script:MockBackups[0] -ne 'oem17.inf') {
+        throw 'Tree package cleanup must back up and delete only older, unbound project packages without force/uninstall.'
+    }
+
     $script:MockService = $null
     Assert-NoImageVersionCollision 'new-service' $candidateImage
 }
@@ -263,4 +312,4 @@ finally {
     # Do not leak a simulated native failure to callers running the test suite.
     $global:LASTEXITCODE = 0
 }
-Write-Output 'PASS: deployment reboot/no-update handling, role-3 rank preflight, bound-service/image hash verification and image-version collision checks (native, SCM, CIM and PnP operations mocked).'
+Write-Output 'PASS: deployment reboot/no-update handling, role-3 rank and stale-package cleanup, bound-service/image hash verification and image-version collision checks (native, SCM, CIM and PnP operations mocked).'

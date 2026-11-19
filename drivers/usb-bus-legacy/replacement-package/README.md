@@ -85,8 +85,8 @@ It rejects any higher-version role-3 package already staged for the same INF, st
 the UCX INF, binds `root\*xusb_tree` to the exact requested service/version/image,
 then asks PnPUtil to install the matching UCX HCD package and waits for its versioned
 service binding and a started USB root-hub child (ROOT_HUB20 or ROOT_HUB30). It removes
-obsolete UCX packages and old control providers only after both driver services point
-to the requested package images:
+obsolete reconstructed role-3/UCX packages and old control providers only after both
+driver services point to the requested package images:
 
 ```powershell
 ./replacement-deploy.ps1 -Action Install
@@ -94,9 +94,12 @@ to the requested package images:
 
 The catalogs must validate as trusted before the script proceeds. The package builder
 derives a distinct HCD service/image name from `DriverVer`, so a stale previous HCD image
-does not block the next debug build from loading. Old project UCX packages are pruned
-without `/force` after a successful bind; images Windows still considers in use are left
-alone. Each package version uses a distinct service and image name, so a new HCD can be
+does not block the next debug build from loading. Older project role-3 and UCX packages
+are pruned without `/uninstall` or `/force` after a successful bind. The cleanup keeps
+the active and newer role-3 versions, checks present PnP INF bindings, and relies on
+PnPUtil to reject anything Windows still considers in use. It only matches the project
+provider and reconstructed INF names; original/legacy driver packages are left alone.
+Each package version uses a distinct service and image name, so a new HCD can be
 loaded while an earlier image remains resident. This avoids routine full reboots between
 versioned debug builds. If PnPUtil returns `3010`, the deploy script now stops immediately
 and identifies the command; it does not continue changing devices or reboot Windows.
@@ -146,6 +149,25 @@ with DevCon using the original `xusb_bus.inf` and `root\*xusb_enumbus` ID.
 Restore the old Host Controller/Root Hub topology from the original `xusb_ctrl.inf`
 only when that was the configuration previously in use. Remove corresponding
 `oem*.inf` packages separately only after confirming they are no longer used.
+
+## Clean up older project packages
+
+To prune older reconstructed packages without reinstalling the current build, use
+the explicit cleanup action from an elevated PowerShell window while the application
+is closed:
+
+```powershell
+./replacement-deploy.ps1 -Action Cleanup
+```
+
+Cleanup requires the current reconstructed tree and UCX controller to be present and
+in `OK` state. It preserves packages at or above the active tree version, keeps any
+package referenced by a present PnP device, and asks PnPUtil to delete only older,
+inactive project packages without `/uninstall` or `/force`. If PnPUtil reports that a
+reboot is required, the script stops and does not reboot. A package that Windows refuses
+to remove is retained for later inspection. Before attempting removal, the script exports
+each package into the ignored `replacement-package/build/stale-package-backup/` directory;
+if export fails, that package is left in DriverStore.
 
 ## Compatibility notes
 
