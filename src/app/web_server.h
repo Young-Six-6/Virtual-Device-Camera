@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <utility>
 #include <string>
@@ -24,7 +25,8 @@ struct WebUpdate {
 
 class WebServer {
     std::atomic<uintptr_t> listener_{static_cast<uintptr_t>(-1)};
-    std::atomic<bool> stopping_{false}, running_{false}, winsock_initialized_{false};
+    std::atomic<bool> stopping_{false}, running_{false}, winsock_initialized_{false}, network_access_{false};
+    std::mutex listener_mutex_;
     std::thread worker_;
     unsigned short port_ = 0;
     std::string token_;
@@ -35,6 +37,8 @@ class WebServer {
     std::function<std::string()> logs_;
     std::function<bool()> window_hidden_;
     std::function<bool(bool)> set_window_hidden_;
+    std::function<bool(bool, std::string&)> set_network_access_;
+    bool rebind_network_access(bool enabled, std::string& error);
     void run() noexcept;
 public:
     ~WebServer();
@@ -45,7 +49,9 @@ public:
                std::function<std::pair<std::string, std::string>()> theme = {},
                std::function<std::string()> logs = {},
                std::function<bool()> window_hidden = {},
-               std::function<bool(bool)> set_window_hidden = {});
+               std::function<bool(bool)> set_window_hidden = {},
+               bool network_access = false,
+               std::function<bool(bool, std::string&)> set_network_access = {});
     void stop() noexcept;
     bool running() const { return running_.load(); }
     unsigned short port() const { return port_; }

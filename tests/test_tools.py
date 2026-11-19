@@ -135,6 +135,8 @@ class WindowsPipeTests(unittest.TestCase):
             self.assertIn(b'id="customCss"', page_html)
             self.assertIn(b'id="customJs"', page_html)
             self.assertIn(b'id="hideWindow"', page_html)
+            self.assertIn(b'id="networkToggle"', page_html)
+            self.assertIn(b'id="networkWarning"', page_html)
             self.assertIn(b'id="logOutput"', page_html)
             self.assertIn(b'body { color: blue; }', page_html)
             self.assertIn(b'window.fixtureTheme = true;', page_html)
@@ -182,6 +184,53 @@ class WindowsPipeTests(unittest.TestCase):
             window = connection.getresponse()
             self.assertEqual(window.status, 200)
             self.assertEqual(json.loads(window.read()), {'ok': True, 'hidden': True})
+            connection.close()
+
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+            connection.request('GET', '/api/network', headers=auth)
+            network = connection.getresponse()
+            self.assertEqual(json.loads(network.read()), {'enabled': False})
+            connection.close()
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+            connection.request('POST', '/api/network', body='enabled=true', headers={**auth,
+                'Origin': f'http://127.0.0.1:{port}', 'Content-Type': 'application/x-www-form-urlencoded'})
+            network = connection.getresponse()
+            self.assertEqual(network.status, 200)
+            self.assertEqual(json.loads(network.read()), {'ok': True, 'enabled': True})
+            connection.close()
+
+            # When the wildcard listener is active, a remote interface request must not
+            # be able to impersonate loopback by supplying a loopback Host header.
+            try:
+                local_addresses = {info[4][0] for info in socket.getaddrinfo(
+                    socket.gethostname(), None, socket.AF_INET, socket.SOCK_STREAM)
+                    if not info[4][0].startswith('127.')}
+            except socket.gaierror:
+                local_addresses = set()
+            for address in sorted(local_addresses):
+                connection = http.client.HTTPConnection(address, port, timeout=2)
+                try:
+                    connection.request('GET', '/api/status', headers={**auth,
+                        'Host': f'127.0.0.1:{port}'})
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 403)
+                    response.read()
+                    break
+                except (OSError, http.client.HTTPException):
+                    pass
+                finally:
+                    connection.close()
+
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+            connection.request('GET', '/api/status', headers={**auth, 'Host': 'attacker.invalid'})
+            self.assertEqual(connection.getresponse().status, 403)
+            connection.close()
+            connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
+            connection.request('POST', '/api/network', body='enabled=false', headers={**auth,
+                'Origin': f'http://127.0.0.1:{port}', 'Content-Type': 'application/x-www-form-urlencoded'})
+            network = connection.getresponse()
+            self.assertEqual(network.status, 200)
+            self.assertEqual(json.loads(network.read()), {'ok': True, 'enabled': False})
             connection.close()
 
             connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)

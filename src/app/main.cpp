@@ -171,12 +171,18 @@ int wmain(int argc, wchar_t** argv) {
             [&runtime] { return runtime.theme(); },
             [&log_capture] { return log_capture.tail(); },
             [&tray] { return tray.hidden(); },
-            [&tray](bool hidden) { return tray.set_hidden(hidden); }))
+            [&tray](bool hidden) { return tray.set_hidden(hidden); },
+            settings.web_allow_network,
+            [&runtime](bool enabled, std::string& error) {
+                return runtime.set_web_network_access(enabled, error);
+            }))
             throw std::runtime_error("Unable to start local Web UI; check camera.ini web_port");
         SetConsoleCtrlHandler(console_signal, TRUE);
         log_capture.set_secret(token);
         printf("Control pipe: %s\n", settings.control_pipe.c_str());
         printf("Web UI: http://127.0.0.1:%u/#%s\n", settings.web_port, token.c_str());
+        if (settings.web_allow_network)
+            printf("WARNING: Web UI network access is enabled; use this PC's IPv4 address and the same port/token.\n");
         printf("Press Enter or Ctrl+C to stop.\n");
         wait_for_exit();
         // server is destroyed and joined before cameras; cameras stop and join

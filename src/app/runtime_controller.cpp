@@ -56,6 +56,7 @@ std::string RuntimeController::status_json(unsigned short web_port) const {
     json << "{\"driverAvailable\":" << (driver != VirtUsbDriverKind::unavailable ? "true" : "false")
          << ",\"driverKind\":" << json_string(driver_kind_name(driver))
          << ",\"controlPipeAccess\":" << json_string(access_name(settings_.control_pipe_access))
+         << ",\"webNetworkAccess\":" << (settings_.web_allow_network ? "true" : "false")
          << ",\"webPort\":" << web_port
          << ",\"rgbPipe\":{\"name\":" << json_string(settings_.rgb_pipe)
          << ",\"active\":" << (!pipe.path.empty() ? "true" : "false")
@@ -88,6 +89,21 @@ std::string RuntimeController::status_json(unsigned short web_port) const {
     }
     json << "]}";
     return json.str();
+}
+
+bool RuntimeController::web_network_access() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return settings_.web_allow_network;
+}
+
+bool RuntimeController::set_web_network_access(bool enabled, std::string& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (settings_.web_allow_network == enabled) return true;
+    AppSettings replacement = settings_;
+    replacement.web_allow_network = enabled;
+    if (!save_app_settings(config_path_, replacement, error)) return false;
+    settings_ = std::move(replacement);
+    return true;
 }
 
 std::pair<std::string, std::string> RuntimeController::theme() const {

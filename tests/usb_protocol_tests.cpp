@@ -856,7 +856,7 @@ int main(int argc, char** argv) {
         if (argc == 4 && std::string(argv[1]) == "--web-fixture") {
             const auto port = static_cast<unsigned short>(std::stoi(argv[2]));
             vcam::WebServer web;
-            bool hidden = false;
+            bool hidden = false, network_access = false;
             require(web.start(port, argv[3], [] { return std::string("{\"fixture\":true}"); },
                 [](int camera) -> std::optional<vcam::CameraFrame> {
                     if (camera != 1) return std::nullopt;
@@ -877,7 +877,8 @@ int main(int argc, char** argv) {
                     "body { color: blue; } .fixture::after { content: \"</style>\"; }",
                     "window.fixtureTheme = true; const closeTag = \"</script>\";"}; },
                 [] { return std::string("fixture log line\n"); }, [&] { return hidden; },
-                [&](bool value) { hidden = value; return true; }),
+                [&](bool value) { hidden = value; return true; }, false,
+                [&](bool value, std::string&) { network_access = value; return true; }),
                 "Web UI fixture start failed");
             puts("READY"); fflush(stdout);
             (void)getchar();
@@ -910,6 +911,7 @@ int main(int argc, char** argv) {
             { std::ofstream output(preset); output << "720\n"; }
             auto settings = vcam::load_app_settings(config.u8string());
             require(settings.cameras[0].resolution == vcam::Resolution{1280,720}, "Default resolution preset was not loaded");
+            require(!settings.web_allow_network, "Web UI network listening must default to disabled");
             require(settings.rgb_pipe_access == vcam::PipeAccess::owner &&
                     settings.control_pipe_access == vcam::PipeAccess::everyone,
                 "Default pipe access scopes were not applied independently");
@@ -920,6 +922,7 @@ int main(int argc, char** argv) {
             settings.cameras[0].manufacturer = "测试厂商";
             settings.cameras[0].name = "自定义摄像头";
             settings.camera_name_configured[0] = true;
+            settings.web_allow_network = true;
             settings.cameras[0].yuy2 = false;
             settings.custom_css = "body { color: red; }\n";
             settings.custom_js = "window.testTheme = true;\n";
@@ -931,6 +934,7 @@ int main(int argc, char** argv) {
                     restored.cameras[0].pid == 0xabcd && restored.cameras[0].manufacturer == "测试厂商" &&
                     restored.cameras[0].name == "自定义摄像头" && !restored.cameras[0].yuy2 &&
                     restored.camera_name_configured[0] &&
+                    restored.web_allow_network &&
                     restored.cameras[0].mjpeg && restored.custom_css == settings.custom_css &&
                     restored.custom_js == settings.custom_js && restored.rgb_pipe == settings.rgb_pipe &&
                     restored.rgb_pipe_access == vcam::PipeAccess::owner &&
