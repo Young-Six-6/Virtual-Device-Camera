@@ -57,7 +57,7 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <AdditionalLibraryDirectories>$(FFmpegRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avformat.lib;avcodec.lib;swscale.lib;avutil.lib;setupapi.lib;advapi32.lib;ws2_32.lib;bcrypt.lib;shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>avformat.lib;avcodec.lib;swscale.lib;avutil.lib;setupapi.lib;advapi32.lib;ws2_32.lib;bcrypt.lib;crypt32.lib;winhttp.lib;shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
@@ -105,6 +105,7 @@
     <ClCompile Include="src\camera\uvc_device.cpp" />
     <ClCompile Include="src\camera\camera_session.cpp" />
     <ClCompile Include="src\media\frame_source.cpp" />
+    <ClCompile Include="src\media\obs_capture.cpp" />
     <ClCompile Include="src\media\pipe_reader.cpp" />
     <ClCompile Include="src\usb\virt_dev.cpp" />
   </ItemGroup>
@@ -122,7 +123,9 @@
     <ClInclude Include="src\common\resolution.h" />
     <ClInclude Include="src\common\pipe_io.h" />
     <ClInclude Include="src\common\pipe_security.h" />
+    <ClInclude Include="src\common\obs_settings.h" />
     <ClInclude Include="src\media\frame_source.h" />
+    <ClInclude Include="src\media\obs_capture.h" />
     <ClInclude Include="src\media\pipe_reader.h" />
     <ClInclude Include="src\protocol\uvc_struct.h" />
     <ClInclude Include="src\usb\ioctl.h" />

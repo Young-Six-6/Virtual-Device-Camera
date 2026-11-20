@@ -33,6 +33,7 @@ label{display:block;color:var(--muted);font-size:12px;margin:14px 0 6px}input,se
 textarea{width:100%;min-height:120px;resize:vertical;background:#101517;color:var(--text);border:1px solid #3a484e;padding:10px;font:12px/1.45 Consolas,monospace}.formats label{display:flex;align-items:center;gap:8px}.formats input{width:auto}details{border-top:1px solid var(--line);margin-top:18px;padding-top:12px}summary{color:var(--accent);cursor:pointer}
 .toggle{display:flex;align-items:center;gap:8px}.toggle input{width:auto}.logs{max-width:1100px;margin:18px auto;padding:16px 20px;background:var(--panel);border:1px solid var(--line)}.log-tools{display:flex;justify-content:space-between;align-items:center}.logs pre{max-height:38vh;min-height:90px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#0b0e10;border:1px solid var(--line);padding:12px;color:#c7d4d6;font:12px/1.45 Consolas,monospace}
 .network-access{margin-top:16px;border:1px solid var(--line);padding:12px}.network-row{grid-template-columns:1fr auto;align-items:center}.network-row button.danger{color:var(--bad);border-color:var(--bad)}.network-warning{margin:10px 0 0;padding:9px 11px;border-left:2px solid var(--bad);background:#2a1717;color:var(--bad)}.network-warning[hidden]{display:none}
+.obs-settings{margin-top:12px;padding:12px;border:1px solid var(--line)}.obs-settings[hidden]{display:none}.obs-settings .toggle{margin:10px 0}.obs-password{display:flex;align-items:center;gap:8px}.obs-password input{flex:1}.obs-password label{margin:0;white-space:nowrap}.input-note{margin-top:7px}
 @media(max-width:760px){main{margin:20px auto}.layout{grid-template-columns:1fr}.top{align-items:start;gap:8px;flex-direction:column}}
 </style><!--VCAM_THEME--></head><body><main>
 <header class="top"><div><h1>VIRTUAL CAMERA / CONTROL</h1><div class="sub">本机设备状态与运行参数</div></div><div id="webstate" class="state"><i class="dot"></i><span>连接中</span></div></header>
@@ -44,6 +45,13 @@ textarea{width:100%;min-height:120px;resize:vertical;background:#101517;color:va
 <div class="row"><div><label for="manufacturer">设备厂商</label><input id="manufacturer" maxlength="126"></div><div><label for="name">摄像头名称</label><input id="name" maxlength="126"></div></div>
 <label>输出格式</label><div class="row formats"><label><input id="yuy2" type="checkbox"> YUY2</label><label><input id="mjpeg" type="checkbox"> MJPEG</label></div>
 <label for="rgb">RGB 输入管道名</label><input id="rgb" autocomplete="off">
+<label for="inputMode">视频输入源</label><select id="inputMode"><option value="pipe">RGB 命名管道</option><option value="obs">OBS WebSocket 连接器</option></select><div id="inputModeNote" class="sub input-note">选择 OBS 后由程序直接连接 OBS 并抓取画面，无需运行外部脚本。</div>
+<div id="obsSettings" class="obs-settings" hidden><b>OBS WebSocket</b><div class="row"><div><label for="obsHost">主机</label><input id="obsHost" maxlength="253" placeholder="localhost"></div><div><label for="obsPort">端口</label><input id="obsPort" type="number" min="1" max="65535"></div></div>
+<label for="obsSource">场景或来源名称</label><input id="obsSource" maxlength="256" placeholder="OBS 场景/来源名称">
+<div class="row"><div><label for="obsFps">抓帧频率（1–60 fps）</label><input id="obsFps" type="number" min="1" max="60"></div><div><label for="obsColor">测试画面颜色</label><input id="obsColor" type="color" value="#ff0000"></div></div>
+<label class="toggle"><input id="obsAutoSize" type="checkbox">自动跟随 OBS 画布尺寸</label><label class="toggle"><input id="obsTestColor" type="checkbox">发送测试纯色画面，不连接 OBS</label>
+<label for="obsPassword">OBS WebSocket 密码</label><input id="obsPassword" type="password" maxlength="256" autocomplete="new-password"><div id="obsPasswordHint" class="sub"></div><div class="sub">出于传输安全，密码只允许从本机回环地址修改；网络访问时该项只读。</div><label class="toggle"><input id="obsClearPassword" type="checkbox">清除已保存密码</label>
+<div id="obsAvailability" class="sub"></div></div>
 <label for="control">控制管道名</label><input id="control" autocomplete="off">
 <label for="access">控制管道访问范围</label><select id="access"><option value="everyone">Everyone + SYSTEM</option><option value="owner">当前用户 + SYSTEM</option><option value="users">本机 Users 组 + SYSTEM</option></select>
 <div class="network-access"><div class="row network-row"><div><b>WebUI 网络监听</b><div class="sub">默认仅本机访问；可临时允许其他设备连接。</div></div><button id="networkToggle" class="secondary" type="button">允许网络访问</button></div><div id="networkWarning" class="network-warning" hidden>危险：WebUI 正在监听所有 IPv4 网络接口。访问仍需本次启动令牌，但 HTTP 不加密；请只在可信网络开启。其他设备使用本机 IPv4 地址、端口和控制台中的令牌访问。</div></div>
@@ -57,17 +65,18 @@ const $=id=>document.getElementById(id);const api=async(path,opts={})=>fetch(pat
 $("camera").value=initialCamera;
 function state(ok,text){$("webstate").innerHTML=`<i class="dot ${ok?"":"off"}"></i><span>${text}</span>`}
 function updateNetworkUI(enabled){$("networkToggle").textContent=enabled?'关闭网络访问':'允许网络访问';$("networkToggle").classList.toggle('danger',enabled);$("networkWarning").hidden=!enabled}
+function updateObsUI(){$("obsSettings").hidden=$("inputMode").value!=='obs';const locked=!current?.inputModeAvailable,testColor=$("obsTestColor").checked,localPage=['127.0.0.1','localhost'].includes(location.hostname);$("obsHost").disabled=$("obsPort").disabled=$("obsSource").disabled=locked||testColor;$("obsPassword").disabled=locked||testColor||!localPage;$("obsFps").disabled=$("obsColor").disabled=$("obsAutoSize").disabled=$("obsTestColor").disabled=locked;$("obsClearPassword").disabled=locked||!localPage||(!current?.obs?.passwordConfigured&&!current?.obs?.passwordNeedsReentry);if(current?.obs)$("obsPasswordHint").textContent=current.obs.passwordNeedsReentry?'旧密码无法由当前 Windows 用户解密；请重新输入并保存。':current.obs.passwordConfigured?'密码已加密保存；留空表示保持原密码。':'尚未设置密码；若 OBS 未启用身份验证可留空。'}
 function escapeHtml(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))}
-async function refresh(loadConfig=false){try{const r=await api('/api/status');if(!r.ok)throw Error('接口未授权或不可用');current=await r.json();state(true,'本机服务在线');updateNetworkUI(Boolean(current.webNetworkAccess));const cam=current.cameras.find(c=>c.index===Number($("camera").value));if(loadConfig&&cam){$("width").value=cam.width;$("height").value=cam.height;$("fps").value=cam.fps;$("vid").value=cam.vid;$("pid").value=cam.pid;$("manufacturer").value=cam.manufacturer;$("name").value=cam.name;$("yuy2").checked=cam.yuy2;$("mjpeg").checked=cam.mjpeg}if(loadConfig){$("camera").options[1].disabled=!current.cameras[1].present;$("rgb").value=current.rgbPipe.name;$("control").value=current.controlPipe.name;$("access").value=current.controlPipeAccess;const themeResponse=await api('/api/theme');if(themeResponse.ok){const theme=await themeResponse.json();$("customCss").value=theme.css;$("customJs").value=theme.js}const windowResponse=await api('/api/window');if(windowResponse.ok){const windowState=await windowResponse.json();$("hideWindow").checked=windowState.hidden}}
+async function refresh(loadConfig=false){try{const r=await api('/api/status');if(!r.ok)throw Error('接口未授权或不可用');current=await r.json();state(true,'本机服务在线');updateNetworkUI(Boolean(current.webNetworkAccess));const cam=current.cameras.find(c=>c.index===Number($("camera").value));if(loadConfig&&cam){$("width").value=cam.width;$("height").value=cam.height;$("fps").value=cam.fps;$("vid").value=cam.vid;$("pid").value=cam.pid;$("manufacturer").value=cam.manufacturer;$("name").value=cam.name;$("yuy2").checked=cam.yuy2;$("mjpeg").checked=cam.mjpeg}if(loadConfig){$("camera").options[1].disabled=!current.cameras[1].present;$("rgb").value=current.rgbPipe.name;$("control").value=current.controlPipe.name;$("access").value=current.controlPipeAccess;$("inputMode").value=current.inputMode;$("obsHost").value=current.obs.host;$("obsPort").value=current.obs.port;$("obsSource").value=current.obs.source;$("obsFps").value=current.obs.fps;$("obsAutoSize").checked=current.obs.autoSize;$("obsTestColor").checked=current.obs.testColor;$("obsColor").value='#'+current.obs.color;$("obsPassword").value='';$("obsPasswordHint").textContent=current.obs.passwordConfigured?'密码已加密保存；留空表示保持原密码。':'尚未设置密码；若 OBS 未启用身份验证可留空。';$("inputMode").disabled=!current.inputModeAvailable;$("inputModeNote").textContent=current.inputModeAvailable?'选择 OBS 后由程序直接连接 OBS 并抓取画面，无需运行外部脚本。':'当前通过命令行 MP4 文件作为输入；切换到管道或 OBS 请重启时不要传入视频文件。';updateObsUI();const themeResponse=await api('/api/theme');if(themeResponse.ok){const theme=await themeResponse.json();$("customCss").value=theme.css;$("customJs").value=theme.js}const windowResponse=await api('/api/window');if(windowResponse.ok){const windowState=await windowResponse.json();$("hideWindow").checked=windowState.hidden}}
 const pipeState=!current.rgbPipe.active?'当前输入源未使用':current.rgbPipe.connected?'客户端已连接':current.rgbPipe.listening?'监听中，等待客户端连接':'监听未运行';const frameState=current.rgbPipe.frames?`${current.rgbPipe.frames} 帧 · 最近 ${Math.round(current.rgbPipe.frameAgeMs/1000)} 秒`:'尚未收到帧';
-const driverLabel={foss:'FOSS 重建版',original:'原版驱动',unknown:'已发现·无法识别',unavailable:'未发现'}[current.driverKind]||'无法识别';const modeLabel={superspeed:'SuperSpeed','high-speed':'USB 2.0 高速',disconnected:'未连接'}[cam?.usbMode]||'未知';const cameraState=cam?.running?'运行中':cam?.present?'已停止':'未连接';$("previewMode").textContent=modeLabel;$("actualFps").textContent=`${Number(cam?.actualFps||0).toFixed(1)} fps`;
-$("stats").innerHTML=`<div class="stat"><span class="muted">虚拟 USB 驱动</span><b>${escapeHtml(driverLabel)}</b></div><div class="stat"><span class="muted">摄像头状态</span><b>${escapeHtml(cameraState)}</b></div><div class="stat"><span class="muted">USB 身份</span><b>${escapeHtml(cam?.manufacturer||'')} ${escapeHtml(cam?.vid||'')}:${escapeHtml(cam?.pid||'')}</b></div><div class="stat"><span class="muted">RGB 输入管道</span><b>${escapeHtml(pipeState)}</b><small class="muted">${escapeHtml(frameState)}</small></div><div class="stat"><span class="muted">控制管道</span><b>${current.controlPipe.running?'监听中':'未运行'}</b></div><div class="stat"><span class="muted">Web UI</span><b>${current.webNetworkAccess?'网络监听·所有 IPv4 接口':'仅本机·127.0.0.1'}:${escapeHtml(current.webPort)}</b></div>`
+const driverLabel={foss:'FOSS 重建版',original:'原版驱动',unknown:'已发现·无法识别',unavailable:'未发现'}[current.driverKind]||'无法识别';const modeLabel={superspeed:'SuperSpeed','high-speed':'USB 2.0 高速',disconnected:'未连接'}[cam?.usbMode]||'未知';const cameraState=cam?.running?'运行中':cam?.present?'已停止':'未连接';const inputModeLabel={pipe:'RGB 命名管道',obs:'OBS WebSocket',file:'MP4 文件'}[current.inputActiveMode]||'未启动';const inputStateLabel={connected:'已连接',waiting:'等待发送端',connecting:'正在连接',retrying:'重试连接中','test-color':'测试画面',playing:'读取文件',stopped:'已停止'}[current.inputSource.state]||current.inputSource.state;const inputFrameState=current.inputSource.frames?`${current.inputSource.frames} 帧 · 最近 ${Math.round(current.inputSource.lastFrameMs/1000)} 秒 · ${current.inputSource.width}×${current.inputSource.height}`:'尚未收到帧';const inputError=current.inputSource.error?`<small class="muted">${escapeHtml(current.inputSource.error)}</small>`:'';$("previewMode").textContent=modeLabel;$("actualFps").textContent=`${Number(cam?.actualFps||0).toFixed(1)} fps`;
+$("stats").innerHTML=`<div class="stat"><span class="muted">虚拟 USB 驱动</span><b>${escapeHtml(driverLabel)}</b></div><div class="stat"><span class="muted">摄像头状态</span><b>${escapeHtml(cameraState)}</b></div><div class="stat"><span class="muted">USB 身份</span><b>${escapeHtml(cam?.manufacturer||'')} ${escapeHtml(cam?.vid||'')}:${escapeHtml(cam?.pid||'')}</b></div><div class="stat"><span class="muted">当前输入源 · ${escapeHtml(inputModeLabel)}</span><b>${escapeHtml(inputStateLabel)}</b><small class="muted">${escapeHtml(inputFrameState)}</small>${inputError}</div><div class="stat"><span class="muted">RGB 输入管道</span><b>${escapeHtml(pipeState)}</b><small class="muted">${escapeHtml(frameState)}</small></div><div class="stat"><span class="muted">控制管道</span><b>${current.controlPipe.running?'监听中':'未运行'}</b></div><div class="stat"><span class="muted">Web UI</span><b>${current.webNetworkAccess?'网络监听·所有 IPv4 接口':'仅本机·127.0.0.1'}:${escapeHtml(current.webPort)}</b></div>`
 }catch(e){state(false,'状态读取失败');$("message").textContent=e.message}}
 function clip(v){return Math.max(0,Math.min(255,v))}
 function draw(bytes,w,h){const canvas=$("frame"),ctx=canvas.getContext('2d');canvas.width=w;canvas.height=h;const image=ctx.createImageData(w,h),out=image.data;for(let i=0,j=0;i<w*h*2;i+=4,j+=8){const u=bytes[i+1]-128,v=bytes[i+3]-128;for(let p=0;p<2;p++){const y=Math.max(0,bytes[i+p*2]-16),c=298*y;out[j+p*4]=clip((c+409*v+128)>>8);out[j+p*4+1]=clip((c-100*u-208*v+128)>>8);out[j+p*4+2]=clip((c+516*u+128)>>8);out[j+p*4+3]=255}}ctx.putImageData(image,0,0)}
 async function preview(){try{const r=await api(`/api/frame?camera=${$("camera").value}`);if(!r.ok)return;const w=Number(r.headers.get('X-Frame-Width')),h=Number(r.headers.get('X-Frame-Height'));draw(new Uint8Array(await r.arrayBuffer()),w,h)}catch(_){}}
 async function refreshLogs(){try{const r=await api('/api/logs');if(!r.ok)return;const value=await r.json();const output=$("logOutput"),stick=output.scrollTop+output.clientHeight>=output.scrollHeight-8;output.textContent=value.text||'';if(stick)output.scrollTop=output.scrollHeight}catch(_){}}
-$("camera").onchange=()=>refresh(true);$("refresh").onclick=()=>refresh(true);$("apply").onclick=async()=>{const message=$("message");message.className='message';message.textContent='应用中…';const body=new URLSearchParams({camera:$("camera").value,width:$("width").value,height:$("height").value,fps:$("fps").value,vid:$("vid").value,pid:$("pid").value,manufacturer:$("manufacturer").value,name:$("name").value,yuy2:String($("yuy2").checked),mjpeg:String($("mjpeg").checked),rgb_pipe:$("rgb").value,control_pipe:$("control").value,control_pipe_access:$("access").value,custom_css:$("customCss").value,custom_js:$("customJs").value});try{const r=await api('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const result=await r.json();if(!r.ok||!result.ok)throw Error(result.error||'应用失败');message.textContent='设置已保存。摄像头由用户态摘除并重新枚举，无需重新安装驱动；视频客户端可能需要重新打开。主题正在刷新。';location.replace('/#'+token+':'+$("camera").value)}catch(e){message.className='message error';message.textContent=e.message}};
+$("camera").onchange=()=>refresh(true);$("refresh").onclick=()=>refresh(true);$("inputMode").onchange=updateObsUI;$("obsTestColor").onchange=updateObsUI;$("apply").onclick=async()=>{const message=$("message");message.className='message';message.textContent='应用中…';const body=new URLSearchParams({camera:$("camera").value,width:$("width").value,height:$("height").value,fps:$("fps").value,vid:$("vid").value,pid:$("pid").value,manufacturer:$("manufacturer").value,name:$("name").value,yuy2:String($("yuy2").checked),mjpeg:String($("mjpeg").checked),rgb_pipe:$("rgb").value,control_pipe:$("control").value,control_pipe_access:$("access").value,custom_css:$("customCss").value,custom_js:$("customJs").value});if(current?.inputModeAvailable){body.set('input_mode',$("inputMode").value);body.set('obs_host',$("obsHost").value);body.set('obs_port',$("obsPort").value);body.set('obs_source',$("obsSource").value);body.set('obs_fps',$("obsFps").value);body.set('obs_auto_size',String($("obsAutoSize").checked));body.set('obs_test_color',String($("obsTestColor").checked));body.set('obs_color',$("obsColor").value.replace('#',''));body.set('obs_clear_password',String($("obsClearPassword").checked));if($("obsPassword").value)body.set('obs_password',$("obsPassword").value)}try{const r=await api('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const result=await r.json();if(!r.ok||!result.ok)throw Error(result.error||'应用失败');message.textContent='设置已保存。摄像头由用户态摘除并重新枚举，无需重新安装驱动；视频客户端可能需要重新打开。主题正在刷新。';location.replace('/#'+token+':'+$("camera").value)}catch(e){message.className='message error';message.textContent=e.message}};
 $("networkToggle").onclick=async()=>{const button=$("networkToggle"),message=$("message"),enabled=!Boolean(current?.webNetworkAccess);button.disabled=true;message.className='message';message.textContent=enabled?'正在开启网络监听…':'正在关闭网络监听…';try{const r=await api('/api/network',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({enabled:String(enabled)})});const result=await r.json();if(!r.ok||!result.ok)throw Error(result.error||'网络访问设置失败');current.webNetworkAccess=result.enabled;updateNetworkUI(result.enabled);message.textContent=result.enabled?'网络访问已开启。其他设备请使用本机 IPv4 地址、当前端口和启动令牌。':'网络访问已关闭，仅允许本机连接。'}catch(e){message.className='message error';message.textContent=e.message}finally{button.disabled=false}};
 $("hideWindow").onchange=async()=>{const requested=$("hideWindow").checked;try{const r=await api('/api/window',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({hidden:String(requested)})});const value=await r.json();if(!r.ok||!value.ok)throw Error(value.error||'托盘切换失败');$("hideWindow").checked=value.hidden}catch(e){$("hideWindow").checked=!requested;$("message").className='message error';$("message").textContent=e.message}};
 $("logDetails").addEventListener('toggle',()=>{if($("logDetails").open)refreshLogs()});$("refreshLogs").onclick=refreshLogs;
@@ -109,6 +118,12 @@ bool request_host_allowed(SOCKET client, const std::string& host, unsigned short
     char address[INET_ADDRSTRLEN]{};
     if (!InetNtopA(AF_INET, &local.sin_addr, address, sizeof(address))) return false;
     return host == std::string(address) + ":" + std::to_string(port);
+}
+bool request_peer_is_loopback(SOCKET client) {
+    sockaddr_in peer{};
+    int peer_length = sizeof(peer);
+    return getpeername(client, reinterpret_cast<sockaddr*>(&peer), &peer_length) == 0 &&
+        peer.sin_family == AF_INET && (ntohl(peer.sin_addr.s_addr) >> 24) == 127;
 }
 std::string protect_raw_text_close(std::string source, const char* closing_tag) {
     const size_t length = std::char_traits<char>::length(closing_tag);
@@ -208,6 +223,19 @@ bool parse_bool(const std::map<std::string, std::string>& fields, const char* ke
     if (found->second == "true") value = true;
     else if (found->second == "false") value = false;
     else return false;
+    return true;
+}
+bool parse_rgb(const std::map<std::string, std::string>& fields, const char* key, uint8_t value[3]) {
+    const auto found = fields.find(key);
+    if (found == fields.end() || found->second.size() != 6) return false;
+    for (size_t index = 0; index < 3; ++index) {
+        unsigned int channel = 0;
+        const auto parsed = std::from_chars(found->second.data() + index * 2,
+            found->second.data() + index * 2 + 2, channel, 16);
+        if (parsed.ec != std::errc{} || parsed.ptr != found->second.data() + index * 2 + 2 || channel > 255)
+            return false;
+        value[index] = static_cast<uint8_t>(channel);
+    }
     return true;
 }
 std::string json_escape(const std::string& value) {
@@ -534,6 +562,36 @@ void WebServer::run() noexcept {
                         update.custom_js = fields["custom_js"];
                     }
                 }
+                const bool anyInputSettings = fields.count("input_mode") || fields.count("obs_host") ||
+                    fields.count("obs_port") || fields.count("obs_source") || fields.count("obs_fps") ||
+                    fields.count("obs_auto_size") || fields.count("obs_test_color") || fields.count("obs_color") ||
+                    fields.count("obs_password") || fields.count("obs_clear_password");
+                if (valid && anyInputSettings) {
+                    int obs_port = 0;
+                    update.has_input_settings = fields.count("input_mode") &&
+                        parse_integer(fields, "obs_port", obs_port) && obs_port >= 1 && obs_port <= 65535 &&
+                        parse_integer(fields, "obs_fps", update.obs.fps) &&
+                        parse_bool(fields, "obs_auto_size", update.obs.auto_size) &&
+                        parse_bool(fields, "obs_test_color", update.obs.test_color) &&
+                        parse_rgb(fields, "obs_color", update.obs.color);
+                    valid = update.has_input_settings && (fields["input_mode"] == "pipe" || fields["input_mode"] == "obs") &&
+                        fields.count("obs_host") && fields.count("obs_source") &&
+                        fields["obs_host"].size() <= 253 && fields["obs_source"].size() <= 256;
+                    if (valid) {
+                        update.input_mode = fields["input_mode"];
+                        update.obs.host = fields["obs_host"];
+                        update.obs.port = static_cast<uint16_t>(obs_port);
+                        update.obs.source = fields["obs_source"];
+                        if (fields.count("obs_password")) {
+                            valid = fields["obs_password"].size() <= 256;
+                            update.obs.password = fields["obs_password"];
+                            update.obs_password_changed = true;
+                        }
+                        if (fields.count("obs_clear_password"))
+                            valid = valid && parse_bool(fields, "obs_clear_password", update.clear_obs_password);
+                        if (update.obs_password_changed && update.clear_obs_password) valid = false;
+                    }
+                }
                 if (valid) {
                     update.rgb_pipe = fields["rgb_pipe"];
                     update.control_pipe = fields["control_pipe"];
@@ -545,6 +603,13 @@ void WebServer::run() noexcept {
                 if (valid && valid_output(update.settings.resolution) && update.camera >= 1 && update.camera <= 2 &&
                     valid_pipe_path(update.rgb_pipe) && valid_pipe_path(update.control_pipe) &&
                     update.rgb_pipe != update.control_pipe) {
+                    if (update.has_input_settings && (update.obs_password_changed || update.clear_obs_password) &&
+                        !request_peer_is_loopback(client)) {
+                        respond(client, 403, "Forbidden", "application/json; charset=utf-8",
+                            "{\"ok\":false,\"error\":\"obs-password-local-only\"}");
+                        closesocket(client);
+                        continue;
+                    }
                     std::string error;
                     bool success = false;
                     try { success = update_(update, error); }

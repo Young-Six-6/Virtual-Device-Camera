@@ -137,6 +137,10 @@ class WindowsPipeTests(unittest.TestCase):
             self.assertIn(b'id="hideWindow"', page_html)
             self.assertIn(b'id="networkToggle"', page_html)
             self.assertIn(b'id="networkWarning"', page_html)
+            self.assertIn(b'id="inputMode"', page_html)
+            self.assertIn(b'id="obsHost"', page_html)
+            self.assertIn(b'id="obsPassword"', page_html)
+            self.assertIn(b'id="obsAutoSize"', page_html)
             self.assertIn(b'id="logOutput"', page_html)
             self.assertIn(b'body { color: blue; }', page_html)
             self.assertIn(b'window.fixtureTheme = true;', page_html)
@@ -252,7 +256,11 @@ class WindowsPipeTests(unittest.TestCase):
                 'yuy2': 'true', 'mjpeg': 'false',
                 'rgb_pipe': r'\\.\pipe\vcam_pipe', 'control_pipe': r'\\.\pipe\vcam_control',
                 'control_pipe_access': 'everyone', 'custom_css': 'body { color: red; }\n',
-                'custom_js': 'window.testTheme = true;\n'
+                'custom_js': 'window.testTheme = true;\n',
+                'input_mode': 'obs', 'obs_host': 'localhost', 'obs_port': 4458,
+                'obs_source': 'Scene 1', 'obs_fps': 12, 'obs_auto_size': 'false',
+                'obs_test_color': 'true', 'obs_color': '112233',
+                'obs_password': 'fixture-obs-secret', 'obs_clear_password': 'false'
             })
             connection = http.client.HTTPConnection('127.0.0.1', port, timeout=3)
             connection.request('POST', '/api/config', body=body, headers={**auth,

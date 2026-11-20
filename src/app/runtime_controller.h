@@ -14,9 +14,10 @@ class RuntimeController {
     frame_source* source_;
     CameraSession* cameras_[2];
     ControlServer* control_;
+    bool input_mode_available_ = true;
 public:
     RuntimeController(AppSettings settings, std::string config_path, frame_source* source,
-                      void* camera1, void* camera2, ControlServer& control);
+                      void* camera1, void* camera2, ControlServer& control, bool input_mode_available = true);
     std::string status_json(unsigned short web_port) const;
     bool web_network_access() const;
     bool set_web_network_access(bool enabled, std::string& error);

@@ -118,14 +118,20 @@ int wmain(int argc, wchar_t** argv) {
             settings.cameras[1].resolution = size;
         }
         if (!settings.camera_name_configured[0])
-            settings.cameras[0].name = files.empty() ? "Pipe HD Camera 1" : "MP4 HD Camera 1";
+            settings.cameras[0].name = !files.empty() ? "MP4 HD Camera 1" :
+                settings.input_mode == "obs" ? "OBS HD Camera 1" : "Pipe HD Camera 1";
         using Source = std::unique_ptr<frame_source, decltype(&frame_source_destroy)>;
         using Camera = std::unique_ptr<void, decltype(&vcam_destroy)>;
         Source source1(files.empty() ? frame_source_create_pipe(settings.rgb_pipe.c_str()) : frame_source_create_file(files[0].c_str()), frame_source_destroy);
         Source source2(files.size() == 2 ? frame_source_create_file(files[1].c_str()) : nullptr, frame_source_destroy);
         if (!source1 || (files.size() == 2 && !source2)) throw std::runtime_error("Unable to allocate frame source");
-        if (files.empty() && !frame_source_start_pipe_listener(source1.get(), settings.rgb_pipe_access))
-            throw std::runtime_error("Unable to start RGB pipe");
+        if (files.empty()) {
+            std::string input_error;
+            if (!frame_source_set_input(source1.get(), settings.input_mode, settings.obs,
+                settings.rgb_pipe.c_str(), settings.rgb_pipe_access, settings.cameras[0].resolution, input_error))
+                throw std::runtime_error("Unable to start input source: " + input_error);
+            printf("Input source: %s\n", settings.input_mode == "obs" ? "OBS WebSocket" : "RGB named pipe");
+        }
         auto create = [&](frame_source* source, int number) {
             const auto& camera_settings = settings.cameras[number - 1];
             uvc_vcam_t config{};
@@ -161,7 +167,7 @@ int wmain(int argc, wchar_t** argv) {
         }, settings.control_pipe_access)) throw std::runtime_error("Unable to start camera control pipe");
         vcam::TrayController tray(application_stop.get());
         if (!tray.initialize()) throw std::runtime_error("Unable to initialize the system tray controller");
-        vcam::RuntimeController runtime(settings, config_path.u8string(), source1.get(), camera1.get(), camera2.get(), server);
+        vcam::RuntimeController runtime(settings, config_path.u8string(), source1.get(), camera1.get(), camera2.get(), server, files.empty());
         vcam::WebServer web;
         const std::string token = vcam::create_web_token();
         if (!web.start(static_cast<unsigned short>(settings.web_port), token,

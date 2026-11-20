@@ -867,6 +867,13 @@ int main(int argc, char** argv) {
                         update.settings.fps != 24 || update.settings.vid != 0x1234 ||
                         update.settings.pid != 0xabcd || update.settings.manufacturer != "测试厂商" ||
                         update.settings.name != "测试摄像头" || !update.settings.yuy2 || update.settings.mjpeg ||
+                        !update.has_input_settings || update.input_mode != "obs" ||
+                        update.obs.host != "localhost" || update.obs.port != 4458 ||
+                        update.obs.source != "Scene 1" || update.obs.fps != 12 || update.obs.auto_size ||
+                        !update.obs.test_color || update.obs.color[0] != 0x11 ||
+                        update.obs.color[1] != 0x22 || update.obs.color[2] != 0x33 ||
+                        !update.obs_password_changed || update.obs.password != "fixture-obs-secret" ||
+                        update.clear_obs_password ||
                         !update.has_theme || update.custom_css != "body { color: red; }\n" ||
                         update.custom_js != "window.testTheme = true;\n") {
                         error = "fixture-rejected";
@@ -923,11 +930,28 @@ int main(int argc, char** argv) {
             settings.cameras[0].name = "自定义摄像头";
             settings.camera_name_configured[0] = true;
             settings.web_allow_network = true;
+            settings.input_mode = "obs";
+            settings.obs.host = "localhost";
+            settings.obs.port = 4458;
+            settings.obs.source = "场景一";
+            settings.obs.password = "config-only-obs-secret";
+            settings.obs.fps = 15;
+            settings.obs.auto_size = false;
+            settings.obs.test_color = true;
+            settings.obs.color[0] = 0x12;
+            settings.obs.color[1] = 0x34;
+            settings.obs.color[2] = 0x56;
             settings.cameras[0].yuy2 = false;
             settings.custom_css = "body { color: red; }\n";
             settings.custom_js = "window.testTheme = true;\n";
             std::string error;
             require(vcam::save_app_settings(config.u8string(), settings, error), "Persistent settings save failed");
+            std::ifstream saved_config(config, std::ios::binary);
+            const std::string saved_text((std::istreambuf_iterator<char>(saved_config)), std::istreambuf_iterator<char>());
+            saved_config.close();
+            require(saved_text.find(settings.obs.password) == std::string::npos &&
+                    saved_text.find("obs_password_dpapi_hex=") != std::string::npos,
+                "OBS password was not protected at rest in camera.ini");
             auto restored = vcam::load_app_settings(config.u8string());
             require(restored.cameras[0].resolution == vcam::Resolution{1024,768} &&
                     restored.cameras[0].fps == 24 && restored.cameras[0].vid == 0x1234 &&
@@ -935,11 +959,39 @@ int main(int argc, char** argv) {
                     restored.cameras[0].name == "自定义摄像头" && !restored.cameras[0].yuy2 &&
                     restored.camera_name_configured[0] &&
                     restored.web_allow_network &&
+                    restored.input_mode == "obs" && restored.obs.host == "localhost" &&
+                    restored.obs.port == 4458 && restored.obs.source == "场景一" &&
+                    restored.obs.password == "config-only-obs-secret" && restored.obs.fps == 15 &&
+                    !restored.obs.auto_size && restored.obs.test_color &&
+                    restored.obs.color[0] == 0x12 && restored.obs.color[1] == 0x34 && restored.obs.color[2] == 0x56 &&
                     restored.cameras[0].mjpeg && restored.custom_css == settings.custom_css &&
                     restored.custom_js == settings.custom_js && restored.rgb_pipe == settings.rgb_pipe &&
                     restored.rgb_pipe_access == vcam::PipeAccess::owner &&
                     restored.control_pipe_access == vcam::PipeAccess::everyone,
                 "Persistent settings did not round-trip");
+            const auto foreign_user = directory / "foreign-user.ini";
+            { std::ofstream output(foreign_user); output << "obs_password_dpapi_hex=deadbeef\n"; }
+            auto foreign_settings = vcam::load_app_settings(foreign_user.u8string());
+            require(foreign_settings.obs.password.empty() && foreign_settings.obs_password_needs_reentry &&
+                    foreign_settings.obs_password_encrypted == "deadbeef",
+                "Unusable current-user OBS password should allow startup and request re-entry");
+            require(vcam::save_app_settings(foreign_user.u8string(), foreign_settings, error),
+                "Saving other settings should preserve an unreadable encrypted OBS password");
+            std::ifstream foreign_saved(foreign_user, std::ios::binary);
+            const std::string foreign_text((std::istreambuf_iterator<char>(foreign_saved)), std::istreambuf_iterator<char>());
+            foreign_saved.close();
+            require(foreign_text.find("obs_password_dpapi_hex=deadbeef") != std::string::npos,
+                "Unrelated settings save discarded the unreadable OBS password");
+            foreign_settings.obs.password = "replacement-secret";
+            foreign_settings.obs_password_needs_reentry = false;
+            foreign_settings.obs_password_encrypted.clear();
+            if (!vcam::save_app_settings(foreign_user.u8string(), foreign_settings, error))
+                throw std::runtime_error("Replacing an unreadable OBS password failed: " + error);
+            const auto replaced_password = vcam::load_app_settings(foreign_user.u8string());
+            require(!replaced_password.obs_password_needs_reentry &&
+                    replaced_password.obs.password == "replacement-secret",
+                "Re-entered OBS password did not replace the unreadable value");
+            std::filesystem::remove(foreign_user);
             const auto legacy = directory / "legacy.ini";
             { std::ofstream output(legacy); output << "pipe_access=users\n"; }
             const auto migrated = vcam::load_app_settings(legacy.u8string());
