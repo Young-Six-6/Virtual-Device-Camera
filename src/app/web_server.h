@@ -1,5 +1,6 @@
 #pragma once
 #include "../camera/camera_session.h"
+#include "../common/obs_settings.h"
 #include "../common/pipe_security.h"
 #include <atomic>
 #include <cstdint>
@@ -19,8 +20,13 @@ struct WebUpdate {
     PipeAccess control_access = PipeAccess::everyone;
     std::string custom_css;
     std::string custom_js;
+    std::string input_mode;
+    ObsSettings obs;
     bool has_camera_settings = false;
     bool has_theme = false;
+    bool has_input_settings = false;
+    bool obs_password_changed = false;
+    bool clear_obs_password = false;
 };
 
 class WebServer {

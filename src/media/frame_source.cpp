@@ -1,4 +1,5 @@
 #include "frame_source.h"
+#include "obs_capture.h"
 #include "pipe_reader.h"
 #include "../common/resolution.h"
 #include <algorithm>
@@ -44,9 +45,14 @@ void rgb_to_yuy2(const uint8_t* input, int stride, frame_t& output) {
 
 struct frame_source {
     bool pipe_mode = false;
+    bool pipe_source = false;
+    bool file_mode = false;
+    bool obs_mode = false;
+    int obs_fps = 10;
     std::string path;
     std::string pipe_path = "\\\\.\\pipe\\vcam_pipe";
     vcam::PipeReader receiver;
+    std::unique_ptr<vcam::ObsCapture> obs;
     std::mutex render_mutex;
     std::unique_ptr<AVFormatContext, FormatDeleter> format;
     std::unique_ptr<AVCodecContext, CodecDeleter> codec;
@@ -183,6 +189,7 @@ frame_source* frame_source_create_file(const char* path) {
         if (!source->decoded || !source->rgb || !source->mjpeg_frame ||
             !source->packet || !source->mjpeg_packet) return nullptr;
         source->path = path;
+        source->file_mode = true;
         return source.release();
     }
     catch (...) { return nullptr; }
@@ -193,6 +200,7 @@ frame_source* frame_source_create_pipe(const char* pipe_path) {
         if (!source->decoded || !source->rgb || !source->mjpeg_frame ||
             !source->packet || !source->mjpeg_packet) return nullptr;
         source->pipe_mode = true;
+        source->pipe_source = true;
         if (pipe_path && *pipe_path) source->pipe_path = pipe_path;
         return source.release();
     }
@@ -203,12 +211,91 @@ bool frame_source_start_pipe_listener(frame_source* source, vcam::PipeAccess acc
 }
 bool frame_source_reconfigure_pipe(frame_source* source, const char* path, vcam::PipeAccess access) {
     if (!source || !source->pipe_mode || !path || !*path) return false;
+    std::lock_guard<std::mutex> lock(source->render_mutex);
     if (!source->receiver.reconfigure(path, access)) return false;
     source->pipe_path = path;
     return true;
 }
+bool frame_source_set_input(frame_source* source, const std::string& mode, const vcam::ObsSettings& obs,
+                            const char* pipe_path, vcam::PipeAccess access, vcam::Resolution target,
+                            std::string& error) {
+    if (!source || !source->pipe_source || source->file_mode || !pipe_path || !*pipe_path) {
+        error = "input-mode-not-runtime-configurable";
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(source->render_mutex);
+    if (mode == "obs") {
+        std::unique_ptr<vcam::ObsCapture> replacement;
+        try { replacement = std::make_unique<vcam::ObsCapture>(obs, target); }
+        catch (...) { error = "obs-worker-allocation-failed"; return false; }
+        if (!replacement->start(error)) return false;
+        if (source->pipe_mode) source->receiver.stop();
+        if (source->obs) source->obs->stop();
+        source->obs = std::move(replacement);
+        source->obs_mode = true;
+        source->pipe_mode = false;
+        source->obs_fps = obs.fps;
+        source->pipe_path = pipe_path;
+        return true;
+    }
+    if (mode == "pipe") {
+        if (source->pipe_mode) {
+            if (!source->receiver.reconfigure(pipe_path, access)) {
+                error = "rgb-pipe-reconfigure-failed";
+                return false;
+            }
+        } else if (!source->receiver.start(pipe_path, access)) {
+            error = "rgb-pipe-listener-start-failed";
+            return false;
+        }
+        if (source->obs) source->obs->stop();
+        source->obs.reset();
+        source->obs_mode = false;
+        source->pipe_mode = true;
+        source->obs_fps = obs.fps;
+        source->pipe_path = pipe_path;
+        return true;
+    }
+    error = "invalid-input-mode";
+    return false;
+}
+void frame_source_set_target(frame_source* source, vcam::Resolution target) {
+    if (!source) return;
+    std::lock_guard<std::mutex> lock(source->render_mutex);
+    if (source->obs) source->obs->set_target(target);
+}
+FrameSourceStatus frame_source_input_status(frame_source* source) {
+    FrameSourceStatus result;
+    if (!source) return result;
+    std::lock_guard<std::mutex> lock(source->render_mutex);
+    if (source->obs_mode && source->obs) {
+        const auto status = source->obs->status();
+        result.mode = "obs";
+        result.state = status.state;
+        result.error = status.error;
+        result.connected = status.state == "connected" || status.state == "test-color";
+        result.frames = status.frames;
+        result.last_frame_ms = status.last_frame_ms;
+        result.frame_size = status.frame_size;
+    } else if (source->pipe_mode) {
+        const auto status = source->receiver.status();
+        result.mode = "pipe";
+        result.state = status.connected ? "connected" : status.listening ? "waiting" : "stopped";
+        result.connected = status.connected;
+        result.listening = status.listening;
+        result.frames = status.frames;
+        result.last_frame_ms = status.last_frame_ms;
+        result.frame_size = status.frame_size;
+    } else if (source->file_mode) {
+        result.mode = "file";
+        result.state = "playing";
+    }
+    return result;
+}
 vcam::PipeReaderStatus frame_source_pipe_status(frame_source* source) {
-    return source && source->pipe_mode ? source->receiver.status() : vcam::PipeReaderStatus{};
+    if (!source) return {};
+    std::lock_guard<std::mutex> lock(source->render_mutex);
+    return source->pipe_mode ? source->receiver.status() : vcam::PipeReaderStatus{};
 }
 void frame_source_destroy(frame_source* source) { delete source; }
 void frame_source_interrupt(void* pointer) {
@@ -232,9 +319,9 @@ int frame_source_callback(frame_t* output) {
     auto& source = *static_cast<frame_source*>(output->param);
     std::lock_guard<std::mutex> lock(source.render_mutex);
     try {
-        if (source.pipe_mode) {
-            auto frame = source.receiver.latest();
-            output->delay_msec = 33;
+        if (source.pipe_mode || source.obs_mode) {
+            auto frame = source.pipe_mode ? source.receiver.latest() : source.obs ? source.obs->latest() : nullptr;
+            output->delay_msec = source.pipe_mode ? 33 : (std::max)(1, 1000 / source.obs_fps);
             if (!frame) {
                 auto* pixels = reinterpret_cast<uint8_t*>(output->buffer);
                 for (size_t offset = 0; offset < vcam::yuy2_bytes({output->width, output->height}); offset += 4) {

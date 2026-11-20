@@ -25,13 +25,29 @@ $compilerArgs = @('/nologo', '/std:c++17', '/EHsc', '/W4', '/utf-8', '/external:
     ("/external:I$FFmpegRoot\include"), ("/Fo$output\"), ("/Fe$testExe"),
     (Join-Path $repoRoot 'tests\frame_source_resolution_tests.cpp'),
     (Join-Path $repoRoot 'src\media\frame_source.cpp'),
+    (Join-Path $repoRoot 'src\media\obs_capture.cpp'),
     (Join-Path $repoRoot 'src\media\pipe_reader.cpp'))
 if ($Configuration -eq 'Debug') { $compilerArgs += @('/MTd', '/Od', '/Zi', ("/Fd$output\resolution-tests.pdb")) }
 else { $compilerArgs += @('/MT', '/O2') }
 $compilerArgs += @('/link', ("/LIBPATH:$FFmpegRoot\lib"),
-    'avformat.lib', 'avcodec.lib', 'swscale.lib', 'avutil.lib', 'gdi32.lib', 'advapi32.lib')
+    'avformat.lib', 'avcodec.lib', 'swscale.lib', 'avutil.lib', 'gdi32.lib', 'advapi32.lib',
+    'bcrypt.lib', 'crypt32.lib', 'winhttp.lib')
 & cl.exe @compilerArgs
 if ($LASTEXITCODE -ne 0) { throw "Resolution test build failed: $LASTEXITCODE" }
+
+$obsTestExe = Join-Path $output 'obs-capture-protocol-tests.exe'
+$obsObjectOutput = Join-Path $output 'obs-protocol'
+New-Item -ItemType Directory -Path $obsObjectOutput -Force | Out-Null
+$obsCompilerArgs = @('/nologo', '/std:c++17', '/EHsc', '/W4', '/utf-8', '/external:W0',
+    ("/external:I$FFmpegRoot\include"), ("/Fo$obsObjectOutput\"), ("/Fe$obsTestExe"),
+    (Join-Path $repoRoot 'tests\obs_capture_protocol_tests.cpp'),
+    (Join-Path $repoRoot 'src\media\obs_capture.cpp'))
+if ($Configuration -eq 'Debug') { $obsCompilerArgs += @('/MTd', '/Od', '/Zi', ("/Fd$output\obs-capture-protocol-tests.pdb")) }
+else { $obsCompilerArgs += @('/MT', '/O2') }
+$obsCompilerArgs += @('/link', ("/LIBPATH:$FFmpegRoot\lib"),
+    'avcodec.lib', 'swscale.lib', 'avutil.lib', 'bcrypt.lib', 'crypt32.lib', 'winhttp.lib', 'ws2_32.lib')
+& cl.exe @obsCompilerArgs
+if ($LASTEXITCODE -ne 0) { throw "OBS capture protocol test build failed: $LASTEXITCODE" }
 
 $fixtures = @()
 $segments = @()
@@ -63,6 +79,8 @@ try {
     $env:PATH = (Join-Path $FFmpegRoot 'bin') + ';' + $env:PATH
     & $testExe @fixtures $dynamicFixture $mjpegFixture
     if ($LASTEXITCODE -ne 0) { throw "Resolution regression tests failed: $LASTEXITCODE" }
+    & $obsTestExe $mjpegFixture
+    if ($LASTEXITCODE -ne 0) { throw "OBS capture protocol tests failed: $LASTEXITCODE" }
     & $ffmpeg -hide_banner -loglevel error -y -i $mjpegFixture -frames:v 1 -f null -
     if ($LASTEXITCODE -ne 0) { throw 'FFmpeg could not decode the generated 720p MJPEG frame.' }
 }

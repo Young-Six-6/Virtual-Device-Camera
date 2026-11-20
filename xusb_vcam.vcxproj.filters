@@ -18,6 +18,7 @@
     <ClCompile Include="src\camera\uvc_device.cpp"><Filter>Camera</Filter></ClCompile>
     <ClCompile Include="src\camera\camera_session.cpp"><Filter>Camera</Filter></ClCompile>
     <ClCompile Include="src\media\frame_source.cpp"><Filter>Media</Filter></ClCompile>
+    <ClCompile Include="src\media\obs_capture.cpp"><Filter>Media</Filter></ClCompile>
     <ClCompile Include="src\media\pipe_reader.cpp"><Filter>Media</Filter></ClCompile>
     <ClCompile Include="src\usb\virt_dev.cpp"><Filter>USB</Filter></ClCompile>
   </ItemGroup>
@@ -35,7 +36,9 @@
     <ClInclude Include="src\common\resolution.h"><Filter>Common</Filter></ClInclude>
     <ClInclude Include="src\common\pipe_io.h"><Filter>Common</Filter></ClInclude>
     <ClInclude Include="src\common\pipe_security.h"><Filter>Common</Filter></ClInclude>
+    <ClInclude Include="src\common\obs_settings.h"><Filter>Common</Filter></ClInclude>
     <ClInclude Include="src\media\frame_source.h"><Filter>Media</Filter></ClInclude>
+    <ClInclude Include="src\media\obs_capture.h"><Filter>Media</Filter></ClInclude>
     <ClInclude Include="src\media\pipe_reader.h"><Filter>Media</Filter></ClInclude>
     <ClInclude Include="src\protocol\uvc_struct.h"><Filter>Protocol</Filter></ClInclude>
     <ClInclude Include="src\usb\ioctl.h"><Filter>USB</Filter></ClInclude>

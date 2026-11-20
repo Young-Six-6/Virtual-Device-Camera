@@ -1,10 +1,13 @@
 #include "app_config.h"
 #include <Windows.h>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <stdexcept>
 #include <charconv>
+#include <vector>
+#include <wincrypt.h>
 
 namespace vcam {
 namespace {
@@ -70,6 +73,68 @@ std::string hex_decode(const std::map<std::string, std::string>& values, const c
     }
     return decoded;
 }
+std::vector<uint8_t> binary_hex_decode(const std::string& encoded, const char* key) {
+    if (encoded.size() % 2 || encoded.size() > 8192)
+        throw std::runtime_error(std::string("Invalid encoded config value: ") + key);
+    auto nibble = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 :
+        c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; };
+    std::vector<uint8_t> decoded;
+    decoded.reserve(encoded.size() / 2);
+    for (size_t i = 0; i < encoded.size(); i += 2) {
+        const int high = nibble(encoded[i]), low = nibble(encoded[i + 1]);
+        if (high < 0 || low < 0)
+            throw std::runtime_error(std::string("Invalid encoded config value: ") + key);
+        decoded.push_back(static_cast<uint8_t>((high << 4) | low));
+    }
+    return decoded;
+}
+std::string protect_obs_password(const std::string& password) {
+    if (password.empty()) return {};
+    static const BYTE entropy_bytes[] = "Virtual Device Camera OBS WebSocket password";
+    DATA_BLOB input{static_cast<DWORD>(password.size()), reinterpret_cast<BYTE*>(const_cast<char*>(password.data()))};
+    DATA_BLOB entropy{sizeof(entropy_bytes) - 1, const_cast<BYTE*>(entropy_bytes)};
+    DATA_BLOB protected_data{};
+    if (!CryptProtectData(&input, L"Virtual Camera OBS WebSocket", &entropy, nullptr, nullptr,
+        CRYPTPROTECT_UI_FORBIDDEN, &protected_data))
+        throw std::runtime_error("Unable to protect OBS password for the current Windows user");
+    std::string encoded = hex_encode(std::string(reinterpret_cast<char*>(protected_data.pbData), protected_data.cbData));
+    SecureZeroMemory(protected_data.pbData, protected_data.cbData);
+    LocalFree(protected_data.pbData);
+    return encoded;
+}
+std::string obs_color_hex(const uint8_t color[3]) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string output(6, '0');
+    for (size_t channel = 0; channel < 3; ++channel) {
+        output[channel * 2] = digits[color[channel] >> 4];
+        output[channel * 2 + 1] = digits[color[channel] & 15];
+    }
+    return output;
+}
+std::string unprotect_obs_password(const std::string& encoded, bool& needs_reentry) {
+    if (encoded.empty()) return {};
+    const auto encrypted = binary_hex_decode(encoded, "obs_password_dpapi_hex");
+    static const BYTE entropy_bytes[] = "Virtual Device Camera OBS WebSocket password";
+    DATA_BLOB input{static_cast<DWORD>(encrypted.size()), const_cast<BYTE*>(encrypted.data())};
+    DATA_BLOB entropy{sizeof(entropy_bytes) - 1, const_cast<BYTE*>(entropy_bytes)};
+    DATA_BLOB clear{};
+    LPWSTR description = nullptr;
+    if (!CryptUnprotectData(&input, &description, &entropy, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &clear)) {
+        needs_reentry = true;
+        return {};
+    }
+    if (description) LocalFree(description);
+    std::string password(reinterpret_cast<char*>(clear.pbData), clear.cbData);
+    SecureZeroMemory(clear.pbData, clear.cbData);
+    LocalFree(clear.pbData);
+    return password;
+}
+bool valid_utf8_bytes(const std::string& value, size_t maximum_bytes, bool allow_empty = false) {
+    if ((!allow_empty && value.empty()) || value.size() > maximum_bytes || value.find('\0') != std::string::npos ||
+        value.find('\r') != std::string::npos || value.find('\n') != std::string::npos) return false;
+    return value.empty() || MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        value.data(), static_cast<int>(value.size()), nullptr, 0) > 0;
+}
 bool valid_utf8_text(const std::string& value, size_t maximum_bytes, bool allow_empty = false,
                      bool allow_line_breaks = false) {
     if ((!allow_empty && value.empty()) || value.size() > maximum_bytes || value.find('\0') != std::string::npos ||
@@ -87,6 +152,18 @@ bool valid_camera(const CameraSettings& camera) {
 }
 bool valid_theme(const std::string& source) {
     return valid_utf8_text(source, 65536, true, true);
+}
+bool valid_obs_settings(const ObsSettings& settings) {
+    const bool host_chars_ok = std::none_of(settings.host.begin(), settings.host.end(), [](unsigned char c) {
+        return c < 0x21 || c == 0x7f || c == '/' || c == '\\' || c == ':' || c == '?' || c == '#' || c == '@';
+    });
+    const bool source_chars_ok = std::none_of(settings.source.begin(), settings.source.end(), [](unsigned char c) {
+        return c < 0x20 || c == 0x7f;
+    });
+    return valid_utf8_bytes(settings.host, 253) && host_chars_ok &&
+        valid_utf8_bytes(settings.source, 256) && source_chars_ok &&
+        valid_utf8_bytes(settings.password, 256, true) && settings.port != 0 &&
+        settings.fps >= 1 && settings.fps <= 60;
 }
 void resolve_camera(Resolution& value, Resolution fallback) {
     if (value.width == 0 && value.height == 0) value = fallback;
@@ -140,6 +217,31 @@ AppSettings load_app_settings(const std::string& config_name) {
         parse_access("control_pipe_access", settings.control_pipe_access);
         settings.web_port = integer_value(values, "web_port", settings.web_port);
         settings.web_allow_network = bool_value(values, "web_allow_network", settings.web_allow_network);
+        if (values.count("input_mode")) settings.input_mode = values.at("input_mode");
+        if (values.count("obs_host")) settings.obs.host = values.at("obs_host");
+        const int obs_port = integer_value(values, "obs_port", settings.obs.port);
+        if (obs_port < 1 || obs_port > 65535) throw std::runtime_error("obs_port must be within 1..65535");
+        settings.obs.port = static_cast<uint16_t>(obs_port);
+        if (values.count("obs_source")) settings.obs.source = values.at("obs_source");
+        settings.obs.fps = integer_value(values, "obs_fps", settings.obs.fps);
+        settings.obs.auto_size = bool_value(values, "obs_auto_size", settings.obs.auto_size);
+        settings.obs.test_color = bool_value(values, "obs_test_color", settings.obs.test_color);
+        if (values.count("obs_color")) {
+            const std::string color = values.at("obs_color");
+            if (color.size() != 6) throw std::runtime_error("obs_color must be six hexadecimal digits");
+            for (size_t channel = 0; channel < 3; ++channel) {
+                unsigned int value = 0;
+                const auto result = std::from_chars(color.data() + channel * 2, color.data() + channel * 2 + 2, value, 16);
+                if (result.ec != std::errc{} || result.ptr != color.data() + channel * 2 + 2 || value > 255)
+                    throw std::runtime_error("obs_color must be six hexadecimal digits");
+                settings.obs.color[channel] = static_cast<uint8_t>(value);
+            }
+        }
+        if (values.count("obs_password_dpapi_hex")) {
+            settings.obs_password_encrypted = values.at("obs_password_dpapi_hex");
+            settings.obs.password = unprotect_obs_password(settings.obs_password_encrypted,
+                settings.obs_password_needs_reentry);
+        }
         for (int i = 0; i < 2; ++i) {
             CameraSettings& camera = settings.cameras[i];
             const std::string prefix = "camera" + std::to_string(i + 1) + "_";
@@ -160,7 +262,8 @@ AppSettings load_app_settings(const std::string& config_name) {
     }
     resolve_camera(settings.cameras[0].resolution, fallback);
     resolve_camera(settings.cameras[1].resolution, fallback);
-    if (!valid_camera(settings.cameras[0]) || !valid_camera(settings.cameras[1]) ||
+    if ((settings.input_mode != "pipe" && settings.input_mode != "obs") || !valid_obs_settings(settings.obs) ||
+        !valid_camera(settings.cameras[0]) || !valid_camera(settings.cameras[1]) ||
         !valid_theme(settings.custom_css) || !valid_theme(settings.custom_js))
         throw std::runtime_error("Invalid camera or theme settings in camera.ini");
     if (!valid_pipe_path(settings.rgb_pipe) || !valid_pipe_path(settings.control_pipe) ||
@@ -174,11 +277,20 @@ AppSettings load_app_settings(const std::string& config_name) {
 bool save_app_settings(const std::string& config_name, const AppSettings& settings, std::string& error) {
     if (!valid_pipe_path(settings.rgb_pipe) || !valid_pipe_path(settings.control_pipe) ||
         settings.rgb_pipe == settings.control_pipe || !valid_camera(settings.cameras[0]) ||
-        !valid_camera(settings.cameras[1]) || settings.web_port < 1024 || settings.web_port > 65535 ||
+        !valid_camera(settings.cameras[1]) || (settings.input_mode != "pipe" && settings.input_mode != "obs") ||
+        !valid_obs_settings(settings.obs) || settings.web_port < 1024 || settings.web_port > 65535 ||
         !valid_theme(settings.custom_css) || !valid_theme(settings.custom_js)) {
         error = "invalid-settings";
         return false;
     }
+    std::string protected_obs_password;
+    try {
+        if (settings.obs_password_needs_reentry && settings.obs.password.empty())
+            protected_obs_password = settings.obs_password_encrypted;
+        else
+            protected_obs_password = protect_obs_password(settings.obs.password);
+    }
+    catch (...) { error = "obs-password-protect-failed"; return false; }
     const auto path = std::filesystem::u8path(config_name);
     auto temporary = path;
     temporary += L".tmp";
@@ -192,6 +304,15 @@ bool save_app_settings(const std::string& config_name, const AppSettings& settin
                << "control_pipe_access=" << access_value(settings.control_pipe_access) << "\n"
                << "web_port=" << settings.web_port << "\n"
                << "web_allow_network=" << (settings.web_allow_network ? "true" : "false") << "\n"
+               << "input_mode=" << settings.input_mode << "\n"
+               << "obs_host=" << settings.obs.host << "\n"
+               << "obs_port=" << settings.obs.port << "\n"
+               << "obs_source=" << settings.obs.source << "\n"
+               << "obs_fps=" << settings.obs.fps << "\n"
+               << "obs_auto_size=" << (settings.obs.auto_size ? "true" : "false") << "\n"
+               << "obs_test_color=" << (settings.obs.test_color ? "true" : "false") << "\n"
+               << "obs_color=" << obs_color_hex(settings.obs.color) << "\n"
+               << "obs_password_dpapi_hex=" << protected_obs_password << "\n"
                << "camera1_width=" << settings.cameras[0].resolution.width << "\n"
                << "camera1_height=" << settings.cameras[0].resolution.height << "\n"
                << "camera1_fps=" << settings.cameras[0].fps << "\n"

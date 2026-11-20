@@ -1,5 +1,6 @@
 #pragma once
 #include "../common/camera_settings.h"
+#include "../common/obs_settings.h"
 #include "../common/pipe_security.h"
 #include <string>
 
@@ -11,6 +12,10 @@ struct AppSettings {
     PipeAccess control_pipe_access = PipeAccess::everyone;
     int web_port = 8765;
     bool web_allow_network = false;
+    std::string input_mode = "pipe";
+    ObsSettings obs;
+    std::string obs_password_encrypted;
+    bool obs_password_needs_reentry = false;
     CameraSettings cameras[2]{};
     bool camera_name_configured[2]{};
     std::string custom_css;

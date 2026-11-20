@@ -361,6 +361,47 @@ void check_pipe_reconfigure() {
     }
     require(received, "Reconfigured pipe did not accept a client");
 }
+
+void check_obs_source_switch() {
+    Source source(frame_source_create_pipe(test_pipe.c_str()), frame_source_destroy);
+    require(source != nullptr, "OBS source fixture allocation failed");
+    vcam::ObsSettings obs;
+    obs.test_color = true;
+    obs.fps = 30;
+    obs.color[0] = 0;
+    obs.color[1] = 255;
+    obs.color[2] = 0;
+    std::string error;
+    require(frame_source_set_input(source.get(), "obs", obs, test_pipe.c_str(), vcam::PipeAccess::owner,
+        {640,480}, error), "Unable to start integrated OBS test source");
+    Output output({640,480}, source.get());
+    const ULONGLONG deadline = GetTickCount64() + 3000;
+    while (GetTickCount64() < deadline && !output.is_color(144,54,34)) {
+        require(frame_source_callback(&output.frame) == 0, "OBS test source callback failed");
+        Sleep(2);
+    }
+    require(output.is_color(144,54,34), "OBS test-color frame was not converted into camera output");
+    auto status = frame_source_input_status(source.get());
+    require(status.mode == "obs" && status.state == "test-color" && status.frames > 0,
+        "Integrated OBS source status did not report captured frames");
+
+    require(frame_source_set_input(source.get(), "pipe", obs, test_pipe.c_str(), vcam::PipeAccess::owner,
+        {640,480}, error), "Unable to switch OBS source back to RGB pipe");
+    status = frame_source_input_status(source.get());
+    require(status.mode == "pipe" && status.listening, "RGB pipe was not restored after leaving OBS mode");
+    PipeSender sender({640,480}, true);
+    const ULONGLONG pipe_deadline = GetTickCount64() + 3000;
+    bool pipe_frame = false;
+    while (GetTickCount64() < pipe_deadline) {
+        require(frame_source_callback(&output.frame) == 0, "RGB pipe callback failed after OBS mode");
+        if (output.is_color(144,54,34) && frame_source_input_status(source.get()).frames > 0) {
+            pipe_frame = true;
+            break;
+        }
+        Sleep(2);
+    }
+    require(pipe_frame, "RGB pipe stopped accepting frames after OBS mode was disabled");
+}
 }
 
 int main(int argc, char** argv)
@@ -389,7 +430,8 @@ int main(int argc, char** argv)
         check_pipe_reconnect();
         check_pipe_shutdown();
         check_pipe_reconfigure();
-        printf("PASS: 720p MJPEG encoding within USB 2.0 budget; 9 MP4 + 9 pipe combinations, reconnect/reconfigure, dynamic-size video, looping, and buffer/header guards.\n");
+        check_obs_source_switch();
+        printf("PASS: 720p MJPEG encoding within USB 2.0 budget; 9 MP4 + 9 pipe combinations, reconnect/reconfigure, OBS source switching, dynamic-size video, looping, and buffer/header guards.\n");
         return 0;
     }
     catch (const std::exception& error)

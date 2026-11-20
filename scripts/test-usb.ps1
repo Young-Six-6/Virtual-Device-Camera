@@ -19,7 +19,7 @@ $arguments = @('/nologo','/std:c++17','/EHsc','/W3','/wd4200','/utf-8',("/Fo$out
     (Join-Path $repoRoot 'src\app\web_server.cpp'))
 if ($Configuration -eq 'Debug') { $arguments += @('/MTd','/Od','/Zi',("/Fd$output\usb-tests.pdb")) }
 else { $arguments += @('/MT','/O2') }
-$arguments += @('/link', 'advapi32.lib', 'ws2_32.lib', 'bcrypt.lib')
+$arguments += @('/link', 'advapi32.lib', 'ws2_32.lib', 'bcrypt.lib', 'crypt32.lib')
 & cl.exe @arguments
 if ($LASTEXITCODE -ne 0) { throw 'USB test compilation failed.' }
 & (Join-Path $output 'usb-tests.exe')

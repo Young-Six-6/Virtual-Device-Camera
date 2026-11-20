@@ -61,6 +61,8 @@ RGB 输入管道默认只允许创建它的对象所有者和 SYSTEM 访问。�
 .\.venv\Scripts\python.exe .\tools\python\ObsLocalPine.py
 ```
 
+普通本机 OBS 输入现在可以直接在 WebUI 的“视频输入源”中选择 OBS WebSocket，由摄像头程序自行连接并重连，不需要另开 `ObsLocalPine.py`。脚本仍作为独立管道发送工具保留，适用于 Hyper-V/TCP 发送等场景。配置细节和密码保护方式见[WebUI OBS 输入说明](web-ui.md#obs-websocket-输入)。
+
 ## Hyper-V/TCP 转发
 
 在 Hyper-V 虚拟机中运行 `WebVideoReceive.py`，宿主机运行 `WebVideoSend.py`。默认接收地址为 `0.0.0.0:5008`；发送端默认查询名为 `camera` 的虚拟机地址，并从 OBS 场景获取图像。两端使用同一 `<ii` little-endian 尺寸头和固定长度 RGB24 帧。TCP 接收支持碎片读取与客户端重连。
