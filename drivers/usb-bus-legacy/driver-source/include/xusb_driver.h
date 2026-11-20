@@ -11,6 +11,8 @@
 #define XUSB_POOL_TAG         'sUXV'
 #define XUSB_MAX_PIPES        64
 #define XUSB_MAX_USB_ADDRESS  127
+#define XUSB_ROOT_HUB_PORT_COUNT 16
+#define XUSB_MAX_MS_FEATURE_DESCRIPTOR_BYTES 4096
 
 typedef enum _XUSB_DEVICE_ROLE {
     XusbRoleUsbOnlyEnumerator = 0,
@@ -68,6 +70,7 @@ typedef struct _XUSB_CHILD_EXTENSION {
     BOOLEAN Internal;
     BOOLEAN RemovalPending;
     LONG BusAddress;
+    ULONG RootHubPortNumber;
     BOOLEAN Present;
     BOOLEAN Removed;
     /* PnP and power reasons are combined into TransactionQuiesced; removal is terminal. */

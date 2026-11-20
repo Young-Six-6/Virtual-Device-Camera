@@ -1,8 +1,16 @@
 # Combined role-3 + UCX role-2 replacement package
 
-Latest runtime validation (2026-11-19): role-3 tree 1.0.0.18 and HCD 2.0.0.34 were installed and bound in the same Windows boot session using the local test-signing certificate. The virtual controller, its USB 3 root hub, and camera nodes reported OK. FFmpeg/DirectShow captured 120 frames of 1280×720 YUY2 from one stream in 3.93 seconds (about 30.5fps). Two concurrent streams each delivered 120 frames in 3.96 seconds (about 30.3fps per stream) with the test client's receive buffer sized to avoid startup drops. After the app stopped, both camera nodes disappeared and HCD pending transactions/removal work items returned to zero. No Windows restart was needed.
+Current runtime validation (2026-11-21): role-3 tree 1.0.0.22 and HCD 2.0.0.41 are running on the same Windows installation under the local test-signing certificate. Both packages installed and bound in the current boot session without rebooting; the controller, tree, and USB 3 root hub report `OK`, and the hub reports seven ports. DirectShow captured 120 frames of 1280×720 YUY2 at 30fps in 3.95 seconds. The same app process changed resolution 1280×720 → 640×480 → 1280×720; both status queries reported `RUNNING`, and DirectShow captured 30 frames at each size. After app shutdown, no virtual-camera PDO remained and HCD pending transaction/removal-work-item counts were zero.
 
-The latest read-only PnP/SCM query reports tree 1.0.0.18 and HCD 2.0.0.34 in `OK` state, with both services running. After the capture run, no camera function node or stream remained; pending transactions and removal work items were zero.
+The HCD `.40` attempt regressed camera streaming because it treated `USBD_ISO_PACKET_DESCRIPTOR.Length` as the requested capacity for an IN packet. Windows defines this field as the actual length received from the host controller. HCD `.41` now derives each writable packet slice from the next packet offset (or the end of the transfer buffer), caps it by the endpoint service-interval limit, and validates the returned length against those bounds. This behavior matches [Microsoft's isochronous-transfer guidance](https://learn.microsoft.com/windows-hardware/drivers/usbcon/transfer-data-to-isochronous-endpoints). Release build, protocol tests, package validation, and the runtime capture/resolution tests above pass on `.41`.
+
+The bulk probe is a single short transaction in each direction, not a throughput or long-duration stress test. The Windows-to-HCD OS feature-descriptor path is verified through vendor control, but the direct `URB_FUNCTION_GET_MS_FEATURE_DESCRIPTOR` representation at the HCD boundary, every root-hub power/link transition, and all URB families remain unverified. The production camera responder also does not implement arbitrary bulk/interrupt device classes. Earlier full-rate camera figures below were measured on HCD `.34` and remain historical.
+
+The earlier `0x144/3` crash was in the test-only KMDF client, which used a stack URB despite registering `USBD_CLIENT_CONTRACT_VERSION_602`. The client now uses `WdfUsbTargetDeviceCreateUrb`; the corrected descriptor probe removed its test node cleanly. The crash event remains the latest BugCheck 1001 in the system log; no newer one occurred during `.41/.22` install and camera capture.
+
+Historical camera performance validation (2026-11-19): role-3 tree 1.0.0.18 and HCD 2.0.0.34 were installed and bound in the same Windows boot session using the local test-signing certificate. The virtual controller, its USB 3 root hub, and camera nodes reported OK. FFmpeg/DirectShow captured 120 frames of 1280×720 YUY2 from one stream in 3.93 seconds (about 30.5fps). Two concurrent streams each delivered 120 frames in 3.96 seconds (about 30.3fps per stream) with the test client's receive buffer sized to avoid startup drops. After the app stopped, both camera nodes disappeared and HCD pending transactions/removal work items returned to zero. No Windows restart was needed.
+
+Read-only PnP/SCM snapshot from 2026-11-19: tree 1.0.0.18 and HCD 2.0.0.34 were in `OK` state, with both services running. After the capture run, no camera function node or stream remained; pending transactions and removal work items were zero. The later `.20/.39` probe results are recorded in the 2026-11-20 historical notes; current `.22/.41` status is at the top.
 
 Tree 1.0.0.14 and 1.0.0.15 were assigned new versions after earlier image collisions. Tree 1.0.0.16 was then required because its rebuilt image differed from the image already loaded under the `.15` service name; advancing `DriverVer` let the deployment guard install it without reusing that resident image name.
 
@@ -105,8 +113,8 @@ versioned debug builds. If PnPUtil returns `3010`, the deploy script now stops i
 and identifies the command; it does not continue changing devices or reboot Windows.
 Same-version unload and uninstall may still require separate recovery work.
 Before any device change, the script compares both requested service names with existing
-service image hashes and checks staged role-3 packages for higher-version or same-version
-service/image conflicts. If `Get-WindowsDriver` does not provide a usable FileRepository INF
+service image hashes and checks staged role-3 and UCX HCD packages for higher-version or
+same-version service/image conflicts. If `Get-WindowsDriver` does not provide a usable FileRepository INF
 path, it exports the published package to a temporary directory and hashes the SYS without
 changing PnP state. Conflicts stop deployment before updating a device. Different bytes
 under the same versioned name require an increased `DriverVer`. DevCon exit code 1 also
@@ -117,7 +125,7 @@ initialization statuses before it exits.
 
 ## SuperSpeed runtime status and remaining coverage
 
-The installed 2.0.0.34 HCD reserves seven virtual slots on USB 3 root-hub ports 17–23,
+HCD 2.0.0.34 reserves seven virtual slots on USB 3 root-hub ports 17–23,
 uses UCX's SuperSpeed device-speed indication, reports connection and reset state,
 and checks the isochronous endpoint companion's burst/interval bounds. The camera
 uses an additive FOSS-only add IOCTL, then emits USB 3.0 device/BOS descriptors and
@@ -131,8 +139,9 @@ about 3.97 seconds (about 30fps); two simultaneous camera streams also completed
 3×1,024 bytes per microframe, about 13.3fps at 720p; MJPEG reduces that bandwidth need
 and previously reached about 25fps on this machine. These figures describe this tested
 camera path, not physical USB 3 throughput or compatibility with every USB device.
-The low/full-speed extension has passed add/remove smoke checks only; enumeration,
-endpoint callbacks, and transfer behavior remain unverified.
+The low/full-speed extension's HID enumeration, interrupt-IN, Microsoft OS 1.0 vendor
+control requests, and removal cleanup have since passed on HCD 2.0.0.39. This does not
+validate useful keyboard input, every endpoint type, or arbitrary HID compatibility.
 
 ## Uninstall
 

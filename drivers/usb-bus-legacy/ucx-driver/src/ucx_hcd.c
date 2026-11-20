@@ -36,6 +36,7 @@ C_ASSERT(VHCD_USB30_FIRST_PORT_NUMBER > VHCD_MAX_PORTS);
 C_ASSERT(VHCD_USB30_PORT_BITMAP_BYTES < VHCD_USB20_PORT_BITMAP_BYTES);
 C_ASSERT(VHCD_COMBINED_PORT_BITMAP_BYTES == VHCD_USB20_PORT_BITMAP_BYTES);
 #define VHCD_MAX_TRANSACTION_BYTES (32u * 1024u * 1024u)
+#define VHCD_MAX_MS_FEATURE_DESCRIPTOR_BYTES 4096u
 #define VHCD_MAX_SLOT_TRANSACTION_BYTES (64u * 1024u * 1024u)
 #define VHCD_MAX_SLOT_TRANSACTIONS 256u
 #define VHCD_MAX_CONTROLLER_TRANSACTION_BYTES (256u * 1024u * 1024u)
@@ -52,6 +53,7 @@ typedef struct _VHCD_SLOT {
     BOOLEAN Allocated;
     BOOLEAN Present;
     BOOLEAN Enabled;
+    BOOLEAN EnableChanged;
     USB_DEVICE_SPEED DeviceSpeed;
     BOOLEAN Suspended;
     BOOLEAN SuspendChanged;
@@ -155,6 +157,7 @@ typedef struct _VHCD_TRANSACTION {
     PURB Urb;
     PUCHAR TransferBuffer;
     ULONG TransferLength;
+    ULONG MaxIsoPacketBytes;
     ULONG MetadataLength;
     ULONG PayloadCapacity;
     ULONG AllocationBytes;
@@ -220,7 +223,7 @@ static VOID VhcdCancelSlotTransactions(_In_ LONG SlotIndex, _In_ ULONGLONG Gener
 static VOID VhcdCancelEndpointTransfers(_In_ UCXENDPOINT Endpoint);
 static NTSTATUS VhcdQueuePortResetNotification(_In_ LONG SlotIndex, _In_ ULONGLONG Generation, _In_ LONG ResetType,
                                                _In_ BOOLEAN AllowPoweredOffPort);
-/* UCX URB queue requests must complete on a separate DPC, even on fast failures. */
+/* UCX URB queue requests normally complete on a separate DPC, even on fast failures. */
 static KDEFERRED_ROUTINE VhcdTransactionCancelDpc;
 static KDEFERRED_ROUTINE VhcdInterruptReadyDpc;
 static KDEFERRED_ROUTINE VhcdCompleteRequestDpc;
@@ -228,6 +231,8 @@ static EVT_WDF_IO_QUEUE_STATE VhcdEndpointPurgeComplete;
 static EVT_WDF_IO_QUEUE_STATE VhcdEndpointAbortComplete;
 static VOID VhcdCompleteRequestDeferred(_In_ WDFREQUEST Request, _In_opt_ PURB Urb,
                                         _In_ NTSTATUS RequestStatus, _In_ USBD_STATUS UsbStatus);
+static NTSTATUS VhcdEnsureTransferContext(_In_ WDFREQUEST Request,
+                                         _Outptr_ PVHCD_TRANSFER_CONTEXT* Context);
 EVT_UCX_CONTROLLER_USBDEVICE_ADD VhcdEvtControllerUsbDeviceAdd;
 EVT_UCX_ROOTHUB_CONTROL_URB VhcdEvtRootHubControlUrb;
 EVT_UCX_ROOTHUB_INTERRUPT_TX VhcdEvtRootHubInterruptTx;
@@ -325,6 +330,7 @@ static BOOLEAN VhcdReleaseSlot(_In_ LONG SlotIndex, _In_ ULONGLONG Generation)
     matched = VhcdSlotMatches(SlotIndex, Generation);
     if (matched) {
         gSlots[SlotIndex].Present = FALSE;
+        if (gSlots[SlotIndex].Enabled) gSlots[SlotIndex].EnableChanged = TRUE;
         gSlots[SlotIndex].Enabled = FALSE;
         gSlots[SlotIndex].Suspended = FALSE;
         gSlots[SlotIndex].SuspendChanged = FALSE;
@@ -848,6 +854,7 @@ static VOID VhcdReadPort(_In_ USHORT Port, _Out_ PUSHORT Status, _Out_ PUSHORT C
         if (gSlots[i].Suspended) *Status |= USB_PORT_STATUS_SUSPEND;
     }
     if (gSlots[i].ConnectionChanged) *Change |= 0x0001;
+    if (gSlots[i].EnableChanged) *Change |= 0x0002;
     if (gSlots[i].ResetChanged) *Change |= 0x0010;
     if (gSlots[i].SuspendChanged) *Change |= 0x0004;
     WdfSpinLockRelease(gSlotLock);
@@ -1084,6 +1091,7 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
         if (value == 8 && setup[1] == USB_REQUEST_CLEAR_FEATURE) {
             if (!gPortPowerOff[i]) {
                 gPortPowerOff[i] = TRUE;
+                if (gSlots[i].Enabled) gSlots[i].EnableChanged = TRUE;
                 gSlots[i].Enabled = FALSE;
                 gSlots[i].Suspended = FALSE;
                 gSlots[i].SuspendChanged = FALSE;
@@ -1105,7 +1113,11 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
             }
         }
         else if (value == 1 && setup[1] == USB_REQUEST_CLEAR_FEATURE) {
-            gSlots[i].Enabled = FALSE;
+            if (gSlots[i].Enabled) {
+                gSlots[i].Enabled = FALSE;
+                gSlots[i].EnableChanged = TRUE;
+                changed = TRUE;
+            }
             gSlots[i].Suspended = FALSE;
         }
         else if (value == 2 && setup[1] == USB_REQUEST_SET_FEATURE) {
@@ -1120,7 +1132,7 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
         }
         else if (value == 4 && setup[1] == USB_REQUEST_SET_FEATURE) { resetRequested = TRUE; }
         else if (value == 16 && setup[1] == USB_REQUEST_CLEAR_FEATURE) { gSlots[i].ConnectionChanged = FALSE; }
-        else if (value == 17 && setup[1] == USB_REQUEST_CLEAR_FEATURE) { /* No unsolicited enable changes. */ }
+        else if (value == 17 && setup[1] == USB_REQUEST_CLEAR_FEATURE) { gSlots[i].EnableChanged = FALSE; }
         else if (value == 18 && setup[1] == USB_REQUEST_CLEAR_FEATURE) { gSlots[i].SuspendChanged = FALSE; }
         else if (value == 19 && setup[1] == USB_REQUEST_CLEAR_FEATURE) { /* No over-current source. */ }
         else if (value == 20 && setup[1] == USB_REQUEST_CLEAR_FEATURE) { gSlots[i].ResetChanged = FALSE; }
@@ -1131,6 +1143,7 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
             if (NT_SUCCESS(resetStatus)) {
                 WdfSpinLockAcquire(gSlotLock);
                 if (VhcdSlotMatches(i, generation) && gSlots[i].Present && !gPortPowerOff[i]) {
+                    if (!gSlots[i].Enabled) gSlots[i].EnableChanged = TRUE;
                     gSlots[i].Enabled = TRUE;
                     gSlots[i].Suspended = FALSE;
                     gSlots[i].ResetChanged = TRUE;
@@ -1210,7 +1223,8 @@ VOID VhcdEvtRootHubInterruptTx(UCXROOTHUB H, WDFREQUEST R)
     InterlockedIncrement((volatile LONG*)&gUcxState.RootHubInterrupt20Count);
     WdfSpinLockAcquire(gSlotLock);
     for (i = 0; i < VHCD_MAX_PORTS; ++i) {
-        if (gSlots[i].ConnectionChanged || gSlots[i].ResetChanged || gSlots[i].SuspendChanged)
+        if (gSlots[i].ConnectionChanged || gSlots[i].EnableChanged ||
+            gSlots[i].ResetChanged || gSlots[i].SuspendChanged)
             bitmap |= 1u << (i + 1);
     }
     for (ssPort = 0; ssPort < VHCD_MAX_USB30_PORTS; ++ssPort) {
@@ -1663,8 +1677,14 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
         break;
     case URB_FUNCTION_GET_MS_FEATURE_DESCRIPTOR:
         if (Urb->UrbHeader.Length < sizeof(Urb->UrbOSFeatureDescriptorRequest) || queueContext->PipeType != UsbdPipeTypeControl) return STATUS_INVALID_PARAMETER;
+        if (Urb->UrbOSFeatureDescriptorRequest.Recipient > 2 ||
+            (Urb->UrbOSFeatureDescriptorRequest.Recipient == 0 &&
+             Urb->UrbOSFeatureDescriptorRequest.InterfaceNumber != 0) ||
+            Urb->UrbOSFeatureDescriptorRequest.MS_PageIndex != 0)
+            return STATUS_INVALID_PARAMETER;
         transferLength = Urb->UrbOSFeatureDescriptorRequest.TransferBufferLength;
         if (transferLength < sizeof(UCHAR)) return STATUS_BUFFER_TOO_SMALL;
+        if (transferLength > VHCD_MAX_MS_FEATURE_DESCRIPTOR_BYTES) return STATUS_INVALID_PARAMETER;
         transferBuffer = (PUCHAR)Urb->UrbOSFeatureDescriptorRequest.TransferBuffer;
         transferMdl = Urb->UrbOSFeatureDescriptorRequest.TransferBufferMDL;
         isRead = TRUE;
@@ -1726,13 +1746,17 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
         function == URB_FUNCTION_CLASS_ENDPOINT || function == URB_FUNCTION_CLASS_OTHER ||
         function == URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER || function == URB_FUNCTION_ISOCH_TRANSFER)
         isRead = (transferFlags & USBD_TRANSFER_DIRECTION_IN) != 0;
+    if (function == URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER &&
+        (((queueContext->EndpointAddress & 0x80) != 0) != (isRead != FALSE)))
+        return STATUS_INVALID_PARAMETER;
     if (isIso) {
         ULONG index;
         if (queueContext->MaxIsoPacketBytes == 0) return STATUS_INVALID_PARAMETER;
         for (index = 0; index < Urb->UrbIsochronousTransfer.NumberOfPackets; ++index) {
             const USBD_ISO_PACKET_DESCRIPTOR* packet = &Urb->UrbIsochronousTransfer.IsoPacket[index];
-            if (packet->Length > queueContext->MaxIsoPacketBytes || packet->Offset > transferLength ||
-                packet->Length > transferLength - packet->Offset) return STATUS_INVALID_PARAMETER;
+            if (packet->Offset > transferLength ||
+                (index != 0 && packet->Offset < Urb->UrbIsochronousTransfer.IsoPacket[index - 1].Offset))
+                return STATUS_INVALID_PARAMETER;
         }
     }
     if (transferLength > VHCD_MAX_TRANSACTION_BYTES || metadataLength > MAXULONG - transferLength) return STATUS_INVALID_PARAMETER;
@@ -1748,6 +1772,7 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
     transaction->Request = Request;
     transaction->Urb = Urb;
     transaction->TransferLength = transferLength;
+    transaction->MaxIsoPacketBytes = isIso ? queueContext->MaxIsoPacketBytes : 0;
     transaction->MetadataLength = metadataLength;
     transaction->PayloadCapacity = payloadLength;
     transaction->AllocationBytes = allocationBytes;
@@ -1798,9 +1823,13 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
             iso->number_packets = Urb->UrbIsochronousTransfer.NumberOfPackets;
             iso->error_count = 0;
             for (i = 0; i < iso->number_packets; ++i) {
+                ULONG offset = Urb->UrbIsochronousTransfer.IsoPacket[i].Offset;
+                ULONG nextOffset = i + 1 < iso->number_packets
+                    ? Urb->UrbIsochronousTransfer.IsoPacket[i + 1].Offset
+                    : transferLength;
                 iso->packets[i].offset = Urb->UrbIsochronousTransfer.IsoPacket[i].Offset;
-                iso->packets[i].length = Urb->UrbIsochronousTransfer.IsoPacket[i].Length;
-                iso->packets[i].status = Urb->UrbIsochronousTransfer.IsoPacket[i].Status;
+                iso->packets[i].length = min(nextOffset - offset, queueContext->MaxIsoPacketBytes);
+                iso->packets[i].status = 0;
             }
             break;
         }
@@ -1829,7 +1858,11 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
             inner->Data.Descriptor.Type = 5;
             inner->Data.Descriptor.Subtype = 0;
             inner->Data.Descriptor.IsRead = 1;
-            inner->Data.Descriptor.Index = ((LONG)Urb->UrbOSFeatureDescriptorRequest.Recipient << 8) | Urb->UrbOSFeatureDescriptorRequest.InterfaceNumber;
+            /* Preserve the existing low 16-bit ABI and carry MS_PageIndex above it. */
+            inner->Data.Descriptor.Index =
+                ((LONG)Urb->UrbOSFeatureDescriptorRequest.Recipient << 8) |
+                Urb->UrbOSFeatureDescriptorRequest.InterfaceNumber |
+                ((LONG)Urb->UrbOSFeatureDescriptorRequest.MS_PageIndex << 16);
             inner->Data.Descriptor.Value = Urb->UrbOSFeatureDescriptorRequest.MS_FeatureDescriptorIndex;
             break;
         case URB_FUNCTION_VENDOR_DEVICE:
@@ -2007,10 +2040,38 @@ static VOID VhcdCompleteRequestDpc(_In_ PKDPC Dpc, _In_opt_ PVOID DeferredContex
     WdfRequestComplete(request, requestStatus);
 }
 
+static NTSTATUS VhcdEnsureTransferContext(_In_ WDFREQUEST Request,
+                                         _Outptr_ PVHCD_TRANSFER_CONTEXT* Context)
+{
+    WDF_OBJECT_ATTRIBUTES attributes;
+    NTSTATUS status;
+
+    if (Request == WDF_NO_HANDLE || Context == NULL) return STATUS_INVALID_PARAMETER;
+    *Context = VhcdGetTransferContext(Request);
+    if (*Context != NULL) return STATUS_SUCCESS;
+
+    /* UCX-delivered queue requests may not carry the device-default context. */
+    WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, VHCD_TRANSFER_CONTEXT);
+    status = WdfObjectAllocateContext(Request, &attributes, (PVOID*)Context);
+    if (status == STATUS_OBJECT_NAME_EXISTS) {
+        *Context = VhcdGetTransferContext(Request);
+        return *Context != NULL ? STATUS_SUCCESS : STATUS_INVALID_DEVICE_STATE;
+    }
+    if (!NT_SUCCESS(status)) return status;
+    return *Context != NULL ? STATUS_SUCCESS : STATUS_INVALID_DEVICE_STATE;
+}
+
 static VOID VhcdCompleteRequestDeferred(_In_ WDFREQUEST Request, _In_opt_ PURB Urb,
                                         _In_ NTSTATUS RequestStatus, _In_ USBD_STATUS UsbStatus)
 {
-    PVHCD_TRANSFER_CONTEXT context = VhcdGetTransferContext(Request);
+    PVHCD_TRANSFER_CONTEXT context = NULL;
+    NTSTATUS status = VhcdEnsureTransferContext(Request, &context);
+    if (!NT_SUCCESS(status)) {
+        /* A contextless request cannot hold a DPC; preserve status and fail safely. */
+        if (Urb != NULL) Urb->UrbHeader.Status = UsbStatus;
+        WdfRequestComplete(Request, status);
+        return;
+    }
     context->CompletionRequest = Request;
     context->CompletionUrb = Urb;
     context->CompletionStatus = RequestStatus;
@@ -2023,6 +2084,8 @@ VOID VhcdEvtEndpointIoInternalDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, 
 {
     WDF_REQUEST_PARAMETERS parameters;
     PURB urb = NULL;
+    PVHCD_TRANSFER_CONTEXT requestContext = NULL;
+    NTSTATUS status;
     UNREFERENCED_PARAMETER(OutputLength);
     UNREFERENCED_PARAMETER(InputLength);
     if (IoControlCode == IOCTL_INTERNAL_USB_SUBMIT_URB) {
@@ -2035,8 +2098,15 @@ VOID VhcdEvtEndpointIoInternalDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, 
                                     USBD_STATUS_INVALID_URB_FUNCTION);
         return;
     }
+    status = VhcdEnsureTransferContext(Request, &requestContext);
+    if (!NT_SUCCESS(status)) {
+        urb->UrbHeader.Status = status == STATUS_INSUFFICIENT_RESOURCES
+            ? USBD_STATUS_INSUFFICIENT_RESOURCES : USBD_STATUS_INVALID_PARAMETER;
+        WdfRequestComplete(Request, status);
+        return;
+    }
     {
-        NTSTATUS status = VhcdMapUrb(Queue, Request, urb);
+        status = VhcdMapUrb(Queue, Request, urb);
         USBD_STATUS usbStatus;
         if (NT_SUCCESS(status)) return;
         usbStatus = status == STATUS_NOT_SUPPORTED ? USBD_STATUS_NOT_SUPPORTED :
@@ -2177,7 +2247,9 @@ static NTSTATUS VhcdCompleteIsoResponse(_Inout_ PVHCD_TRANSACTION Transaction, _
     ULONG responseBytes, dataBytes, i, used = 0;
     iso_packet_hdr_t* response = (iso_packet_hdr_t*)((PUCHAR)Inner + sizeof(*Inner));
     if (Inner->DataLength < 0 || (ULONG)Inner->DataLength < Transaction->MetadataLength ||
-        response->number_packets != packetCount || Transaction->MetadataLength != headerBytes + packetCount * sizeof(iso_packet_t))
+        response->number_packets != packetCount || response->error_count > packetCount ||
+        Transaction->MaxIsoPacketBytes == 0 ||
+        Transaction->MetadataLength != headerBytes + packetCount * sizeof(iso_packet_t))
         return STATUS_INVALID_PARAMETER;
     responseBytes = (ULONG)Inner->DataLength;
     dataBytes = responseBytes - Transaction->MetadataLength;
@@ -2186,8 +2258,17 @@ static NTSTATUS VhcdCompleteIsoResponse(_Inout_ PVHCD_TRANSACTION Transaction, _
         ULONG offset = response->packets[i].offset;
         ULONG length = response->packets[i].length;
         USBD_ISO_PACKET_DESCRIPTOR* original = &urb->UrbIsochronousTransfer.IsoPacket[i];
+        ULONG nextOffset = i + 1 < packetCount
+            ? urb->UrbIsochronousTransfer.IsoPacket[i + 1].Offset
+            : Transaction->TransferLength;
+        ULONG packetCapacity;
+        if (original->Offset > Transaction->TransferLength ||
+            nextOffset < original->Offset || nextOffset > Transaction->TransferLength)
+            return STATUS_INVALID_PARAMETER;
+        packetCapacity = min(nextOffset - original->Offset, Transaction->MaxIsoPacketBytes);
         if (offset != original->Offset ||
-            !xusb_iso_packet_fits_reply(offset, length, dataBytes, Transaction->TransferLength))
+            !xusb_iso_packet_fits_reply(offset, length, packetCapacity,
+                dataBytes, Transaction->TransferLength))
             return STATUS_INVALID_PARAMETER;
         if (length != 0 && offset + length > used) used = offset + length;
         original->Length = length;
@@ -2211,6 +2292,7 @@ static NTSTATUS VhcdCompleteIsoResponse(_Inout_ PVHCD_TRANSACTION Transaction, _
 
 static NTSTATUS VhcdApplyResponse(_Inout_ PVHCD_TRANSACTION Transaction, _In_ PVHCD_WIRE_REQUEST Inner, _In_ ULONG ResponseBytes)
 {
+    ULONG completedLength;
     if (Inner->DataLength < 0 || (ULONG)Inner->DataLength > Transaction->PayloadCapacity ||
         ResponseBytes < sizeof(ioctl_usbtx_header_t) + (ULONG)Inner->DataLength)
         return STATUS_INVALID_PARAMETER;
@@ -2219,6 +2301,8 @@ static NTSTATUS VhcdApplyResponse(_Inout_ PVHCD_TRANSACTION Transaction, _In_ PV
         return Inner->DataLength == 0 ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
     if (Transaction->Isochronous) return VhcdCompleteIsoResponse(Transaction, Inner);
     if ((ULONG)Inner->DataLength > Transaction->TransferLength) return STATUS_INVALID_PARAMETER;
+    /* END carries response bytes for IN transfers; successful OUT requests already sent their full payload. */
+    completedLength = Transaction->IsRead ? (ULONG)Inner->DataLength : Transaction->TransferLength;
     if (Transaction->Urb->UrbHeader.Function == URB_FUNCTION_GET_CURRENT_FRAME_NUMBER) {
         if (Inner->DataLength == sizeof(USHORT)) {
             USHORT frame;
@@ -2235,15 +2319,15 @@ static NTSTATUS VhcdApplyResponse(_Inout_ PVHCD_TRANSACTION Transaction, _In_ PV
     if (Transaction->IsRead && Inner->DataLength != 0)
         RtlCopyMemory(Transaction->TransferBuffer, (PUCHAR)Inner + sizeof(*Inner), (ULONG)Inner->DataLength);
     switch (Transaction->Urb->UrbHeader.Function) {
-    case URB_FUNCTION_CONTROL_TRANSFER: Transaction->Urb->UrbControlTransfer.TransferBufferLength = (ULONG)Inner->DataLength; break;
-    case URB_FUNCTION_CONTROL_TRANSFER_EX: Transaction->Urb->UrbControlTransferEx.TransferBufferLength = (ULONG)Inner->DataLength; break;
-    case URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER: Transaction->Urb->UrbBulkOrInterruptTransfer.TransferBufferLength = (ULONG)Inner->DataLength; break;
+    case URB_FUNCTION_CONTROL_TRANSFER: Transaction->Urb->UrbControlTransfer.TransferBufferLength = completedLength; break;
+    case URB_FUNCTION_CONTROL_TRANSFER_EX: Transaction->Urb->UrbControlTransferEx.TransferBufferLength = completedLength; break;
+    case URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER: Transaction->Urb->UrbBulkOrInterruptTransfer.TransferBufferLength = completedLength; break;
     case URB_FUNCTION_GET_DESCRIPTOR_FROM_DEVICE:
     case URB_FUNCTION_SET_DESCRIPTOR_TO_DEVICE:
     case URB_FUNCTION_GET_DESCRIPTOR_FROM_ENDPOINT:
     case URB_FUNCTION_SET_DESCRIPTOR_TO_ENDPOINT:
     case URB_FUNCTION_GET_DESCRIPTOR_FROM_INTERFACE:
-    case URB_FUNCTION_SET_DESCRIPTOR_TO_INTERFACE: Transaction->Urb->UrbControlDescriptorRequest.TransferBufferLength = (ULONG)Inner->DataLength; break;
+    case URB_FUNCTION_SET_DESCRIPTOR_TO_INTERFACE: Transaction->Urb->UrbControlDescriptorRequest.TransferBufferLength = completedLength; break;
     case URB_FUNCTION_VENDOR_DEVICE:
     case URB_FUNCTION_VENDOR_INTERFACE:
     case URB_FUNCTION_VENDOR_ENDPOINT:
@@ -2251,14 +2335,14 @@ static NTSTATUS VhcdApplyResponse(_Inout_ PVHCD_TRANSACTION Transaction, _In_ PV
     case URB_FUNCTION_CLASS_DEVICE:
     case URB_FUNCTION_CLASS_INTERFACE:
     case URB_FUNCTION_CLASS_ENDPOINT:
-    case URB_FUNCTION_CLASS_OTHER: Transaction->Urb->UrbControlVendorClassRequest.TransferBufferLength = (ULONG)Inner->DataLength; break;
+    case URB_FUNCTION_CLASS_OTHER: Transaction->Urb->UrbControlVendorClassRequest.TransferBufferLength = completedLength; break;
     case URB_FUNCTION_GET_STATUS_FROM_DEVICE:
     case URB_FUNCTION_GET_STATUS_FROM_INTERFACE:
     case URB_FUNCTION_GET_STATUS_FROM_ENDPOINT:
-    case URB_FUNCTION_GET_STATUS_FROM_OTHER: Transaction->Urb->UrbControlGetStatusRequest.TransferBufferLength = (ULONG)Inner->DataLength; break;
-    case URB_FUNCTION_GET_CONFIGURATION: Transaction->Urb->UrbControlGetConfigurationRequest.TransferBufferLength = (ULONG)Inner->DataLength; break;
-    case URB_FUNCTION_GET_INTERFACE: Transaction->Urb->UrbControlGetInterfaceRequest.TransferBufferLength = (ULONG)Inner->DataLength; break;
-    case URB_FUNCTION_GET_MS_FEATURE_DESCRIPTOR: Transaction->Urb->UrbOSFeatureDescriptorRequest.TransferBufferLength = (ULONG)Inner->DataLength; break;
+    case URB_FUNCTION_GET_STATUS_FROM_OTHER: Transaction->Urb->UrbControlGetStatusRequest.TransferBufferLength = completedLength; break;
+    case URB_FUNCTION_GET_CONFIGURATION: Transaction->Urb->UrbControlGetConfigurationRequest.TransferBufferLength = completedLength; break;
+    case URB_FUNCTION_GET_INTERFACE: Transaction->Urb->UrbControlGetInterfaceRequest.TransferBufferLength = completedLength; break;
+    case URB_FUNCTION_GET_MS_FEATURE_DESCRIPTOR: Transaction->Urb->UrbOSFeatureDescriptorRequest.TransferBufferLength = completedLength; break;
     case URB_FUNCTION_SET_FEATURE_TO_DEVICE:
     case URB_FUNCTION_SET_FEATURE_TO_INTERFACE:
     case URB_FUNCTION_SET_FEATURE_TO_ENDPOINT:
@@ -2335,17 +2419,14 @@ static VOID VhcdEndTransaction(WDFREQUEST Request, size_t InputLength)
     PVHCD_TRANSACTION transaction = NULL;
     PUCHAR input;
     size_t bufferSize = 0;
-    ULONG responseBytes;
+    ULONG responseBytes = 0;
+    BOOLEAN malformedResponse = FALSE;
     NTSTATUS status = STATUS_NOT_FOUND;
     LONG slot;
     if (fileContext == NULL || fileContext->Signature != VHCD_FILE_SIGNATURE || fileContext->SlotIndex < 0 || ioContext->InputMemory == NULL || InputLength < sizeof(header)) { WdfRequestComplete(Request, STATUS_INVALID_DEVICE_STATE); return; }
     input = (PUCHAR)WdfMemoryGetBuffer(ioContext->InputMemory, &bufferSize);
-    if (bufferSize < sizeof(header)) { WdfRequestComplete(Request, STATUS_BUFFER_TOO_SMALL); return; }
+    if (input == NULL || bufferSize < sizeof(header)) { WdfRequestComplete(Request, STATUS_BUFFER_TOO_SMALL); return; }
     RtlCopyMemory(&header, input, sizeof(header));
-    if (header.data_length < 0 || (ULONG)header.data_length > VHCD_MAX_TRANSACTION_BYTES || (ULONG)header.data_length > InputLength - sizeof(header) || InputLength != sizeof(header) + (ULONG)header.data_length) { WdfRequestComplete(Request, STATUS_INVALID_PARAMETER); return; }
-    responseBytes = sizeof(header) + (ULONG)header.data_length;
-    inner = (PVHCD_WIRE_REQUEST)(input + FIELD_OFFSET(ioctl_usbtx_header_t, type));
-    if (header.result != inner->Result || header.data_length != inner->DataLength || inner->DataLength < 0) { WdfRequestComplete(Request, STATUS_INVALID_PARAMETER); return; }
     WdfSpinLockAcquire(gSlotLock);
     slot = fileContext->SlotIndex;
     if (!gStopping && VhcdSlotMatches(slot, fileContext->Generation)) {
@@ -2383,6 +2464,37 @@ static VOID VhcdEndTransaction(WDFREQUEST Request, size_t InputLength)
         WdfRequestComplete(Request, status);
         return;
     }
+
+    /*
+     * Claim by the readable transaction identity before validating the rest
+     * of END. A malformed length or inconsistent duplicate field must not
+     * strand this exact request in the slot's pending list. Use the copied
+     * fixed header for duplicate-field checks; the body is only passed to the
+     * response handler after all framing bounds have been checked.
+     */
+    if (bufferSize < InputLength || header.data_length < 0 ||
+        (ULONG)header.data_length > VHCD_MAX_TRANSACTION_BYTES ||
+        (ULONG)header.data_length > InputLength - sizeof(header) ||
+        InputLength != sizeof(header) + (ULONG)header.data_length) {
+        malformedResponse = TRUE;
+    } else {
+        PVHCD_WIRE_REQUEST copiedInner = (PVHCD_WIRE_REQUEST)(
+            (PUCHAR)&header + FIELD_OFFSET(ioctl_usbtx_header_t, type));
+        responseBytes = sizeof(header) + (ULONG)header.data_length;
+        if (header.result != copiedInner->Result ||
+            header.data_length != copiedInner->DataLength ||
+            copiedInner->DataLength < 0) {
+            malformedResponse = TRUE;
+        }
+    }
+    if (malformedResponse) {
+        VhcdFinishTransfer(transaction, STATUS_INVALID_PARAMETER, USBD_STATUS_INVALID_PARAMETER);
+        VhcdTxRelease(transaction);
+        WdfRequestComplete(Request, STATUS_INVALID_PARAMETER);
+        return;
+    }
+
+    inner = (PVHCD_WIRE_REQUEST)(input + FIELD_OFFSET(ioctl_usbtx_header_t, type));
     status = VhcdApplyResponse(transaction, inner, responseBytes);
     if (status == STATUS_UNSUCCESSFUL) {
         VhcdFinishTransfer(transaction, STATUS_UNSUCCESSFUL, USBD_STATUS_STALL_PID);
@@ -2472,6 +2584,7 @@ VOID VhcdEvtIoDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, size_t OutputLen
             gSlots[slot].Allocated = TRUE;
             gSlots[slot].Present = TRUE;
             gSlots[slot].Enabled = FALSE;
+            gSlots[slot].EnableChanged = FALSE;
             gSlots[slot].DeviceSpeed = deviceSpeed;
             gSlots[slot].ConnectionChanged = TRUE;
             gSlots[slot].BusAddress = suggested;

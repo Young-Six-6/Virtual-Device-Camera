@@ -1,10 +1,69 @@
 # Virtual Camera UCX host controller
 
+## 2026-11-21 current runtime validation
+
+The test machine currently runs role-3 USB tree `1.0.0.22` and UCX HCD `2.0.0.41`
+under the local test-signing certificate. Both were installed and bound without a
+Windows reboot. The controller, tree and USB 3 root hub report `OK`; the root hub
+reports seven ports. DirectShow captured 120 frames of 1280×720 YUY2 at 30fps in
+3.95 seconds. In the same app process, the control pipe changed 1280×720 to 640×480
+and back; both sizes reported `RUNNING` and each captured 30 frames successfully.
+After orderly app shutdown, the camera PDO disappeared and HCD pending transactions
+and removal work items were zero. The system boot time did not change and no new
+BugCheck 1001 appeared during this validation.
+
+HCD `.40` was a failed intermediate candidate: it treated the isochronous IN packet
+descriptor's `Length` as an input capacity, which stalled camera capture. HCD `.41`
+uses packet-buffer offsets and the endpoint service-interval limit to derive the
+writable capacity, then bounds the returned length. See [Microsoft's isochronous
+transfer guidance](https://learn.microsoft.com/windows-hardware/drivers/usbcon/transfer-data-to-isochronous-endpoints).
+
+## 2026-11-20 runtime probes and crash diagnosis (historical)
+
+At that time, the test machine ran role-3 USB tree `1.0.0.20` and UCX HCD `2.0.0.39`
+under the local test-signing certificate. The controller and USB 3 root hub report
+`OK`; UCX initialization succeeded, the root hub reports seven ports, and pending
+transaction/removal-work-item counts return to zero after each fixture is removed.
+HCD `.39` was installed and its controller was PnP-restarted without rebooting
+Windows.
+
+On `.39`, the unchanged Release camera program enumerated `Pipe HD Camera 1` and
+DirectShow captured 120 frames at 1280×720 YUY2 at about 30fps. The control pipe also
+changed resolution 1280×720 → 640×480 → 1280×720 in one process; each status reported
+the new dimensions and `RUNNING`, and capture succeeded at all three steps. Low- and
+full-speed HID fixtures enumerated as `HIDClass`, sustained interrupt-IN traffic for
+five seconds, and removed in 754ms and 768ms. A WinUSB fixture completed 512-byte bulk
+IN and 16-byte bulk OUT transactions through BEGIN/END and removed in 72ms. A malformed
+bulk END was rejected with `ERROR_INVALID_PARAMETER`; the request, fixture and pending
+counters all drained cleanly.
+
+The Microsoft OS feature-URB probe first exposed a bug in its test-only KMDF client,
+not the production HCD. The dump recorded `0x144/3`; `!analyze -v` attributes the bad
+URB submission to `UcxMsFeatureTestClient.sys+0x1799`. That client had registered
+`USBD_CLIENT_CONTRACT_VERSION_602` but used a stack-allocated URB. It now allocates URBs
+with `WdfUsbTargetDeviceCreateUrb`. The rebuilt, test-signed client retrieved
+descriptor 4 (40 bytes) and descriptor 5 (10 bytes) with successful NTSTATUS and
+USBD_STATUS, then removed cleanly without another bugcheck. Windows translated each
+request into a vendor-control transfer before it reached the HCD; the direct
+`URB_FUNCTION_GET_MS_FEATURE_DESCRIPTOR` representation was not observed at the HCD
+boundary. The probe package was removed from DriverStore after the run.
+
+Historical `.36` issue: a separate earlier dump mapped `0x3B` to deferred completion
+dereferencing a missing `VHCD_TRANSFER_CONTEXT`. HCD `.37` added request-context
+allocation and `.38` corrected bulk-OUT completion length. HCD `.39` adds USB 2.0
+`C_PORT_ENABLE` reporting, validates bulk direction and bounds Microsoft OS feature
+descriptor buffers. Release `.40` added an ISO response-length check but incorrectly
+treated the IN packet descriptor's `Length` as an input capacity; it stalled video
+capture. Release `.41` corrected the capacity calculation using packet offsets and
+the endpoint interval limit, and is the runtime version documented above.
+
+With the camera app stopped and its virtual camera PDO absent, PnPUtil restarted only the virtual HCD instance PCI\VEN_37FA&DEV_FE09&SUBSYS_9976A077&REV_88\1&2D12BED1&3&1 (no /reboot). PnPUtil returned 0; the HCD, USB tree and USB 3 root hub returned to OK, and UCX initialization statuses were all zero. The Release camera app then started again and DirectShow captured 60 frames at 1280×720 YUY2/30fps in 2.004 seconds. After the app exited, its camera PDO disappeared and pending transactions/removal work items were zero. Lifecycle counters queried after restart belong to the newly initialized instance and do not independently prove the old instance's ReleaseHardware callback count.
+
 With the Release camera app left running, only its virtual root hub (USB\ROOT_HUB30\2&87D351D&0&0) was restarted through PnP. The root hub and camera PDO returned to OK without restarting Windows or the app. DirectShow reopened the camera and captured 60 frames at 1280×720 YUY2/30fps in 1.992 seconds. After the app exited, the camera PDO disappeared and the HCD reported zero pending transactions and removal work items; the tree and HCD remained OK. This covers one root-hub PnP restart and stream reopen, not sleep/resume or every power/URB path.
 
-Latest runtime validation (2026-11-19): tree 1.0.0.18 and HCD 2.0.0.34 are bound in the same Windows boot session. The controller and ROOT_HUB30 child report OK. DirectShow captured 120 frames of 1280×720 YUY2 in 3.93 seconds (about 30.5fps); two concurrent streams each delivered 120 frames in 3.96 seconds (about 30.3fps per stream). After the app stopped, both camera nodes disappeared and the HCD reported zero pending transactions and removal work items. Low- and full-speed HID fixtures also enumerated with status OK; their periodic interrupt requests were paced, and both fixtures removed cleanly. No system restart was needed. This validates the tested software virtual-bus paths, not physical USB 3 throughput or general USB-device compatibility. Earlier hot-resolution and USB 2.0 MJPEG measurements are historical results.
+Historical runtime validation (2026-11-19): tree 1.0.0.18 and HCD 2.0.0.34 were bound in the same Windows boot session. The controller and ROOT_HUB30 child report OK. DirectShow captured 120 frames of 1280×720 YUY2 in 3.93 seconds (about 30.5fps); two concurrent streams each delivered 120 frames in 3.96 seconds (about 30.3fps per stream). After the app stopped, both camera nodes disappeared and the HCD reported zero pending transactions and removal work items. Low- and full-speed HID fixtures also enumerated with status OK; their periodic interrupt requests were paced, and both fixtures removed cleanly. No system restart was needed. This validates the tested software virtual-bus paths, not physical USB 3 throughput or general USB-device compatibility. Earlier hot-resolution and USB 2.0 MJPEG measurements are historical results.
 
-Latest read-only PnP/SCM query reports tree 1.0.0.18 and HCD 2.0.0.34 in `OK` state, with both services running and no active camera node or stream. HCD 2.0.0.34 retains seven SuperSpeed slots, validates endpoint descriptors, supports the FOSS-only USB 2.0 low/full-speed add path, and paces interrupt requests from `bInterval`. Single- and dual-camera SuperSpeed capture and low/full-speed HID PnP, interrupt, and removal paths have been runtime-verified. These results do not cover all URBs or USB classes.
+Read-only PnP/SCM snapshot from 2026-11-19: tree 1.0.0.18 and HCD 2.0.0.34 were in `OK` state, with both services running and no active camera node or stream. HCD 2.0.0.34 retains seven SuperSpeed slots, validates endpoint descriptors, supports the FOSS-only USB 2.0 low/full-speed add path, and paces interrupt requests from `bInterval`. Single- and dual-camera SuperSpeed capture and low/full-speed HID PnP, interrupt, and removal paths were runtime-verified on that version. These results do not cover all URBs or USB classes; current HCD 2.0.0.41 runtime status is listed above.
 
 After a targeted `pnputil /restart-device "ROOT\SYSTEM\0003"` (without `/reboot`), the same tree/HCD versions and the child USB 3 root hub returned to `OK` without restarting Windows. The Release camera app then re-enumerated and DirectShow captured 60 frames of 1280×720 YUY2 at 30fps in 1.98 seconds. After stopping the app, its virtual camera PDO disappeared and HCD pending transactions/removal work items returned to zero. This verifies one tree-device PnP restart and camera recovery; system sleep/resume and every power transition remain unverified.
 
@@ -46,12 +105,16 @@ compatibility target is based on Microsoft's UCX versioning guidance.
 
 ### Scope of the remaining USB paths
 
-The current virtual camera exposes a UVC control endpoint and an isochronous video-IN endpoint; its descriptors declare no bulk or interrupt endpoint and no Microsoft OS string at index 0xEE. The user-mode responder therefore does not need bulk/interrupt transactions or Microsoft OS feature descriptors for the camera configuration tested here. Those gaps still prevent treating this UVC-specific application as a general-purpose USB-device emulator; a future HID, serial, storage, or other class backend would need to define and implement its own transaction handling and descriptors. Root-hub callbacks and URB families outside the tested camera path also remain only partially verified.
+The current virtual camera exposes a UVC control endpoint and an isochronous video-IN endpoint; its descriptors declare no bulk or interrupt endpoint and no Microsoft OS string at index 0xEE. The production user-mode camera responder still does not implement bulk/interrupt transfer type 2 or descriptor type 5, so it is not a general-purpose HID/serial/storage responder. The synthetic test responder exercises bulk/interrupt transactions and Microsoft OS 1.0 vendor-control descriptors through the frozen BEGIN/END ABI. The KMDF feature-URB test proves descriptor retrieval through Windows and the HCD vendor-control path; the direct `URB_FUNCTION_GET_MS_FEATURE_DESCRIPTOR` HCD mapping remains unobserved. Root-hub reset/power/link transitions and URB families outside the tested paths also remain only partially verified.
 
-This builds as a Release x64 driver and has passed the camera's tested control,
-descriptor and isochronous capture paths at USB 2.0 and SuperSpeed. It remains a partial replacement candidate:
-the HCD maps legacy operations into frozen wire types 1–6, while the UVC handler still
-does not implement bulk data or the complete Microsoft OS feature-descriptor path.
+This builds as a Release x64 driver and has passed the virtual camera's tested control,
+descriptor and isochronous capture paths at USB 2.0 and SuperSpeed. It is a replacement
+candidate for that virtual-camera path, not a general-purpose USB host controller: the
+HCD maps legacy operations into frozen wire types 1–6, and the production UVC handler
+does not implement arbitrary bulk/interrupt device classes. A test-only KMDF client and
+responder validate Microsoft OS feature descriptor retrieval through Windows and the
+vendor-control path; the direct HCD `GET_MS_FEATURE_DESCRIPTOR` representation remains
+unobserved.
 The reconstructed WDM source maps `IOCTL_INTERNAL_USB_CYCLE_PORT` to wire reset type 2.
 That IOCTL targets the USB hub PDO; UCX-based operation is expected to expose the port
 state through root-hub callbacks instead. The new root hub models port-power off/on as

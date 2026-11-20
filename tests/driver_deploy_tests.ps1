@@ -60,7 +60,8 @@ if ($ucxText -notmatch 'case\s+UsbdPipeTypeBulk\s*:' -or
 # script bodies, and replace native/CIM/PnP calls made by those functions.
 foreach ($functionName in @(
     'Invoke-PnpUtil', 'Assert-NoImageVersionCollision', 'Assert-InstalledImage',
-    'Assert-TreePackageCandidates', 'Remove-ObsoleteTreeDriverPackages'
+    'Assert-TreePackageCandidates', 'Assert-UcxPackageCandidates',
+    'Remove-ObsoleteTreeDriverPackages'
 )) {
     $definition = $ast.Find({
         param($node)
@@ -93,8 +94,13 @@ function Invoke-MockPnpUtil {
     if ($Arguments.Count -ge 3 -and $Arguments[0] -eq '/export-driver') {
         $destination = $Arguments[2]
         $script:MockExportDirectory = $destination
-        Copy-Item -LiteralPath $script:MockExportInf -Destination (Join-Path $destination 'xusb_reconstructed_tree.inf')
-        Copy-Item -LiteralPath $script:MockExportImage -Destination (Join-Path $destination ([IO.Path]::GetFileName($script:MockExportImage)))
+        if ($script:MockUcxPublishedInf -and $Arguments[1] -eq $script:MockUcxPublishedInf) {
+            Copy-Item -LiteralPath $script:MockUcxExportInf -Destination (Join-Path $destination 'xusb_ucx_hcd.inf')
+            Copy-Item -LiteralPath $script:MockUcxExportImage -Destination (Join-Path $destination ([IO.Path]::GetFileName($script:MockUcxExportImage)))
+        } else {
+            Copy-Item -LiteralPath $script:MockExportInf -Destination (Join-Path $destination 'xusb_reconstructed_tree.inf')
+            Copy-Item -LiteralPath $script:MockExportImage -Destination (Join-Path $destination ([IO.Path]::GetFileName($script:MockExportImage)))
+        }
         $global:LASTEXITCODE = 0
         return
     }
@@ -103,7 +109,7 @@ function Invoke-MockPnpUtil {
 function Get-WindowsDriver {
     [CmdletBinding()]
     param([switch] $Online, [switch] $All)
-    return $script:MockDriverPackages
+    return @($script:MockDriverPackages) + @($script:MockUcxDriverPackages)
 }
 foreach ($case in @(
     @{ Exit = 0; Allow = $false; Throws = $false },
@@ -216,6 +222,59 @@ ServiceBinary = %13%\$treeImageName
         if ($_.Exception.Message -notmatch 'before changing any device') { throw }
     }
     if (-not $didThrow) { throw 'A higher-ranked role-3 package passed the preflight.' }
+
+    $script:MockUcxPublishedInf = 'oem40.inf'
+    $script:MockUcxExportImage = Join-Path $storePackageDirectory 'VirtualCameraUcxHcd_2_0_0_40.sys'
+    $script:MockUcxExportInf = Join-Path $storePackageDirectory 'xusb_ucx_hcd.inf'
+    Copy-Item -LiteralPath $candidateImage -Destination $script:MockUcxExportImage -Force
+    $ucxService = 'ucx_hcd_2_0_0_40'
+    $ucxInfText = @"
+[Version]
+DriverVer = 11/20/2026,2.0.0.40
+[Models.NTamd64.10.0...19041]
+%UcxDesc% = Ucx_Install, PCI\VEN_37FA&DEV_FE09
+[Ucx_Install.NT.Services]
+AddService = $ucxService,0x00000002,Ucx_Service
+[Ucx_Service]
+ServiceBinary = %13%\VirtualCameraUcxHcd_2_0_0_40.sys
+"@
+    [IO.File]::WriteAllText($script:MockUcxExportInf, $ucxInfText)
+    $script:MockUcxDriverPackages = @(
+        [pscustomobject]@{ OriginalFileName = 'C:\store\xusb_ucx_hcd.inf'; ProviderName = 'Virtual Device Camera Project'; Version = [version]'2.0.0.40'; Driver = $script:MockUcxPublishedInf }
+    )
+    Assert-UcxPackageCandidates -RequestedVersion ([version]'2.0.0.40') `
+        -RequestedService $ucxService -ExpectedImage $candidateImage
+    if (Test-Path -LiteralPath $script:MockExportDirectory) { throw 'The exported UCX preflight directory was not removed.' }
+
+    [IO.File]::WriteAllText($script:MockUcxExportImage, 'stale same-version bytes')
+    $didThrow = $false
+    try {
+        Assert-UcxPackageCandidates -RequestedVersion ([version]'2.0.0.40') `
+            -RequestedService $ucxService -ExpectedImage $candidateImage
+    }
+    catch {
+        $didThrow = $true
+        if ($_.Exception.Message -notmatch 'same-version UCX package contains different') { throw }
+    }
+    if (-not $didThrow) { throw 'A same-version staged HCD image collision passed the preflight.' }
+
+    Copy-Item -LiteralPath $candidateImage -Destination $script:MockUcxExportImage -Force
+    $script:MockUcxDriverPackages += [pscustomobject]@{
+        OriginalFileName = 'xusb_ucx_hcd.inf'
+        ProviderName = 'Virtual Device Camera Project'
+        Version = [version]'2.0.0.42'
+        Driver = 'oem42.inf'
+    }
+    $didThrow = $false
+    try {
+        Assert-UcxPackageCandidates -RequestedVersion ([version]'2.0.0.40') `
+            -RequestedService $ucxService -ExpectedImage $candidateImage
+    }
+    catch {
+        $didThrow = $true
+        if ($_.Exception.Message -notmatch 'before changing any device') { throw }
+    }
+    if (-not $didThrow) { throw 'A higher-ranked UCX HCD package passed the preflight.' }
 
     Copy-Item -LiteralPath $existingImage -Destination $candidateImage -Force
     Assert-NoImageVersionCollision 'mock-service' $candidateImage

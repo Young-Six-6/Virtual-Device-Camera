@@ -1,0 +1,59 @@
+; Test-only KMDF client for the synthetic VID_FFFF&PID_7E41 fixture.
+; It is not part of either production driver package.
+[Version]
+Signature="$WINDOWS NT$"
+Class=USBDevice
+ClassGuid={88BAE032-5A81-49F0-BC3D-A4FF138216D6}
+Provider=%ProviderName%
+CatalogFile=UcxMsFeatureTestClient.cat
+DriverVer=11/20/2026,1.0.0.0
+PnpLockdown=1
+
+[Manufacturer]
+%ProviderName%=Models,NTamd64.10.0...16299
+
+[Models.NTamd64.10.0...16299]
+%DeviceDescription%=Install,USB\VID_FFFF&PID_7E41
+
+[Install.NT]
+CopyFiles=DriverCopyFiles
+
+[Install.NT.HW]
+AddReg=DeviceSecurity
+
+[DeviceSecurity]
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+
+[Install.NT.Services]
+AddService=UcxMsFeatureTestClient,0x00000002,ServiceInstall
+
+[ServiceInstall]
+DisplayName=%ServiceDescription%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%13%\UcxMsFeatureTestClient.sys
+
+[Install.NT.Wdf]
+KmdfService=UcxMsFeatureTestClient,WdfSection
+
+[WdfSection]
+KmdfLibraryVersion=1.31
+
+[DestinationDirs]
+DriverCopyFiles=13
+
+[DriverCopyFiles]
+UcxMsFeatureTestClient.sys
+
+[SourceDisksNames]
+1=%DiskDescription%,,,
+
+[SourceDisksFiles]
+UcxMsFeatureTestClient.sys=1
+
+[Strings]
+ProviderName="Virtual Device Camera Test Fixtures"
+DeviceDescription="USB MS OS Feature URB Test Fixture"
+ServiceDescription="Test-only MS OS Feature URB Client"
+DiskDescription="MS OS Feature URB Test Package"

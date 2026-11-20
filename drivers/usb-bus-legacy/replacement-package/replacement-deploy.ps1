@@ -205,6 +205,75 @@ function Assert-TreePackageCandidates([version] $RequestedVersion, [string] $Req
     }
 }
 
+function Assert-UcxPackageCandidates([version] $RequestedVersion, [string] $RequestedService,
+    [string] $ExpectedImage) {
+    $expectedHash = (Get-FileHash -LiteralPath $ExpectedImage -Algorithm SHA256).Hash
+    $ucxPackages = @(Get-WindowsDriver -Online -All | Where-Object {
+        [IO.Path]::GetFileName([string]$_.OriginalFileName) -ieq 'xusb_ucx_hcd.inf' -and
+        $_.ProviderName -eq 'Virtual Device Camera Project'
+    })
+    foreach ($packageEntry in $ucxPackages) {
+        $packageVersion = [version]$packageEntry.Version
+        if ($packageVersion -gt $RequestedVersion) {
+            throw "A higher-version UCX HCD package is already staged: $($packageEntry.Driver) $packageVersion. Remove it or build a newer replacement package before changing any device."
+        }
+        if ($packageVersion -ne $RequestedVersion) { continue }
+
+        $exportDirectory = Join-Path ([IO.Path]::GetTempPath()) `
+            ('vcam-ucx-preflight-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $exportDirectory -Force | Out-Null
+        try {
+            $storedInf = $null
+            $storeRoot = [IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32\DriverStore\FileRepository')).TrimEnd('\') + '\'
+            $originalInfPath = [string]$packageEntry.OriginalFileName
+            if (Test-Path -LiteralPath $originalInfPath -PathType Leaf) {
+                $originalInfFullPath = [IO.Path]::GetFullPath($originalInfPath)
+                if ($originalInfFullPath.StartsWith($storeRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                    $storedInf = $originalInfFullPath
+                }
+            }
+            if (-not $storedInf) {
+                $publishedInf = [string]$packageEntry.Driver
+                if ($publishedInf -notmatch '^oem\d+\.inf$') {
+                    throw "Cannot safely inspect same-version staged UCX package '$publishedInf'; no device change was made."
+                }
+                $exportOutput = & $pnputil /export-driver $publishedInf $exportDirectory 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Could not export same-version UCX package $publishedInf for hash preflight (exit code $LASTEXITCODE). No device change was made. $($exportOutput -join ' ')"
+                }
+                $exportedInf = Get-ChildItem -LiteralPath $exportDirectory -Filter 'xusb_ucx_hcd.inf' `
+                    -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+                if (-not $exportedInf) {
+                    throw "Exported package $publishedInf does not contain xusb_ucx_hcd.inf; no device change was made."
+                }
+                $storedInf = $exportedInf.FullName
+            }
+
+            $storedText = [IO.File]::ReadAllText($storedInf)
+            $storedVersion = [regex]::Match($storedText,
+                '(?im)^\s*DriverVer\s*=\s*[^,\r\n]+,\s*(\d+\.\d+\.\d+\.\d+)\s*$')
+            $storedService = [regex]::Match($storedText, '(?im)^\s*AddService\s*=\s*([A-Za-z0-9_.-]+)\s*,')
+            $storedImage = [regex]::Match($storedText,
+                '(?im)^\s*ServiceBinary\s*=\s*%13%\\([^\\\r\n]+\.sys)\s*$')
+            if (-not $storedVersion.Success -or -not $storedService.Success -or -not $storedImage.Success -or
+                [version]$storedVersion.Groups[1].Value -ne $RequestedVersion) {
+                throw "Same-version staged UCX package $($packageEntry.Driver) has incomplete or inconsistent INF metadata; no device change was made."
+            }
+            if ($storedService.Groups[1].Value -ine $RequestedService) {
+                throw "A same-version UCX package is staged with service '$($storedService.Groups[1].Value)', not '$RequestedService'; no device change was made."
+            }
+            $storedImagePath = Join-Path (Split-Path -Parent $storedInf) $storedImage.Groups[1].Value
+            if (-not (Test-Path -LiteralPath $storedImagePath -PathType Leaf) -or
+                (Get-FileHash -LiteralPath $storedImagePath -Algorithm SHA256).Hash -ne $expectedHash) {
+                throw "A same-version UCX package contains different or unavailable SYS bytes; no device change was made. Increase DriverVer before retrying."
+            }
+        }
+        finally {
+            Remove-Item -LiteralPath $exportDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Assert-TreeUsesRequestedPackage([object[]] $Devices, [string] $ExpectedService,
     [version] $ExpectedVersion, [string] $ExpectedImage) {
     foreach ($device in $Devices) {
@@ -429,6 +498,13 @@ if (-not $treeServiceMatch.Success -or -not $treeImageMatch.Success) {
 }
 $treeServiceName = $treeServiceMatch.Groups[1].Value
 $treeImagePath = Join-Path $package $treeImageMatch.Groups[1].Value
+$ucxDriverVersionText = (Get-Content -LiteralPath $ucxInf | Where-Object {
+    $_ -match '^\s*DriverVer\s*='
+} | Select-Object -First 1) -replace '^.*?,\s*', ''
+if (-not $ucxDriverVersionText) {
+    throw "DriverVer is missing from the role-2 INF: $ucxInf"
+}
+$ucxDriverVersion = [version]$ucxDriverVersionText
 
 Assert-CameraAppClosed
 foreach ($requiredFile in @(
@@ -463,6 +539,8 @@ if (-not $legacyDriverVersionText) {
 $legacyDriverVersion = [version]$legacyDriverVersionText
 Assert-TreePackageCandidates -RequestedVersion $legacyDriverVersion `
     -RequestedService $treeServiceName -ExpectedImage $treeImagePath
+Assert-UcxPackageCandidates -RequestedVersion $ucxDriverVersion `
+    -RequestedService $ucxServiceName -ExpectedImage $ucxImagePath
 
 Invoke-PnpUtil @('/add-driver', $ucxInf)
 # Stage and update an already-present tree node; otherwise a successful rerun can
@@ -505,13 +583,6 @@ $controller = Wait-For {
     (Get-TargetDevices).Controller | Select-Object -First 1
 } 'the role-2 host-controller child emitted by role 3'
 
-$ucxDriverVersionText = (Get-Content -LiteralPath $ucxInf | Where-Object {
-    $_ -match '^\s*DriverVer\s*='
-} | Select-Object -First 1) -replace '^.*?,\s*', ''
-if (-not $ucxDriverVersionText) {
-    throw "DriverVer is missing from the role-2 INF: $ucxInf"
-}
-$ucxDriverVersion = [version]$ucxDriverVersionText
 Invoke-PnpUtil @('/add-driver', $ucxInf, '/install') -AllowNoUpdate
 $boundController = Wait-For {
     $device = Get-PnpDevice -InstanceId $controller.InstanceId -PresentOnly -ErrorAction SilentlyContinue

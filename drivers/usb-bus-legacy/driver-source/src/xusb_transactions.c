@@ -24,6 +24,7 @@ typedef struct _XUSB_TRANSACTION {
     ULONG TransferLength;
     ULONG IsoMetadataLength;
     ULONG PacketCount;
+    ULONG IsoPacketCapacity;
     USHORT UrbFunction;
     ULONG PortIoControlCode;
     PVOID TransferBuffer;
@@ -766,9 +767,18 @@ static NTSTATUS XusbBuildTransaction(
         if (Urb->UrbHeader.Length < sizeof(Urb->UrbOSFeatureDescriptorRequest)) {
             return STATUS_INVALID_PARAMETER;
         }
+        if (Urb->UrbOSFeatureDescriptorRequest.Recipient > 2 ||
+            (Urb->UrbOSFeatureDescriptorRequest.Recipient == 0 &&
+                Urb->UrbOSFeatureDescriptorRequest.InterfaceNumber != 0) ||
+            Urb->UrbOSFeatureDescriptorRequest.MS_PageIndex != 0) {
+            return STATUS_INVALID_PARAMETER;
+        }
         length = Urb->UrbOSFeatureDescriptorRequest.TransferBufferLength;
         if (length < sizeof(UCHAR)) {
             return STATUS_BUFFER_TOO_SMALL;
+        }
+        if (length > XUSB_MAX_MS_FEATURE_DESCRIPTOR_BYTES) {
+            return STATUS_INVALID_PARAMETER;
         }
         transferBuffer = Urb->UrbOSFeatureDescriptorRequest.TransferBuffer;
         transferMdl = Urb->UrbOSFeatureDescriptorRequest.TransferBufferMDL;
@@ -834,6 +844,9 @@ static NTSTATUS XusbBuildTransaction(
         transferBuffer = Urb->UrbBulkOrInterruptTransfer.TransferBuffer;
         transferMdl = Urb->UrbBulkOrInterruptTransfer.TransferBufferMDL;
         isRead = (Urb->UrbBulkOrInterruptTransfer.TransferFlags & USBD_TRANSFER_DIRECTION_IN) != 0;
+        if (((pipe.EndpointAddress & 0x80) != 0) != (isRead != FALSE)) {
+            return STATUS_INVALID_PARAMETER;
+        }
         break;
 
     case URB_FUNCTION_ISOCH_TRANSFER:
@@ -849,10 +862,22 @@ static NTSTATUS XusbBuildTransaction(
         transferMdl = Urb->UrbIsochronousTransfer.TransferBufferMDL;
         isRead = (Urb->UrbIsochronousTransfer.TransferFlags & USBD_TRANSFER_DIRECTION_IN) != 0;
         packetCount = Urb->UrbIsochronousTransfer.NumberOfPackets;
-        if (packetCount > (MAXULONG - ISO_PACKET_HDR_SIZE) / sizeof(iso_packet_t) ||
+        if (packetCount == 0 || packetCount > (MAXULONG - ISO_PACKET_HDR_SIZE) / sizeof(iso_packet_t) ||
             Urb->UrbHeader.Length < FIELD_OFFSET(struct _URB_ISOCH_TRANSFER, IsoPacket) +
                 packetCount * sizeof(USBD_ISO_PACKET_DESCRIPTOR)) {
             return STATUS_INVALID_PARAMETER;
+        }
+        if (pipe.MaximumPacketSize == 0) {
+            return STATUS_INVALID_PARAMETER;
+        }
+        for (ULONG index = 0; index < packetCount; ++index) {
+            const USBD_ISO_PACKET_DESCRIPTOR* packet =
+                &Urb->UrbIsochronousTransfer.IsoPacket[index];
+            if (packet->Offset > length ||
+                (index != 0 && packet->Offset <
+                    Urb->UrbIsochronousTransfer.IsoPacket[index - 1].Offset)) {
+                return STATUS_INVALID_PARAMETER;
+            }
         }
         isoMetadataLength = ISO_PACKET_HDR_SIZE + packetCount * sizeof(iso_packet_t);
         if (length > XUSB_MAX_TRANSACTION_BYTES - isoMetadataLength) {
@@ -915,6 +940,8 @@ static NTSTATUS XusbBuildTransaction(
     transaction->TransferLength = length;
     transaction->IsoMetadataLength = isoMetadataLength;
     transaction->PacketCount = packetCount;
+    transaction->IsoPacketCapacity = function == URB_FUNCTION_ISOCH_TRANSFER
+        ? pipe.MaximumPacketSize : 0;
     transaction->TransferBuffer = transferBuffer;
     transaction->TransferMdl = transferMdl;
     transaction->IsRead = isRead;
@@ -979,9 +1006,11 @@ static NTSTATUS XusbBuildTransaction(
             request->Descriptor.Type = 5;
             request->Descriptor.Subtype = 0;
             request->Descriptor.IsRead = 1;
+            /* Keep the legacy recipient/interface packing and append the OS page. */
             request->Descriptor.Index =
                 ((LONG)Urb->UrbOSFeatureDescriptorRequest.Recipient << 8) |
-                Urb->UrbOSFeatureDescriptorRequest.InterfaceNumber;
+                Urb->UrbOSFeatureDescriptorRequest.InterfaceNumber |
+                ((LONG)Urb->UrbOSFeatureDescriptorRequest.MS_PageIndex << 16);
             request->Descriptor.Value = Urb->UrbOSFeatureDescriptorRequest.MS_FeatureDescriptorIndex;
         } else if (function == URB_FUNCTION_VENDOR_DEVICE ||
             function == URB_FUNCTION_VENDOR_INTERFACE ||
@@ -1078,19 +1107,19 @@ static NTSTATUS XusbBuildTransaction(
                 iso_packet_hdr_t* isoHeader = (iso_packet_hdr_t*)request->Data;
                 isoHeader->start_frame = Urb->UrbIsochronousTransfer.StartFrame;
                 isoHeader->flags = Urb->UrbIsochronousTransfer.TransferFlags;
-                isoHeader->error_count = Urb->UrbIsochronousTransfer.ErrorCount;
+                isoHeader->error_count = 0;
                 isoHeader->number_packets = packetCount;
                 request->Transfer.NumberPackets = (LONG)packetCount;
                 for (ULONG index = 0; index < packetCount; ++index) {
                     const USBD_ISO_PACKET_DESCRIPTOR* sourcePacket = &Urb->UrbIsochronousTransfer.IsoPacket[index];
                     iso_packet_t* targetPacket = &isoHeader->packets[index];
-                    if (sourcePacket->Offset > length || sourcePacket->Length > length - sourcePacket->Offset) {
-                        XusbReleaseTransaction(transaction);
-                        return STATUS_INVALID_PARAMETER;
-                    }
+                    ULONG nextOffset = index + 1 < packetCount
+                        ? Urb->UrbIsochronousTransfer.IsoPacket[index + 1].Offset
+                        : length;
                     targetPacket->offset = sourcePacket->Offset;
-                    targetPacket->length = sourcePacket->Length;
-                    targetPacket->status = sourcePacket->Status;
+                    targetPacket->length = min(nextOffset - sourcePacket->Offset,
+                        transaction->IsoPacketCapacity);
+                    targetPacket->status = 0;
                 }
             }
         }
@@ -1610,7 +1639,9 @@ NTSTATUS XusbEndUsbTransaction(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Ir
             ULONG index;
 
             if (actualLength < expectedMetadata ||
-                isoResponse->number_packets != transaction->PacketCount) {
+                isoResponse->number_packets != transaction->PacketCount ||
+                isoResponse->error_count > transaction->PacketCount ||
+                transaction->IsoPacketCapacity == 0) {
                 status = STATUS_INVALID_PARAMETER;
                 break;
             }
@@ -1624,7 +1655,19 @@ NTSTATUS XusbEndUsbTransaction(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Ir
                 iso_packet_t* packet = &isoResponse->packets[index];
                 USBD_ISO_PACKET_DESCRIPTOR* original =
                     &transaction->Urb->UrbIsochronousTransfer.IsoPacket[index];
+                ULONG nextOffset = index + 1 < transaction->PacketCount
+                    ? transaction->Urb->UrbIsochronousTransfer.IsoPacket[index + 1].Offset
+                    : transaction->TransferLength;
+                ULONG packetCapacity;
+                if (original->Offset > transaction->TransferLength ||
+                    nextOffset < original->Offset || nextOffset > transaction->TransferLength) {
+                    status = STATUS_INVALID_PARAMETER;
+                    break;
+                }
+                packetCapacity = min(nextOffset - original->Offset,
+                    transaction->IsoPacketCapacity);
                 if (packet->offset != original->Offset ||
+                    packet->length > packetCapacity ||
                     packet->offset > transaction->TransferLength ||
                     packet->length > transaction->TransferLength - packet->offset ||
                     packet->length > actualPayload - payloadOffset) {

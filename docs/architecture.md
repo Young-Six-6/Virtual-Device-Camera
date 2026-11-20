@@ -53,6 +53,6 @@ flowchart LR
 
 ## USB 与驱动边界
 
-`src/usb/ioctl.h` 中原有接口 GUID、结构体布局和 IOCTL 是用户态与内核驱动之间的冻结二进制契约；`IOCTL_PDO_ADD_SUPERSPEED` 与 `IOCTL_PDO_ADD_WITH_USB_SPEED` 是只对 FOSS 驱动启用的新增扩展，旧驱动不支持时现有用户态继续使用原 USB 2.0 高速路径。HCD `2.0.0.34` 和 role-3 `1.0.0.18` 已在目标 Windows 上验证。单路与双路 DirectShow 均以 720p YUY2 抓取 120 帧，分别用时 3.93 秒和 3.96 秒；低速和全速 HID 设备也完成 PnP 枚举、周期 interrupt-IN 与移除清理。控制管道 720p→480p→720p 热更新已在此前版本实测。以上验证针对软件虚拟 SuperSpeed 总线，不是物理 USB 3 链路测速，也不覆盖原版驱动的所有 URB 行为。验证细节见[驱动文档](driver.md)。
+`src/usb/ioctl.h` 中原有接口 GUID、结构体布局和 IOCTL 是用户态与内核驱动之间的冻结二进制契约；`IOCTL_PDO_ADD_SUPERSPEED` 与 `IOCTL_PDO_ADD_WITH_USB_SPEED` 是只对 FOSS 驱动启用的新增扩展，旧驱动不支持时现有用户态继续使用原 USB 2.0 高速路径。目标 Windows 当前运行 HCD `2.0.0.41` 和 role-3 `1.0.0.22`。Release 摄像头程序以 720p YUY2 抓取 120 帧约为 30fps，控制管道 720p→480p→720p 热更新也通过 DirectShow 实测；低/全速 HID 的 PnP、周期 interrupt-IN 和移除清理、WinUSB bulk IN/OUT 事务均完成运行验证（这些合成设备探针曾在 `.39` 上验证）。KMDF 测试客户端发送 Microsoft OS feature descriptor URB 后取得了有效描述符，Windows USB 栈把请求转成 vendor-control 传输到 HCD；直接 URB 形式没有在 HCD 边界观察到。以上验证针对软件虚拟 SuperSpeed 总线，不是物理 USB 3 链路测速，也不覆盖原版驱动的所有 URB 行为。验证细节见[驱动文档](driver.md)。
 
 TCP 和本机帧管道使用相同的 RGB24 帧格式；控制管道是独立的文本命令通道。协议详见[运行与输入协议](usage.md)和[控制管道协议](control-protocol.md)。

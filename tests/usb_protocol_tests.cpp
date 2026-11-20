@@ -125,31 +125,38 @@ Packet make_iso_packet() {
     return packet;
 }
 void iso_reply_validation_tests() {
-    require(xusb_iso_packet_fits_reply(24, 0, 10, 32),
+    require(xusb_iso_packet_fits_reply(24, 0, 8, 10, 32),
         "Trailing zero-length ISO packet beyond the returned payload was rejected");
-    require(xusb_iso_packet_fits_reply(32, 0, 0, 32),
+    require(xusb_iso_packet_fits_reply(32, 0, 0, 0, 32),
         "Zero-length ISO packet at transfer capacity was rejected");
-    require(xusb_iso_packet_fits_reply(4, 4, 8, 32),
+    require(xusb_iso_packet_fits_reply(4, 4, 4, 8, 32),
         "ISO packet ending at the returned payload boundary was rejected");
-    require(!xusb_iso_packet_fits_reply(8, 1, 8, 32),
+    require(!xusb_iso_packet_fits_reply(8, 1, 4, 8, 32),
         "Nonempty ISO packet beyond the returned payload was accepted");
-    require(!xusb_iso_packet_fits_reply(33, 0, 0, 32),
+    require(!xusb_iso_packet_fits_reply(0, 5, 4, 8, 32),
+        "ISO packet larger than its buffer slice was accepted");
+    require(!xusb_iso_packet_fits_reply(33, 0, 0, 0, 32),
         "Zero-length ISO packet beyond transfer capacity was accepted");
-    require(!xusb_iso_packet_fits_reply(0, 0, 33, 32),
+    require(!xusb_iso_packet_fits_reply(0, 0, 0, 33, 32),
         "Returned ISO payload larger than transfer capacity was accepted");
-    require(!xusb_iso_packet_fits_reply(0xfffffffful, 1, 0xfffffffful, 0xfffffffful),
+    require(!xusb_iso_packet_fits_reply(
+            0xfffffffful, 1, 0xfffffffful, 0xfffffffful, 0xfffffffful),
         "ISO offset/length overflow was accepted");
 
     for (unsigned long capacity = 0; capacity <= 16; ++capacity) {
         for (unsigned long returned = 0; returned <= capacity; ++returned) {
-            for (unsigned long offset = 0; offset <= capacity + 1; ++offset) {
-                for (unsigned long length = 0; length <= capacity + 1; ++length) {
-                    const bool withinCapacity = offset <= capacity && length <= capacity - offset;
-                    const bool withinReply = length == 0 ||
-                        (offset <= returned && length <= returned - offset);
-                    const bool expected = withinCapacity && withinReply;
-                    require(bool(xusb_iso_packet_fits_reply(offset, length, returned, capacity)) == expected,
-                        "ISO reply validator disagreed with exhaustive boundary cases");
+            for (unsigned long packetCapacity = 0; packetCapacity <= capacity + 1; ++packetCapacity) {
+                for (unsigned long offset = 0; offset <= capacity + 1; ++offset) {
+                    for (unsigned long length = 0; length <= capacity + 1; ++length) {
+                        const bool withinPacket = length <= packetCapacity;
+                        const bool withinCapacity = offset <= capacity && length <= capacity - offset;
+                        const bool withinReply = length == 0 ||
+                            (offset <= returned && length <= returned - offset);
+                        const bool expected = withinPacket && withinCapacity && withinReply;
+                        require(bool(xusb_iso_packet_fits_reply(
+                                offset, length, packetCapacity, returned, capacity)) == expected,
+                            "ISO reply validator disagreed with exhaustive boundary cases");
+                    }
                 }
             }
         }

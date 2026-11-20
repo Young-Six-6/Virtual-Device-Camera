@@ -39,7 +39,9 @@ static NTSTATUS XusbHandleRootHubDescriptorRequest(
     *Information = 0;
     if (KeGetCurrentIrql() != PASSIVE_LEVEL || request == NULL ||
         InputBytes < requestHeaderBytes ||
-        OutputBytes < requestHeaderBytes || request->ConnectionIndex != 1) {
+        OutputBytes < requestHeaderBytes ||
+        request->ConnectionIndex == 0 ||
+        request->ConnectionIndex > XUSB_ROOT_HUB_PORT_COUNT) {
         return STATUS_INVALID_PARAMETER;
     }
     if (request->SetupPacket.bmRequest != 0x80 || request->SetupPacket.bRequest != 0x06) {
@@ -55,7 +57,8 @@ static NTSTATUS XusbHandleRootHubDescriptorRequest(
         entry != &Parent->Children;
         entry = entry->Flink) {
         PXUSB_CHILD_EXTENSION child = CONTAINING_RECORD(entry, XUSB_CHILD_EXTENSION, Link);
-        if (child->Present && !child->Removed && !child->Internal) {
+        if (child->Present && !child->Removed && !child->Internal &&
+            child->RootHubPortNumber == request->ConnectionIndex) {
             childPdo = child->Self;
             ObReferenceObject(childPdo);
             break;
@@ -156,7 +159,8 @@ static NTSTATUS XusbHandleRootHubDriverKeyName(
         InputBytes < sizeof(ULONG) || OutputBytes < headerBytes) {
         return STATUS_INVALID_PARAMETER;
     }
-    if (request->ConnectionIndex != 1) {
+    if (request->ConnectionIndex == 0 ||
+        request->ConnectionIndex > XUSB_ROOT_HUB_PORT_COUNT) {
         return STATUS_INVALID_PARAMETER;
     }
     ExAcquireFastMutex(&Parent->ChildMutex);
@@ -164,7 +168,8 @@ static NTSTATUS XusbHandleRootHubDriverKeyName(
         entry != &Parent->Children;
         entry = entry->Flink) {
         PXUSB_CHILD_EXTENSION child = CONTAINING_RECORD(entry, XUSB_CHILD_EXTENSION, Link);
-        if (child->Present && !child->Removed && !child->Internal) {
+        if (child->Present && !child->Removed && !child->Internal &&
+            child->RootHubPortNumber == request->ConnectionIndex) {
             childPdo = child->Self;
             ObReferenceObject(childPdo);
             break;
@@ -811,6 +816,64 @@ static LONG XusbAllocateBusAddress(
     return 0;
 }
 
+/* Called with Parent->ChildMutex held. BusAddress is a USB device address,
+ * while RootHubPortNumber is the one-based hub connection slot. */
+static ULONG XusbAllocateRootHubPortNumber(
+    _In_ PXUSB_PARENT_EXTENSION Parent)
+{
+    ULONG candidate;
+
+    for (candidate = 1; candidate <= XUSB_ROOT_HUB_PORT_COUNT; ++candidate) {
+        BOOLEAN inUse = FALSE;
+        PLIST_ENTRY entry;
+
+        for (entry = Parent->Children.Flink;
+            entry != &Parent->Children;
+            entry = entry->Flink) {
+            PXUSB_CHILD_EXTENSION child = CONTAINING_RECORD(
+                entry,
+                XUSB_CHILD_EXTENSION,
+                Link);
+            if (child->RootHubPortNumber == candidate) {
+                inUse = TRUE;
+                break;
+            }
+        }
+        if (!inUse) {
+            return candidate;
+        }
+    }
+    return 0;
+}
+
+static VOID XusbInitializeRootHubDescriptor(
+    _Out_ PUSB_HUB_DESCRIPTOR Descriptor)
+{
+    const ULONG bitmapBytes = (XUSB_ROOT_HUB_PORT_COUNT + 1 + 7) / 8;
+    ULONG index;
+
+    RtlZeroMemory(Descriptor, sizeof(*Descriptor));
+    Descriptor->bDescriptorLength = (UCHAR)(7 + 2 * bitmapBytes);
+    Descriptor->bDescriptorType = USB_20_HUB_DESCRIPTOR_TYPE;
+    Descriptor->bNumberOfPorts = XUSB_ROOT_HUB_PORT_COUNT;
+    Descriptor->wHubCharacteristics = 0x0009;
+    Descriptor->bPowerOnToPowerGood = 1;
+
+    /* DeviceRemovable defaults to removable; bit zero is reserved. */
+    for (index = 0; index < bitmapBytes; ++index) {
+        ULONG portMask = (XUSB_ROOT_HUB_PORT_COUNT + 1) - (index * 8);
+        ULONG portPowerMask;
+        if (portMask > 8) {
+            portMask = 8;
+        }
+        portPowerMask = (1u << portMask) - 1u;
+        /* PortPwrCtrlMask bit zero is reserved; bits 1..16 are switchable. */
+        if (index == 0) portPowerMask &= ~1u;
+        Descriptor->bRemoveAndPowerMask[bitmapBytes + index] =
+            (UCHAR)portPowerMask;
+    }
+}
+
 NTSTATUS XusbCreateRoleChild(_In_ PDEVICE_OBJECT DeviceObject)
 {
     static const WCHAR rootHubId[] = L"vFxsUSB\\vRootHUB&Virtual&Fanxiushu";
@@ -1068,6 +1131,14 @@ static NTSTATUS XusbCreateChild(
         status = STATUS_INSUFFICIENT_RESOURCES;
         goto Exit;
     }
+    if (parent->Role == XusbRoleRootHub) {
+        child->RootHubPortNumber = XusbAllocateRootHubPortNumber(parent);
+        if (child->RootHubPortNumber == 0) {
+            ExReleaseFastMutex(&parent->ChildMutex);
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Exit;
+        }
+    }
     InsertTailList(&parent->Children, &child->Link);
     child->Linked = TRUE;
     FileContext->ChildPdo = childPdo;
@@ -1140,7 +1211,7 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
         XusbCompleteIrp(Irp, status, information);
         return status;
     }
-    /* The reconstructed legacy Root Hub exposes one virtual downstream port. */
+    /* Keep the legacy Root Hub's original 16-port connection-index contract. */
     if (parent->Role == XusbRoleRootHub &&
         (code == IOCTL_USB_GET_NODE_INFORMATION ||
             code == IOCTL_USB_GET_DESCRIPTOR_FROM_NODE_CONNECTION ||
@@ -1175,7 +1246,8 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
             } else {
                 PUSB_NODE_CONNECTION_NAME connectionName =
                     (PUSB_NODE_CONNECTION_NAME)buffer;
-                if (connectionName->ConnectionIndex != 1) {
+                if (connectionName->ConnectionIndex == 0 ||
+                    connectionName->ConnectionIndex > XUSB_ROOT_HUB_PORT_COUNT) {
                     status = STATUS_INVALID_PARAMETER;
                 } else {
                     connectionName->ActualLength = 0;
@@ -1197,14 +1269,8 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
                 } else {
                     RtlZeroMemory(node, sizeof(*node));
                     node->NodeType = UsbHub;
-                    node->u.HubInformation.HubDescriptor.bDescriptorLength = 9;
-                    node->u.HubInformation.HubDescriptor.bDescriptorType =
-                        USB_20_HUB_DESCRIPTOR_TYPE;
-                    node->u.HubInformation.HubDescriptor.bNumberOfPorts = 1;
-                    node->u.HubInformation.HubDescriptor.wHubCharacteristics = 0x0009;
-                    node->u.HubInformation.HubDescriptor.bPowerOnToPowerGood = 1;
-                    node->u.HubInformation.HubDescriptor.bRemoveAndPowerMask[0] = 0x01;
-                    node->u.HubInformation.HubDescriptor.bRemoveAndPowerMask[1] = 0x03;
+                    XusbInitializeRootHubDescriptor(
+                        &node->u.HubInformation.HubDescriptor);
                     node->u.HubInformation.HubIsBusPowered = FALSE;
                     information = sizeof(*node);
                     status = STATUS_SUCCESS;
@@ -1239,14 +1305,9 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
                 PUSB_HUB_INFORMATION_EX informationEx = (PUSB_HUB_INFORMATION_EX)buffer;
                 RtlZeroMemory(informationEx, sizeof(*informationEx));
                 informationEx->HubType = UsbRootHub;
-                informationEx->HighestPortNumber = 1;
-                informationEx->u.UsbHubDescriptor.bDescriptorLength = 9;
-                informationEx->u.UsbHubDescriptor.bDescriptorType = USB_20_HUB_DESCRIPTOR_TYPE;
-                informationEx->u.UsbHubDescriptor.bNumberOfPorts = 1;
-                informationEx->u.UsbHubDescriptor.wHubCharacteristics = 0x0009;
-                informationEx->u.UsbHubDescriptor.bPowerOnToPowerGood = 1;
-                informationEx->u.UsbHubDescriptor.bRemoveAndPowerMask[0] = 0x01;
-                informationEx->u.UsbHubDescriptor.bRemoveAndPowerMask[1] = 0x03;
+                informationEx->HighestPortNumber = XUSB_ROOT_HUB_PORT_COUNT;
+                XusbInitializeRootHubDescriptor(
+                    &informationEx->u.UsbHubDescriptor);
                 information = sizeof(*informationEx);
                 status = STATUS_SUCCESS;
             }
@@ -1257,7 +1318,8 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
             } else {
                 PUSB_NODE_CONNECTION_INFORMATION_EX_V2 connectionV2 =
                     (PUSB_NODE_CONNECTION_INFORMATION_EX_V2)buffer;
-                if (connectionV2->ConnectionIndex != 1 ||
+                if (connectionV2->ConnectionIndex == 0 ||
+                    connectionV2->ConnectionIndex > XUSB_ROOT_HUB_PORT_COUNT ||
                     connectionV2->Length < sizeof(*connectionV2) ||
                     !connectionV2->SupportedUsbProtocols.Usb300) {
                     status = STATUS_INVALID_PARAMETER;
@@ -1279,7 +1341,7 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
                 ULONG index = attributes->ConnectionIndex;
                 BOOLEAN connected = FALSE;
                 PLIST_ENTRY entry;
-                if (index != 1) {
+                if (index == 0 || index > XUSB_ROOT_HUB_PORT_COUNT) {
                     status = STATUS_INVALID_PARAMETER;
                 } else {
                     ExAcquireFastMutex(&parent->ChildMutex);
@@ -1288,7 +1350,8 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
                         entry = entry->Flink) {
                         PXUSB_CHILD_EXTENSION child = CONTAINING_RECORD(
                             entry, XUSB_CHILD_EXTENSION, Link);
-                        if (child->Present && !child->Removed && !child->Internal) {
+                        if (child->Present && !child->Removed && !child->Internal &&
+                            child->RootHubPortNumber == index) {
                             connected = TRUE;
                             break;
                         }
@@ -1319,7 +1382,7 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
                 status = STATUS_BUFFER_TOO_SMALL;
             } else {
                 index = *(PULONG)buffer;
-                if (index != 1) {
+                if (index == 0 || index > XUSB_ROOT_HUB_PORT_COUNT) {
                     status = STATUS_INVALID_PARAMETER;
                 } else {
                     pipes = ExAllocatePool2(
@@ -1336,7 +1399,8 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
                         entry = entry->Flink) {
                         PXUSB_CHILD_EXTENSION child = CONTAINING_RECORD(
                             entry, XUSB_CHILD_EXTENSION, Link);
-                        if (child->Present && !child->Removed && !child->Internal) {
+                        if (child->Present && !child->Removed && !child->Internal &&
+                            child->RootHubPortNumber == index) {
                             ExAcquireFastMutex(&child->ConfigurationMutex);
                             if (child->DeviceDescriptorValid) {
                                 descriptor = child->DeviceDescriptor;

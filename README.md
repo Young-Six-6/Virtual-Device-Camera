@@ -38,9 +38,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -FFmpegS
 
 ## 运行前要知道
 
-USB 2.0 下 1280×720 未压缩 YUY2 每帧为 1,843,200 字节；高速等时端点的 24.576 MB/s 理论载荷上限折算约 13.3fps，所以这个帧率是格式和总线带宽的上限。应用同时提供 MJPEG，测试机以 30fps 请求抓取 60 帧，实测约 25fps。新候选 HCD `2.0.0.23` 已加入 SuperSpeed 虚拟端口、USB 3.0 描述符和端点预算，支持 720p YUY2 30fps 的软件路径；但目前只完成编译和协议级测试，尚未安装或在 Windows PnP/DirectShow 上实测。当前测试机仍运行 HCD `2.0.0.22`，所以 USB 3.0 带宽还不能视为已验证可用。
-
-截至 2026-11-18，本机同一启动周期运行重建总线 `1.0.0.14`（`xusb_tree_1_0_0_14`）和 HCD `2.0.0.30`（`ucx_hcd_2_0_0_30`）；单个 SuperSpeed UVC 摄像头可枚举并以 DirectShow 抓取 720p YUY2，120 帧耗时 3.976 秒（约 30.2fps）。应用停止后摄像头节点移除，HCD 挂起事务和移除工作项归零，无需重启系统。该测试使用软件虚拟 USB 总线，不是物理 USB 3 吞吐测试。测试范围和驱动限制见[驱动文档](docs/driver.md)。
+USB 2.0 下 1280×720 未压缩 YUY2 每帧为 1,843,200 字节；高速等时端点的 24.576 MB/s 理论载荷上限折算约 13.3fps。应用也提供 MJPEG，可降低 USB 2.0 带宽需求。重建版软件 HCD 的 SuperSpeed UVC 路径已经过 Windows PnP 和 DirectShow 实测：HCD `2.0.0.34` 上单路 720p YUY2 达到约 30.5fps，双路约 30.3fps/路；当前 HCD `2.0.0.41` / USB-tree `1.0.0.22` 单路抓取 120 帧约为 30fps，并完成 720p→480p→720p 热分辨率更新。低/全速 HID、WinUSB bulk IN/OUT 事务、Microsoft OS 1.0 描述符和移除清理也通过合成设备实测。Microsoft OS feature URB 的 KMDF 客户端到描述符响应链路已通过；Windows 在到达 HCD 前将请求转成 vendor-control 传输，因此 HCD 的直接 URB 映射尚未单独观察到。以上是软件虚拟总线结果，不是物理 USB 3 控制器或线缆带宽测试。完整 Root Hub/电源行为和其他 URB 家族仍未全部验证，生产用户态摄像头程序也尚未实现 bulk/interrupt 设备类数据处理。测试范围、可替代边界和限制见[驱动文档](docs/driver.md)。
 
 `config/default_res.txt` 支持 `480`、`720`、`1080` 三种预设。也可在启动时使用 `--resolution WIDTHxHEIGHT`，或通过控制管道在运行中修改输出分辨率。分辨率变更会重建 UVC 描述符并重新枚举设备，摄像头客户端需要重新打开设备。详见[控制管道协议](docs/control-protocol.md)。
 
