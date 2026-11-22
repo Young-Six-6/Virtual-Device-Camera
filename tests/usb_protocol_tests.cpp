@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <random>
 #include <stdexcept>
+#include <tuple>
 
 namespace {
 void require(bool value, const char* reason) { if (!value) throw std::runtime_error(reason); }
@@ -321,17 +322,17 @@ void protocol_tests() {
             static_cast<uint8_t>(selectConfigurationReset.header().data[0]) == 0,
             "UCX SELECT_CONFIGURATION did not reset interface alternate settings");
     }
-    for (int feature_type : {1, 2}) for (int recipient = 1; recipient <= 4; ++recipient) {
+    {
         Packet packet(0);
         auto& hdr = packet.header();
         hdr.type = 6;
-        hdr.feature.type = feature_type;
-        hdr.feature.subtype = recipient;
-        hdr.feature.index = 1;
-        hdr.feature.value = 1;
+        hdr.feature.type = 1;
+        hdr.feature.subtype = 1;
+        hdr.feature.index = 0;
+        hdr.feature.value = 48;
         device.handle(hdr, packet.capacity);
-        require(packet.intact() && hdr.result == 0 && hdr.data_length == 0,
-            "Set/clear feature transaction failed");
+        require(packet.intact() && hdr.result < 0 && hdr.data_length == 0,
+            "A high-speed device accepted a SuperSpeed-only feature");
     }
     for (int reset_type : {1, 2, 3, 4}) {
         Packet packet(0);
@@ -590,6 +591,31 @@ void superspeed_protocol_tests() {
             bosBytes[14] == 3 && bosBytes[16] == 0x08,
         "SuperSpeed BOS descriptor is incomplete or malformed");
 
+    for (int featureType : {1, 2}) for (int selector : {48, 49}) {
+        Packet feature(0);
+        feature.header().type = 6;
+        feature.header().feature.type = featureType;
+        feature.header().feature.subtype = 1;
+        feature.header().feature.index = 0;
+        feature.header().feature.value = selector;
+        device.handle(feature.header(), feature.capacity);
+        require(feature.intact() && feature.header().result == 0 && feature.header().data_length == 0,
+            "Advertised SuperSpeed U1/U2 feature request failed");
+    }
+    for (const auto [recipient, index, selector] : {
+             std::tuple{1, 1, 48}, std::tuple{1, 0, 1}, std::tuple{1, 0, 50},
+             std::tuple{2, 0, 48}, std::tuple{3, 0x82, 0}}) {
+        Packet feature(0);
+        feature.header().type = 6;
+        feature.header().feature.type = 1;
+        feature.header().feature.subtype = recipient;
+        feature.header().feature.index = index;
+        feature.header().feature.value = selector;
+        device.handle(feature.header(), feature.capacity);
+        require(feature.intact() && feature.header().result < 0 && feature.header().data_length == 0,
+            "Unsupported or malformed feature request was not stalled");
+    }
+
     auto config = descriptor();
     device.handle(config.header(), config.capacity);
     require(config.header().result == 0 && config.intact(), "SuperSpeed configuration descriptor failed");
@@ -649,9 +675,11 @@ class FakeTransport final : public vcam::UsbTransport {
     std::shared_ptr<FakeState> state_;
     std::unique_ptr<Packet> active_;
     bool super_speed_;
+    VirtUsbDriverKind driver_kind_;
 public:
-    explicit FakeTransport(std::shared_ptr<FakeState> state, bool super_speed = false)
-        : state_(std::move(state)), super_speed_(super_speed) {}
+    explicit FakeTransport(std::shared_ptr<FakeState> state, bool super_speed = false,
+                           VirtUsbDriverKind driver_kind = VirtUsbDriverKind::unknown)
+        : state_(std::move(state)), super_speed_(super_speed), driver_kind_(driver_kind) {}
     ~FakeTransport() override { std::lock_guard<std::mutex> lock(state_->mutex); state_->destroyed = true; }
     bool plug(const vcam::DeviceIdentity& identity) override {
         std::lock_guard<std::mutex> lock(state_->mutex);
@@ -694,6 +722,7 @@ public:
     }
     size_t capacity() const override { return active_ ? active_->capacity : 0; }
     bool is_superspeed() const override { return super_speed_; }
+    VirtUsbDriverKind driver_kind() const override { return driver_kind_; }
     void interrupt() noexcept override { std::lock_guard<std::mutex> lock(state_->mutex); state_->stopped = true; state_->changed.notify_all(); }
     void resume() noexcept override { std::lock_guard<std::mutex> lock(state_->mutex); state_->stopped = false; }
 };
@@ -702,6 +731,190 @@ Packet round_trip(const std::shared_ptr<FakeState>& state, Packet request) {
     state->requests.push_back(std::move(request)); state->changed.notify_all();
     require(state->changed.wait_for(lock, std::chrono::seconds(2), [&] { return !state->responses.empty(); }), "USB response timeout");
     Packet response = std::move(state->responses.front()); state->responses.pop_front(); return response;
+}
+struct UsbResponderState {
+    int mode = 0;
+    int calls = 0;
+    int last_kind = 0;
+    int last_speed = 0;
+    int last_direction = 0;
+    int last_endpoint = 0;
+    int last_pipe_type = 0;
+    int last_feature_type = 0;
+    int last_feature_subtype = 0;
+    unsigned int last_request = 0;
+    unsigned int last_value = 0;
+    unsigned int last_index = 0;
+    unsigned int last_recipient = 0;
+    unsigned int last_interface = 0;
+    unsigned int last_page = 0;
+    unsigned int last_feature_index = 0;
+    unsigned int last_transfer_length = 0;
+    unsigned int last_buffer_capacity = 0;
+    unsigned int last_timeout_ms = 0;
+    std::vector<unsigned char> last_output;
+};
+int usb_responder_fixture(vcam_usb_request_t* request, void* context) {
+    auto* state = static_cast<UsbResponderState*>(context);
+    ++state->calls;
+    state->last_kind = request->kind;
+    state->last_speed = request->device_speed;
+    state->last_direction = request->is_read;
+    state->last_endpoint = request->endpoint_address;
+    state->last_pipe_type = request->pipe_type;
+    state->last_feature_type = request->feature_type;
+    state->last_feature_subtype = request->feature_subtype;
+    state->last_request = static_cast<unsigned int>(request->request);
+    state->last_value = request->value;
+    state->last_index = request->index;
+    state->last_recipient = request->recipient;
+    state->last_interface = request->interface_number;
+    state->last_page = request->page_index;
+    state->last_feature_index = request->feature_descriptor_index;
+    state->last_transfer_length = request->transfer_length;
+    state->last_buffer_capacity = request->buffer_capacity;
+    state->last_timeout_ms = request->timeout_ms;
+    state->last_output.clear();
+
+    if (state->mode == 1 && request->kind == VCAM_USB_REQUEST_MS_FEATURE_DESCRIPTOR && request->is_read) {
+        static constexpr unsigned char response[] = {0x28, 0x00, 0x03, 0x06};
+        if (request->buffer_capacity < sizeof(response)) return VCAM_USB_REQUEST_STALL;
+        std::memcpy(request->input_data, response, sizeof(response));
+        request->response_length = sizeof(response);
+        return VCAM_USB_REQUEST_HANDLED;
+    }
+    if (state->mode == 2 && request->kind == VCAM_USB_REQUEST_BULK_OR_INTERRUPT_TRANSFER && request->is_read) {
+        for (unsigned int index = 0; index < request->buffer_capacity; ++index)
+            request->input_data[index] = static_cast<unsigned char>(0x40 + index);
+        request->response_length = request->buffer_capacity;
+        return VCAM_USB_REQUEST_HANDLED;
+    }
+    if (state->mode == 3 && request->kind == VCAM_USB_REQUEST_BULK_OR_INTERRUPT_TRANSFER && !request->is_read) {
+        state->last_output.assign(request->output_data, request->output_data + request->transfer_length);
+        return VCAM_USB_REQUEST_HANDLED;
+    }
+    if (state->mode == 4 && request->kind == VCAM_USB_REQUEST_CONTROL_TRANSFER && request->is_read) {
+        for (unsigned int index = 0; index < request->buffer_capacity; ++index)
+            request->input_data[index] = static_cast<unsigned char>(0x70 + index);
+        request->response_length = request->buffer_capacity;
+        return VCAM_USB_REQUEST_HANDLED;
+    }
+    if (state->mode == 5 && request->is_read) {
+        request->response_length = request->buffer_capacity + 1;
+        return VCAM_USB_REQUEST_HANDLED;
+    }
+    if (state->mode == 6 && request->kind == VCAM_USB_REQUEST_FEATURE && !request->is_read)
+        return VCAM_USB_REQUEST_HANDLED;
+    return VCAM_USB_REQUEST_PASSTHROUGH;
+}
+void usb_responder_tests() {
+    auto state = std::make_shared<FakeState>();
+    UsbResponderState responder{};
+    vcam::CameraSession session(configuration(), {640,480},
+        std::make_unique<FakeTransport>(state, true), nullptr,
+        usb_responder_fixture, &responder);
+    require(session.start(), "Custom USB responder session failed to start");
+
+    responder.mode = 1;
+    Packet msFeature(16);
+    msFeature.header().type = 1;
+    msFeature.header().descriptor.type = 5;
+    msFeature.header().descriptor.is_read = 1;
+    msFeature.header().descriptor.index = (1 << 8) | 3;
+    msFeature.header().descriptor.value = 4;
+    auto msResponse = round_trip(state, std::move(msFeature));
+    require(msResponse.header().result == 0 && msResponse.header().data_length == 4 &&
+            static_cast<unsigned char>(msResponse.header().data[0]) == 0x28 &&
+            responder.last_kind == VCAM_USB_REQUEST_MS_FEATURE_DESCRIPTOR &&
+            responder.last_speed == VCAM_USB_SPEED_SUPER && responder.last_direction == 1 &&
+            responder.last_recipient == 1 && responder.last_interface == 3 &&
+            responder.last_page == 0 && responder.last_feature_index == 4,
+        "Microsoft OS feature descriptor request was not mapped or completed correctly");
+
+    responder.mode = 6;
+    Packet feature(0);
+    feature.header().type = 6;
+    feature.header().feature.type = 1;
+    feature.header().feature.subtype = 1;
+    feature.header().feature.index = 0;
+    feature.header().feature.value = 48;
+    auto featureResponse = round_trip(state, std::move(feature));
+    require(featureResponse.header().result == 0 && featureResponse.header().data_length == 0 &&
+            responder.last_kind == VCAM_USB_REQUEST_FEATURE && responder.last_feature_type == 1 &&
+            responder.last_feature_subtype == 1 && responder.last_index == 0 && responder.last_value == 48,
+        "SET_FEATURE URB was not mapped to the custom USB responder");
+
+    responder.mode = 2;
+    Packet bulkIn(5);
+    bulkIn.header().type = 3;
+    bulkIn.header().transfer.type = 2;
+    bulkIn.header().transfer.ep_address = 0x83;
+    bulkIn.header().transfer.is_read = 1;
+    bulkIn.header().transfer.reserved0 = 3;
+    auto bulkInResponse = round_trip(state, std::move(bulkIn));
+    require(bulkInResponse.header().result == 0 && bulkInResponse.header().data_length == 5 &&
+            static_cast<unsigned char>(bulkInResponse.header().data[0]) == 0x40 &&
+            static_cast<unsigned char>(bulkInResponse.header().data[4]) == 0x44 &&
+            responder.last_kind == VCAM_USB_REQUEST_BULK_OR_INTERRUPT_TRANSFER &&
+            responder.last_endpoint == 0x83 && responder.last_pipe_type == 3 &&
+            responder.last_transfer_length == 5 && responder.last_buffer_capacity == 5,
+        "Bulk/interrupt IN responder did not return a bounded payload");
+
+    responder.mode = 3;
+    Packet bulkOut(3);
+    bulkOut.header().type = 3;
+    bulkOut.header().transfer.type = 2;
+    bulkOut.header().transfer.ep_address = 0x02;
+    bulkOut.header().transfer.is_read = 0;
+    bulkOut.header().transfer.reserved0 = 2;
+    auto* bulkOutData = reinterpret_cast<unsigned char*>(bulkOut.header().data);
+    bulkOutData[0] = 0xa1;
+    bulkOutData[1] = 0xb2;
+    bulkOutData[2] = 0xc3;
+    auto bulkOutResponse = round_trip(state, std::move(bulkOut));
+    require(bulkOutResponse.header().result == 0 && bulkOutResponse.header().data_length == 0 &&
+            responder.last_output == std::vector<unsigned char>{0xa1,0xb2,0xc3} &&
+            responder.last_endpoint == 0x02 && responder.last_pipe_type == 2 &&
+            responder.last_transfer_length == 3,
+        "Bulk/interrupt OUT responder did not consume the request payload");
+
+    responder.mode = 4;
+    Packet controlIn(8);
+    controlIn.header().type = 3;
+    controlIn.header().transfer.type = 1;
+    controlIn.header().transfer.is_read = 1;
+    controlIn.header().transfer.timeout = 250;
+    controlIn.header().transfer.setup_packet[0] = 0xc0;
+    controlIn.header().transfer.setup_packet[1] = 0x31;
+    controlIn.header().transfer.setup_packet[6] = 3;
+    auto controlResponse = round_trip(state, std::move(controlIn));
+    require(controlResponse.header().result == 0 && controlResponse.header().data_length == 3 &&
+            static_cast<unsigned char>(controlResponse.header().data[2]) == 0x72 &&
+            responder.last_kind == VCAM_USB_REQUEST_CONTROL_TRANSFER &&
+            responder.last_request == 0x31 && responder.last_transfer_length == 3 &&
+            responder.last_buffer_capacity == 3 && responder.last_timeout_ms == 250,
+        "Control IN responder ignored setup wLength or timeout");
+
+    const int callsBeforeInvalidControl = responder.calls;
+    Packet invalidControl(3);
+    invalidControl.header().type = 3;
+    invalidControl.header().transfer.type = 1;
+    invalidControl.header().transfer.is_read = 0;
+    invalidControl.header().transfer.setup_packet[0] = 0x40;
+    invalidControl.header().transfer.setup_packet[6] = 4;
+    auto invalidControlResponse = round_trip(state, std::move(invalidControl));
+    require(invalidControlResponse.header().result != 0 && invalidControlResponse.header().data_length == 0 &&
+            responder.calls == callsBeforeInvalidControl,
+        "Mismatched control OUT setup length reached the USB responder");
+
+    responder.mode = 5;
+    Packet oversizedResponse(4);
+    oversizedResponse.header().type = 1;
+    oversizedResponse.header().descriptor.type = 5;
+    oversizedResponse.header().descriptor.is_read = 1;
+    auto oversizedResult = round_trip(state, std::move(oversizedResponse));
+    require(oversizedResult.header().result != 0 && oversizedResult.header().data_length == 0,
+        "USB responder accepted a response larger than the transaction capacity");
 }
 std::string command(HANDLE pipe, const std::string& text) {
     DWORD count = 0;
@@ -717,10 +930,13 @@ void lifecycle_tests() {
     for (int iteration = 0; iteration < 20; ++iteration) {
         auto state = std::make_shared<FakeState>();
         {
-            vcam::CameraSession session(configuration(), {640,480}, std::make_unique<FakeTransport>(state));
+            vcam::CameraSession session(configuration(), {640,480},
+                std::make_unique<FakeTransport>(state, false, VirtUsbDriverKind::foss_reconstructed));
             require(session.start(), "Camera worker start failed");
             auto status = session.status_snapshot();
-            require(status.running && status.usb_mode == "high-speed", "USB 2.0 camera link status is wrong");
+            require(status.running && status.usb_mode == "high-speed" &&
+                    status.driver_kind == VirtUsbDriverKind::foss_reconstructed,
+                "USB 2.0 link or active driver identity is wrong");
             for (auto size : {vcam::Resolution{1280,720}, {1920,1080}, {640,480}}) {
                 std::string error;
                 require(session.resize(size, error), "Hot resolution failed");
@@ -776,6 +992,25 @@ void lifecycle_tests() {
         const auto stopped_status = session.status_snapshot();
         require(!stopped_status.running && stopped_status.usb_mode == "superspeed",
             "A stopped USB worker did not expose its stopped state alongside the selected link mode");
+        require(session.start() && session.running(),
+            "A worker that exited on a transport error could not be restarted");
+        auto recovered = round_trip(superspeed_state, descriptor());
+        require(descriptor_size(recovered.header()) == vcam::Resolution{640,480},
+            "Restarted USB worker did not resume camera transactions");
+        {
+            std::lock_guard<std::mutex> lock(superspeed_state->mutex);
+            superspeed_state->fail_next_end = true;
+            superspeed_state->requests.push_back(descriptor());
+            superspeed_state->changed.notify_all();
+        }
+        const ULONGLONG reconfigure_failure_deadline = GetTickCount64() + 1000;
+        while (session.running() && GetTickCount64() < reconfigure_failure_deadline) Sleep(1);
+        std::string recovery_error;
+        require(!session.running() && session.resize({1280,720}, recovery_error) && session.running(),
+            "Resolution reconfigure could not recover an unexpectedly stopped worker");
+        auto reconfigured = round_trip(superspeed_state, descriptor());
+        require(descriptor_size(reconfigured.header()) == vcam::Resolution{1280,720},
+            "Reconfigured worker resumed with stale descriptors");
     }
     require(GetTickCount64()-started < 10000, "Worker shutdown did not cancel waits promptly");
     {
@@ -856,6 +1091,21 @@ void cancellation_test() {
     const auto started = GetTickCount64();
     camera.reset();
     require(GetTickCount64()-started < 1000 && state->destroyed, "Blocking frame callback was not cancelled and joined");
+}
+void callback_exception_closes_transaction_test() {
+    auto config = configuration();
+    config.frame_callback = [](frame_t*) -> int {
+        throw std::runtime_error("frame callback fixture failure");
+    };
+    auto state = std::make_shared<FakeState>();
+    vcam::CameraSession session(config, {4,2}, std::make_unique<FakeTransport>(state));
+    require(session.start(), "Throwing-callback camera failed to start");
+    auto response = round_trip(state, make_iso_packet());
+    require(response.header().result < 0 && response.header().data_length == 0,
+        "An exception did not complete the active USB transaction as failed");
+    const ULONGLONG stopDeadline = GetTickCount64() + 1000;
+    while (session.running() && GetTickCount64() < stopDeadline) Sleep(1);
+    require(!session.running(), "A throwing callback did not stop the camera worker after END");
 }
 }
 int main(int argc, char** argv) {
@@ -1017,11 +1267,13 @@ int main(int argc, char** argv) {
         mjpeg_protocol_tests();
         selected_format_tests();
         superspeed_protocol_tests();
+        usb_responder_tests();
         lifecycle_tests();
         cancellation_test();
+        callback_exception_closes_transaction_test();
         GetProcessHandleCount(GetCurrentProcess(), &after);
         require(after <= before+4, "Camera/control lifecycle leaked Windows handles");
-        puts("PASS: USB 2.0/3.0 YUY2/MJPEG descriptors and negotiation, selectable single formats and FPS, ISO frame reassembly, wire types 2/4/5/6, 20000 malformed requests, hot re-enumeration/rollback, and real control pipe.");
+        puts("PASS: USB 2.0/3.0 YUY2/MJPEG descriptors and negotiation, selectable single formats and FPS, ISO frame reassembly, wire types 2/4/5/6, 20000 malformed requests, hot re-enumeration/rollback, callback-exception END closure, and real control pipe.");
         return 0;
     }
     catch (const std::exception& error) { fprintf(stderr, "FAIL: %s\n", error.what()); return 1; }

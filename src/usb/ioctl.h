@@ -110,6 +110,14 @@ typedef struct xusb_ucx_state_t {
     ULONG PendingTransactions;
     ULONG PendingRemovalWorkItems;
     ULONG UserQueueState;
+	ULONG RootHubInvalidRequestCount;
+	ULONG RootHubLastInvalidUrbFunction;
+	ULONG RootHubLastInvalidSetup;
+	ULONG RootHubLastInvalidValueIndex;
+	ULONG RootHubLastInvalidSetupLength;
+	ULONG RootHubLastInvalidTransferLength;
+	ULONG RootHubLastInvalidUsbStatus;
+	ULONG RootHubLastInvalidIsUsb30;
 } xusb_ucx_state_t;
 
 

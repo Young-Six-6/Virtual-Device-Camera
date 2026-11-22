@@ -65,3 +65,4 @@ enum class VirtUsbDriverKind {
 };
 
 VirtUsbDriverKind virt_usb_detect_driver();
+VirtUsbDriverKind virt_usb_get_driver_kind(void* handle);

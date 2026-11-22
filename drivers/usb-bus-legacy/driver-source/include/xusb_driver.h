@@ -71,6 +71,7 @@ typedef struct _XUSB_CHILD_EXTENSION {
     BOOLEAN RemovalPending;
     LONG BusAddress;
     ULONG RootHubPortNumber;
+    USB_DEVICE_SPEED DeviceSpeed;
     BOOLEAN Present;
     BOOLEAN Removed;
     /* PnP and power reasons are combined into TransactionQuiesced; removal is terminal. */

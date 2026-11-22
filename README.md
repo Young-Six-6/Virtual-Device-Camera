@@ -31,6 +31,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -FFmpegS
 - [构建与环境准备](docs/building.md)
 - [运行与输入协议](docs/usage.md)
 - [项目结构与数据流](docs/architecture.md)
+- [USB 请求 responder API](docs/usb-responder.md)
 - [Python 工具](docs/python-tools.md)
 - [本机 Web UI](docs/web-ui.md)
 - [驱动包与来源记录](docs/driver.md)
@@ -38,7 +39,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -FFmpegS
 
 ## 运行前要知道
 
-USB 2.0 下 1280×720 未压缩 YUY2 每帧为 1,843,200 字节；高速等时端点的 24.576 MB/s 理论载荷上限折算约 13.3fps。应用也提供 MJPEG，可降低 USB 2.0 带宽需求。重建版软件 HCD 的 SuperSpeed UVC 路径已经过 Windows PnP 和 DirectShow 实测：HCD `2.0.0.34` 上单路 720p YUY2 达到约 30.5fps，双路约 30.3fps/路；当前 HCD `2.0.0.41` / USB-tree `1.0.0.22` 单路抓取 120 帧约为 30fps，并完成 720p→480p→720p 热分辨率更新。低/全速 HID、WinUSB bulk IN/OUT 事务、Microsoft OS 1.0 描述符和移除清理也通过合成设备实测。Microsoft OS feature URB 的 KMDF 客户端到描述符响应链路已通过；Windows 在到达 HCD 前将请求转成 vendor-control 传输，因此 HCD 的直接 URB 映射尚未单独观察到。以上是软件虚拟总线结果，不是物理 USB 3 控制器或线缆带宽测试。完整 Root Hub/电源行为和其他 URB 家族仍未全部验证，生产用户态摄像头程序也尚未实现 bulk/interrupt 设备类数据处理。测试范围、可替代边界和限制见[驱动文档](docs/driver.md)。
+USB 2.0 下 1280×720 未压缩 YUY2 每帧为 1,843,200 字节；高速等时端点的 24.576 MB/s 理论载荷上限折算约 13.3fps。应用也提供 MJPEG，可降低 USB 2.0 带宽需求。当前测试机运行本机测试签名的 HCD `2.0.0.49` 和 USB-tree `1.0.0.25`；无整机重启完成安装，设备均为 `OK`。Release 摄像头通过 DirectShow 在 1.99 秒内抓取 60 帧 1280×720 YUY2/30fps；有序退出后摄像头 PDO 消失，挂起事务与移除工作项为 0。低/全速 HID、WinUSB bulk IN/OUT 和 Microsoft OS 1.0 描述符合成设备探针此前在 HCD `.48` / tree `.24` 上通过。以上是软件虚拟总线结果，不是物理 USB 3 控制器或线缆带宽测试。所有 Root Hub 电源行为、URB 家族以及自定义 bulk/interrupt 设备的实机验证仍未完成；内置应用仍是 UVC 摄像头，库级 `vcam_create_ex` 提供自定义 responder API。测试范围、可替代边界和限制见[驱动文档](docs/driver.md)。
 
 `config/default_res.txt` 支持 `480`、`720`、`1080` 三种预设。也可在启动时使用 `--resolution WIDTHxHEIGHT`，或通过控制管道在运行中修改输出分辨率。分辨率变更会重建 UVC 描述符并重新枚举设备，摄像头客户端需要重新打开设备。详见[控制管道协议](docs/control-protocol.md)。
 

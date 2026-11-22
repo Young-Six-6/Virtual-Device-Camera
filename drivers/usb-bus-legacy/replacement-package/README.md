@@ -1,16 +1,18 @@
 # Combined role-3 + UCX role-2 replacement package
 
-Current runtime validation (2026-11-21): role-3 tree 1.0.0.22 and HCD 2.0.0.41 are running on the same Windows installation under the local test-signing certificate. Both packages installed and bound in the current boot session without rebooting; the controller, tree, and USB 3 root hub report `OK`, and the hub reports seven ports. DirectShow captured 120 frames of 1280×720 YUY2 at 30fps in 3.95 seconds. The same app process changed resolution 1280×720 → 640×480 → 1280×720; both status queries reported `RUNNING`, and DirectShow captured 30 frames at each size. After app shutdown, no virtual-camera PDO remained and HCD pending transaction/removal-work-item counts were zero.
+Current runtime validation (2026-11-22): role-3 tree 1.0.0.25 and HCD 2.0.0.49 run under the local test-signing certificate. The packages installed and bound without a Windows reboot; controller, tree, and USB 3 root hub report `OK`, UCX initialization statuses are zero, and the hub reports seven ports. DirectShow captured 60 frames of 1280×720 YUY2 at 30fps in 1.99 seconds. After orderly app shutdown, the virtual-camera PDO disappeared, pending transactions and removal work items were zero, and the root hub reported no invalid requests.
 
-The HCD `.40` attempt regressed camera streaming because it treated `USBD_ISO_PACKET_DESCRIPTOR.Length` as the requested capacity for an IN packet. Windows defines this field as the actual length received from the host controller. HCD `.41` now derives each writable packet slice from the next packet offset (or the end of the transfer buffer), caps it by the endpoint service-interval limit, and validates the returned length against those bounds. This behavior matches [Microsoft's isochronous-transfer guidance](https://learn.microsoft.com/windows-hardware/drivers/usbcon/transfer-data-to-isochronous-endpoints). Release build, protocol tests, package validation, and the runtime capture/resolution tests above pass on `.41`.
+Historical ISO fix (`.41`): HCD `.40` regressed camera streaming because it treated `USBD_ISO_PACKET_DESCRIPTOR.Length` as the requested capacity for an IN packet. Windows defines this field as the actual length received from the host controller. HCD `.41` derives writable packet slices from the next packet offset (or transfer-buffer end), caps them by the endpoint service-interval limit, and validates returned lengths. This behavior matches [Microsoft's isochronous-transfer guidance](https://learn.microsoft.com/windows-hardware/drivers/usbcon/transfer-data-to-isochronous-endpoints); the fix remains in the current HCD.
 
-The bulk probe is a single short transaction in each direction, not a throughput or long-duration stress test. The Windows-to-HCD OS feature-descriptor path is verified through vendor control, but the direct `URB_FUNCTION_GET_MS_FEATURE_DESCRIPTOR` representation at the HCD boundary, every root-hub power/link transition, and all URB families remain unverified. The production camera responder also does not implement arbitrary bulk/interrupt device classes. Earlier full-rate camera figures below were measured on HCD `.34` and remain historical.
+On HCD `.48` / tree `.24`, Windows probes completed one 512-byte bulk IN, one 16-byte bulk OUT, low/full-speed HID interrupt-IN polling, and Microsoft OS 1.0 descriptors through vendor control; malformed END cleanup also removed cleanly. These were short functional probes, not stress or throughput tests, and have not been repeated on `.49/.25`. The direct `URB_FUNCTION_GET_MS_FEATURE_DESCRIPTOR` representation at the HCD boundary and every Root Hub power/link transition remain unverified. The default UVC responder does not implement arbitrary bulk/interrupt device classes; `vcam_create_ex` provides an application callback for declared bulk/interrupt endpoints, with unit coverage but no custom-device runtime test. Earlier full-rate camera figures below were measured on HCD `.34` and remain historical.
 
-The earlier `0x144/3` crash was in the test-only KMDF client, which used a stack URB despite registering `USBD_CLIENT_CONTRACT_VERSION_602`. The client now uses `WdfUsbTargetDeviceCreateUrb`; the corrected descriptor probe removed its test node cleanly. The crash event remains the latest BugCheck 1001 in the system log; no newer one occurred during `.41/.22` install and camera capture.
+An earlier `0x144/3` crash was attributed by its minidump stack to the test-only KMDF client, which used a stack URB despite registering `USBD_CLIENT_CONTRACT_VERSION_602`. The client now uses `WdfUsbTargetDeviceCreateUrb`; the corrected descriptor probe removed its test node cleanly. The 2026-11-20 `0x144/3` dump is now analyzed: `!analyze -v` identifies `UcxMsFeatureTestClient.sys` as the bad-URB caller (`+0x1799`), with the synchronous URB send passing through UsbHub3 and UCX Root Hub before the bugcheck. SetupAPI shows HCD `.39` and tree `.20` were loaded then. This evidence points to the test-client path and does not attribute the crash to the production HCD. The dump had no private client symbols, so the exact source line remains unknown. No newer BugCheck 1001 is recorded as of 2026-11-22; see [driver crash notes](../../../docs/driver.md).
+
+Historical `.44/.23` candidate: the build-only HCD added Root Hub reset/link bookkeeping, stricter request checks, reset notification cancellation handling, endpoint cancellation, and downstream-hub rejection. Those changes continued into later versions; current `.49/.25` camera enumeration, capture and teardown evidence is recorded above. This does not establish every Root Hub power state or unrelated USB class as supported.
 
 Historical camera performance validation (2026-11-19): role-3 tree 1.0.0.18 and HCD 2.0.0.34 were installed and bound in the same Windows boot session using the local test-signing certificate. The virtual controller, its USB 3 root hub, and camera nodes reported OK. FFmpeg/DirectShow captured 120 frames of 1280×720 YUY2 from one stream in 3.93 seconds (about 30.5fps). Two concurrent streams each delivered 120 frames in 3.96 seconds (about 30.3fps per stream) with the test client's receive buffer sized to avoid startup drops. After the app stopped, both camera nodes disappeared and HCD pending transactions/removal work items returned to zero. No Windows restart was needed.
 
-Read-only PnP/SCM snapshot from 2026-11-19: tree 1.0.0.18 and HCD 2.0.0.34 were in `OK` state, with both services running. After the capture run, no camera function node or stream remained; pending transactions and removal work items were zero. The later `.20/.39` probe results are recorded in the 2026-11-20 historical notes; current `.22/.41` status is at the top.
+Read-only PnP/SCM snapshot from 2026-11-19: tree 1.0.0.18 and HCD 2.0.0.34 were in `OK` state, with both services running. After the capture run, no camera function node or stream remained; pending transactions and removal work items were zero. Later `.20/.39` probe results are recorded in the 2026-11-20 historical notes; current `.25/.49` status is at the top.
 
 Tree 1.0.0.14 and 1.0.0.15 were assigned new versions after earlier image collisions. Tree 1.0.0.16 was then required because its rebuilt image differed from the image already loaded under the `.15` service name; advancing `DriverVer` let the deployment guard install it without reusing that resident image name.
 
@@ -80,12 +82,13 @@ prove the active kernel Code Integrity or boot policy will accept a test certifi
 
 ## Install
 
-Close `virtual-device-camera` before installation. Its unchanged
-`virt_dev.cpp::open_driver()` implementation picks the first openable
-`GUID_XUSB_VIRT_INTERFACE`; leaving an old USB-only enumerator or Root Hub node
-present could make it attach to the legacy device instead of the UCX HCD. The
-script checks the process is closed, removes those known old provider device
-nodes (it does not delete their DriverStore packages), and fails if one remains.
+Close `virtual-device-camera` before installation. `virt_dev.cpp::open_driver()`
+prefers the exact reconstructed UCX HCD instance, then a FOSS provider, and only
+falls back to another openable `GUID_XUSB_VIRT_INTERFACE` when neither is found.
+The deployment script still removes known old USB-only and Root Hub provider
+nodes before binding the replacement, then fails if one remains. This avoids a
+legacy fallback being selected when the candidate HCD is absent or unavailable;
+the old packages stay staged in DriverStore.
 
 Open an elevated PowerShell window. The deployment script requires the x64
 DevCon utility from the WDK tools to create the root-enumerated role-3 node.

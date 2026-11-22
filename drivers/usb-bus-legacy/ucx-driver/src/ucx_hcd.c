@@ -25,6 +25,7 @@ static xusb_ucx_state_t gUcxState;
 #define VHCD_MAX_PORTS 16
 #define VHCD_MAX_USB30_PORTS 7
 #define VHCD_MAX_SLOTS (VHCD_MAX_PORTS + VHCD_MAX_USB30_PORTS)
+#define VHCD_MAX_NONDEFAULT_ENDPOINTS 30u
 #define VHCD_USB30_FIRST_SLOT_INDEX VHCD_MAX_PORTS
 #define VHCD_USB30_FIRST_PORT_NUMBER (VHCD_MAX_PORTS + 1)
 #define VHCD_USB30_PORT_BITMAP_BYTES ((VHCD_MAX_USB30_PORTS + 1 + 7) / 8)
@@ -59,6 +60,16 @@ typedef struct _VHCD_SLOT {
     BOOLEAN SuspendChanged;
     BOOLEAN ConnectionChanged;
     BOOLEAN ResetChanged;
+    BOOLEAN ResetInProgress;
+    BOOLEAN BHResetChanged;
+    BOOLEAN LinkStateChanged;
+    BOOLEAN ConfigErrorChanged;
+    BOOLEAN ForceLinkPmAccept;
+    BOOLEAN ComplianceModeOnNextAttach;
+    UCHAR LinkState;
+    UCHAR U1TimeoutValue;
+    UCHAR U2TimeoutValue;
+    UCHAR RemoteWakeMask;
     BOOLEAN RemoveRequested;
     LONG UsbDeviceRefs;
     LONG TransferRefs;
@@ -71,6 +82,14 @@ typedef struct _VHCD_SLOT {
     PKSEMAPHORE Semaphore;
     PKEVENT RemoveEvent;
 } VHCD_SLOT, *PVHCD_SLOT;
+
+typedef struct _VHCD_CANCELLED_END {
+    BOOLEAN Valid;
+    ULONG SlotIndex;
+    ULONGLONG Generation;
+    ULONGLONG Id;
+    LONG Sequence;
+} VHCD_CANCELLED_END, *PVHCD_CANCELLED_END;
 
 typedef struct _VHCD_FILE_CONTEXT {
     ULONG Signature;
@@ -149,6 +168,12 @@ typedef struct _VHCD_TRANSACTION {
     BOOLEAN Isochronous;
     BOOLEAN IsRead;
     BOOLEAN Ending;
+    BOOLEAN IsResetNotification;
+    BOOLEAN IsPortReset;
+    BOOLEAN IsWarmReset;
+    BOOLEAN CancellationRecorded;
+    BOOLEAN EndAcknowledged;
+    LONG ResetType;
     UCHAR EndpointAddress;
     volatile LONG References;
     volatile LONG OwnerFinished;
@@ -188,6 +213,8 @@ typedef struct _VHCD_WIRE_REQUEST {
 C_ASSERT(sizeof(VHCD_WIRE_REQUEST) == 40);
 
 static VHCD_SLOT gSlots[VHCD_MAX_SLOTS];
+static VHCD_CANCELLED_END gCancelledEnds[VHCD_MAX_CONTROLLER_TRANSACTIONS];
+static ULONG gCancelledEndCursor;
 /* Never reset during PnP stop/start or slot reuse; zero denotes no binding. */
 static ULONGLONG gNextSlotGeneration;
 static BOOLEAN gAddressInUse[128];
@@ -219,10 +246,14 @@ static VOID VhcdFinalizeSlotIfQuiescent(_In_ LONG SlotIndex, _In_ ULONGLONG Gene
 static VOID VhcdNotifySlotRemoval(_In_opt_ PKEVENT RemoveEvent, _In_opt_ PKSEMAPHORE Semaphore);
 static EVT_WDF_OBJECT_CONTEXT_CLEANUP VhcdUsbDeviceCleanup;
 static VOID VhcdCancelSlotTransactions(_In_ LONG SlotIndex, _In_ ULONGLONG Generation,
-                                      _In_ UCHAR EndpointAddress, _In_ BOOLEAN AllEndpoints);
+                                      _In_ UCHAR EndpointAddress, _In_ BOOLEAN AllEndpoints,
+                                      _In_ BOOLEAN PreserveResetNotifications);
+static VOID VhcdCancelEndpointTransfers(_In_ UCXENDPOINT Endpoint);
 static VOID VhcdCancelEndpointTransfers(_In_ UCXENDPOINT Endpoint);
 static NTSTATUS VhcdQueuePortResetNotification(_In_ LONG SlotIndex, _In_ ULONGLONG Generation, _In_ LONG ResetType,
-                                               _In_ BOOLEAN AllowPoweredOffPort);
+                                               _In_ BOOLEAN AllowPoweredOffPort,
+                                               _In_ BOOLEAN ChangesPortState,
+                                               _In_ BOOLEAN IsWarmReset);
 /* UCX URB queue requests normally complete on a separate DPC, even on fast failures. */
 static KDEFERRED_ROUTINE VhcdTransactionCancelDpc;
 static KDEFERRED_ROUTINE VhcdInterruptReadyDpc;
@@ -334,13 +365,18 @@ static BOOLEAN VhcdReleaseSlot(_In_ LONG SlotIndex, _In_ ULONGLONG Generation)
         gSlots[SlotIndex].Enabled = FALSE;
         gSlots[SlotIndex].Suspended = FALSE;
         gSlots[SlotIndex].SuspendChanged = FALSE;
+        gSlots[SlotIndex].ResetInProgress = FALSE;
+        if (SlotIndex >= VHCD_USB30_FIRST_SLOT_INDEX) {
+            gSlots[SlotIndex].LinkState = PORT_LINK_STATE_RX_DETECT;
+            gSlots[SlotIndex].LinkStateChanged = TRUE;
+        }
         gSlots[SlotIndex].ConnectionChanged = TRUE;
         gSlots[SlotIndex].RemoveRequested = TRUE;
     }
     WdfSpinLockRelease(gSlotLock);
     if (!matched) return FALSE;
     if (gRootHub != WDF_NO_HANDLE) UcxRootHubPortChanged(gRootHub);
-    VhcdCancelSlotTransactions(SlotIndex, Generation, 0, TRUE);
+    VhcdCancelSlotTransactions(SlotIndex, Generation, 0, TRUE, FALSE);
     VhcdFinalizeSlotIfQuiescent(SlotIndex, Generation);
     return TRUE;
 }
@@ -709,7 +745,14 @@ NTSTATUS VhcdEvtControllerUsbDeviceAdd(UCXCONTROLLER Controller, PUCXUSBDEVICE_I
     ULONGLONG generation;
     NTSTATUS status;
     ULONG slotIndex;
-    if (DeviceInfo == NULL || DeviceInfo->PortPath.PortPathDepth == 0) return STATUS_NOT_SUPPORTED;
+    if (DeviceInfo == NULL || UsbDeviceInit == NULL || DeviceInfo->Size < sizeof(*DeviceInfo) ||
+        DeviceInfo->PortPath.Size < FIELD_OFFSET(USB_DEVICE_PORT_PATH, PortPath) + sizeof(ULONG))
+        return STATUS_INVALID_PARAMETER;
+    /* This HCD has a flat set of virtual root ports and no virtual downstream
+     * hub topology. Reading only PortPath[0] from a deeper path would alias a
+     * child device onto its root-port parent. */
+    if (DeviceInfo->PortPath.PortPathDepth != 1 || DeviceInfo->PortPath.TTHubDepth != 0)
+        return STATUS_NOT_SUPPORTED;
     portNumber = DeviceInfo->PortPath.PortPath[0];
     if (DeviceInfo->DeviceSpeed == UsbSuperSpeed &&
         portNumber >= VHCD_USB30_FIRST_PORT_NUMBER &&
@@ -766,57 +809,186 @@ static PVOID VhcdRequestArgument1(WDFREQUEST Request)
     return parameters.Parameters.Others.Arg1;
 }
 
+static NTSTATUS VhcdResolveUsbDeviceContext(_In_ UCXUSBDEVICE UsbDevice,
+                                             _Outptr_ PVHCD_USBDEVICE_CONTEXT* DeviceContext)
+{
+    PVHCD_USBDEVICE_CONTEXT context;
+    if (DeviceContext == NULL) return STATUS_INVALID_PARAMETER;
+    *DeviceContext = NULL;
+    if (UsbDevice == WDF_NO_HANDLE) return STATUS_INVALID_PARAMETER;
+    context = VhcdGetUsbDeviceContext(UsbDevice);
+    if (context == NULL || context->SlotIndex >= VHCD_MAX_SLOTS || context->Generation == 0)
+        return STATUS_INVALID_DEVICE_STATE;
+    *DeviceContext = context;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS VhcdValidateDefaultEndpoint(_In_ UCXUSBDEVICE UsbDevice,
+                                            _In_ UCXENDPOINT Endpoint,
+                                            _In_ PVHCD_USBDEVICE_CONTEXT DeviceContext)
+{
+    PVHCD_ENDPOINT_CONTEXT endpointContext;
+    if (Endpoint == WDF_NO_HANDLE || DeviceContext == NULL) return STATUS_INVALID_PARAMETER;
+    endpointContext = VhcdGetEndpointContext(Endpoint);
+    if (endpointContext == NULL || endpointContext->EndpointAddress != 0 ||
+        endpointContext->SlotIndex != DeviceContext->SlotIndex ||
+        endpointContext->Generation != DeviceContext->Generation ||
+        VhcdGetUsbDeviceContext(UsbDevice) != DeviceContext)
+        return STATUS_INVALID_DEVICE_STATE;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS VhcdValidateEndpointList(_In_reads_opt_(Count) UCXENDPOINT* Endpoints,
+                                         _In_ ULONG Count,
+                                         _In_ PVHCD_USBDEVICE_CONTEXT DeviceContext)
+{
+    ULONG index;
+    if (Count > VHCD_MAX_NONDEFAULT_ENDPOINTS || (Count != 0 && Endpoints == NULL))
+        return STATUS_INVALID_PARAMETER;
+    for (index = 0; index < Count; ++index) {
+        PVHCD_ENDPOINT_CONTEXT endpointContext;
+        if (Endpoints[index] == WDF_NO_HANDLE) return STATUS_INVALID_PARAMETER;
+        endpointContext = VhcdGetEndpointContext(Endpoints[index]);
+        if (endpointContext == NULL || endpointContext->EndpointAddress == 0 ||
+            endpointContext->SlotIndex != DeviceContext->SlotIndex ||
+            endpointContext->Generation != DeviceContext->Generation)
+            return STATUS_INVALID_DEVICE_STATE;
+    }
+    return STATUS_SUCCESS;
+}
+
 VOID VhcdEvtUsbDeviceEndpointsConfigure(UCXCONTROLLER C, WDFREQUEST R)
 {
     PENDPOINTS_CONFIGURE request = (PENDPOINTS_CONFIGURE)VhcdRequestArgument1(R);
+    PVHCD_USBDEVICE_CONTEXT deviceContext = NULL;
+    NTSTATUS status;
     UNREFERENCED_PARAMETER(C);
-    if (request == NULL || request->Size < sizeof(*request)) { WdfRequestComplete(R, STATUS_INVALID_PARAMETER); return; }
+    if (request == NULL || request->Size < sizeof(*request)) {
+        WdfRequestComplete(R, STATUS_INVALID_PARAMETER);
+        return;
+    }
+    status = VhcdResolveUsbDeviceContext(request->UsbDevice, &deviceContext);
+    if (!NT_SUCCESS(status)) { WdfRequestComplete(R, status); return; }
+    status = VhcdValidateEndpointList(request->EndpointsToEnable,
+        request->EndpointsToEnableCount, deviceContext);
+    if (NT_SUCCESS(status)) status = VhcdValidateEndpointList(request->EndpointsToDisable,
+        request->EndpointsToDisableCount, deviceContext);
+    if (NT_SUCCESS(status)) status = VhcdValidateEndpointList(request->EndpointsEnabledAndUnchanged,
+        request->EndpointsEnabledAndUnchangedCount, deviceContext);
+    if (!NT_SUCCESS(status)) { WdfRequestComplete(R, status); return; }
+
+    /* This software HCD has no endpoint registers to program. It still owns
+     * user-mode transactions submitted on each UCX endpoint, so deprogramming
+     * an endpoint must cancel those requests before UCX completes the switch. */
+    for (ULONG index = 0; index < request->EndpointsToDisableCount; ++index)
+        VhcdCancelEndpointTransfers(request->EndpointsToDisable[index]);
     RtlZeroMemory(&request->FailureFlags, sizeof(request->FailureFlags));
     WdfRequestComplete(R, STATUS_SUCCESS);
 }
 VOID VhcdEvtUsbDeviceEnable(UCXCONTROLLER C, WDFREQUEST R)
 {
     PUSBDEVICE_ENABLE request = (PUSBDEVICE_ENABLE)VhcdRequestArgument1(R);
+    PVHCD_USBDEVICE_CONTEXT deviceContext = NULL;
+    NTSTATUS status;
     UNREFERENCED_PARAMETER(C);
-    if (request == NULL || request->Size < sizeof(*request)) { WdfRequestComplete(R, STATUS_INVALID_PARAMETER); return; }
+    if (request == NULL || request->Size < sizeof(*request)) {
+        WdfRequestComplete(R, STATUS_INVALID_PARAMETER);
+        return;
+    }
+    status = VhcdResolveUsbDeviceContext(request->UsbDevice, &deviceContext);
+    if (NT_SUCCESS(status))
+        status = VhcdValidateDefaultEndpoint(request->UsbDevice,
+            request->DefaultEndpoint, deviceContext);
+    if (!NT_SUCCESS(status)) { WdfRequestComplete(R, status); return; }
     RtlZeroMemory(&request->FailureFlags, sizeof(request->FailureFlags));
     WdfRequestComplete(R, STATUS_SUCCESS);
 }
-VOID VhcdEvtUsbDeviceDisable(UCXCONTROLLER C, WDFREQUEST R) { UNREFERENCED_PARAMETER(C); WdfRequestComplete(R, STATUS_SUCCESS); }
+VOID VhcdEvtUsbDeviceDisable(UCXCONTROLLER C, WDFREQUEST R)
+{
+    PUSBDEVICE_DISABLE request = (PUSBDEVICE_DISABLE)VhcdRequestArgument1(R);
+    PVHCD_USBDEVICE_CONTEXT deviceContext = NULL;
+    NTSTATUS status;
+    UNREFERENCED_PARAMETER(C);
+    if (request == NULL || request->Size < sizeof(*request)) {
+        WdfRequestComplete(R, STATUS_INVALID_PARAMETER);
+        return;
+    }
+    status = VhcdResolveUsbDeviceContext(request->UsbDevice, &deviceContext);
+    if (NT_SUCCESS(status))
+        status = VhcdValidateDefaultEndpoint(request->UsbDevice,
+            request->DefaultEndpoint, deviceContext);
+    if (NT_SUCCESS(status))
+        VhcdCancelSlotTransactions((LONG)deviceContext->SlotIndex,
+            deviceContext->Generation, 0, TRUE, FALSE);
+    WdfRequestComplete(R, status);
+}
 VOID VhcdEvtUsbDeviceReset(UCXCONTROLLER C, WDFREQUEST R)
 {
     PUSBDEVICE_RESET request = (PUSBDEVICE_RESET)VhcdRequestArgument1(R);
     PVHCD_USBDEVICE_CONTEXT deviceContext;
     NTSTATUS status;
     UNREFERENCED_PARAMETER(C);
-    if (request == NULL || request->Size < sizeof(*request) || request->UsbDevice == WDF_NO_HANDLE) {
+    if (request == NULL || request->Size < sizeof(*request)) {
         WdfRequestComplete(R, STATUS_INVALID_PARAMETER);
         return;
     }
-    deviceContext = VhcdGetUsbDeviceContext(request->UsbDevice);
-    if (deviceContext == NULL || deviceContext->SlotIndex >= VHCD_MAX_SLOTS) {
-        WdfRequestComplete(R, STATUS_INVALID_DEVICE_STATE);
-        return;
-    }
-    status = VhcdQueuePortResetNotification((LONG)deviceContext->SlotIndex, deviceContext->Generation, 1, FALSE);
+    status = VhcdResolveUsbDeviceContext(request->UsbDevice, &deviceContext);
+    if (NT_SUCCESS(status))
+        status = VhcdValidateDefaultEndpoint(request->UsbDevice,
+            request->DefaultEndpoint, deviceContext);
+    if (NT_SUCCESS(status))
+        status = VhcdValidateEndpointList(request->EndpointsToDisable,
+            request->EndpointsToDisableCount, deviceContext);
+    if (!NT_SUCCESS(status)) { WdfRequestComplete(R, status); return; }
+
+    /* A reset invalidates active endpoint transactions. Retain any reset
+     * notification already queued for this port; the shared wire ABI carries
+     * that event to user mode so it can discard partial frame state. */
+    VhcdCancelSlotTransactions((LONG)deviceContext->SlotIndex,
+        deviceContext->Generation, 0, TRUE, TRUE);
+    status = VhcdQueuePortResetNotification(
+        (LONG)deviceContext->SlotIndex, deviceContext->Generation, 1, FALSE, FALSE, FALSE);
     WdfRequestComplete(R, status);
 }
 VOID VhcdEvtUsbDeviceAddress(UCXCONTROLLER C, WDFREQUEST R)
 {
     PUSBDEVICE_ADDRESS request = (PUSBDEVICE_ADDRESS)VhcdRequestArgument1(R);
+    PVHCD_USBDEVICE_CONTEXT deviceContext = NULL;
+    NTSTATUS status;
     UNREFERENCED_PARAMETER(C);
-    if (request == NULL || request->Size < sizeof(*request)) { WdfRequestComplete(R, STATUS_INVALID_PARAMETER); return; }
-    WdfRequestComplete(R, STATUS_SUCCESS);
+    if (request == NULL || request->Size < sizeof(*request)) {
+        WdfRequestComplete(R, STATUS_INVALID_PARAMETER);
+        return;
+    }
+    status = VhcdResolveUsbDeviceContext(request->UsbDevice, &deviceContext);
+    if (NT_SUCCESS(status) && (request->Address > 127 || request->Reserved != 0))
+        status = STATUS_INVALID_PARAMETER;
+    WdfRequestComplete(R, status);
 }
 VOID VhcdEvtUsbDeviceUpdate(UCXCONTROLLER C, WDFREQUEST R)
 {
     PUSBDEVICE_UPDATE request = (PUSBDEVICE_UPDATE)VhcdRequestArgument1(R);
+    PVHCD_USBDEVICE_CONTEXT deviceContext = NULL;
+    NTSTATUS status;
     UNREFERENCED_PARAMETER(C);
-    if (request == NULL || request->Size < sizeof(*request)) { WdfRequestComplete(R, STATUS_INVALID_PARAMETER); return; }
+    if (request == NULL || request->Size < sizeof(*request)) {
+        WdfRequestComplete(R, STATUS_INVALID_PARAMETER);
+        return;
+    }
+    status = VhcdResolveUsbDeviceContext(request->UsbDevice, &deviceContext);
+    if (NT_SUCCESS(status) && request->Flags.UpdateIsHub && request->IsHub)
+        status = STATUS_NOT_SUPPORTED;
+    if (!NT_SUCCESS(status)) { WdfRequestComplete(R, status); return; }
     RtlZeroMemory(&request->FailureFlags, sizeof(request->FailureFlags));
     WdfRequestComplete(R, STATUS_SUCCESS);
 }
-VOID VhcdEvtUsbDeviceHubInfo(UCXCONTROLLER C, WDFREQUEST R) { UNREFERENCED_PARAMETER(C); WdfRequestComplete(R, STATUS_SUCCESS); }
+VOID VhcdEvtUsbDeviceHubInfo(UCXCONTROLLER C, WDFREQUEST R)
+{
+    /* Downstream virtual hubs are not modeled; claiming success with zeroed
+     * hub properties would make UCX treat a nonfunctional hub as supported. */
+    UNREFERENCED_PARAMETER(C);
+    WdfRequestComplete(R, STATUS_NOT_SUPPORTED);
+}
 
 static PURB VhcdRequestUrb(WDFREQUEST Request)
 {
@@ -852,6 +1024,7 @@ static VOID VhcdReadPort(_In_ USHORT Port, _Out_ PUSHORT Status, _Out_ PUSHORT C
         }
         if (gSlots[i].Enabled) *Status |= USB_PORT_STATUS_ENABLE;
         if (gSlots[i].Suspended) *Status |= USB_PORT_STATUS_SUSPEND;
+        if (gSlots[i].ResetInProgress) *Status |= USB_PORT_STATUS_RESET;
     }
     if (gSlots[i].ConnectionChanged) *Change |= 0x0001;
     if (gSlots[i].EnableChanged) *Change |= 0x0002;
@@ -863,6 +1036,7 @@ static VOID VhcdReadPort(_In_ USHORT Port, _Out_ PUSHORT Status, _Out_ PUSHORT C
 static VOID VhcdReadUsb30Port(_In_ USHORT Port, _Out_ PUSHORT Status, _Out_ PUSHORT Change)
 {
     USB_30_PORT_STATUS portStatus;
+    USB_30_PORT_CHANGE portChange;
     LONG slotIndex = VhcdUsb30SlotFromPort(Port);
 
     *Status = 0;
@@ -870,23 +1044,54 @@ static VOID VhcdReadUsb30Port(_In_ USHORT Port, _Out_ PUSHORT Status, _Out_ PUSH
     if (slotIndex < 0) return;
 
     RtlZeroMemory(&portStatus, sizeof(portStatus));
+    RtlZeroMemory(&portChange, sizeof(portChange));
     WdfSpinLockAcquire(gSlotLock);
     {
         PVHCD_SLOT slot = &gSlots[slotIndex];
-        if (slot->ConnectionChanged) *Change |= 0x0001;
-        if (slot->ResetChanged) *Change |= 0x0020; /* BH port reset change. */
+        portChange.ConnectStatusChange = slot->ConnectionChanged;
+        portChange.ResetChange = slot->ResetChanged;
+        portChange.BHResetChange = slot->BHResetChanged;
+        portChange.PortLinkStateChange = slot->LinkStateChanged;
+        portChange.PortConfigErrorChange = slot->ConfigErrorChanged;
     }
     if (!gUsb30PortPowerOff[slotIndex - VHCD_USB30_FIRST_SLOT_INDEX]) {
         PVHCD_SLOT slot = &gSlots[slotIndex];
         portStatus.PortPower = 1;
-        portStatus.PortLinkState = slot->Present ? PORT_LINK_STATE_U0 : PORT_LINK_STATE_RX_DETECT;
-        portStatus.CurrentConnectStatus = slot->Present;
+        portStatus.PortLinkState = slot->Present ? slot->LinkState : PORT_LINK_STATE_RX_DETECT;
+        portStatus.CurrentConnectStatus = slot->Present &&
+            slot->LinkState != PORT_LINK_STATE_DISABLED &&
+            slot->LinkState != PORT_LINK_STATE_RX_DETECT;
         portStatus.PortEnabledDisabled = slot->Enabled;
+        portStatus.Reset = slot->ResetInProgress;
         /* USB 3.0 Table 10-10 encodes the 5 Gbit/s SuperSpeed link as zero. */
         portStatus.NegotiatedDeviceSpeed = 0;
-    } else portStatus.PortLinkState = PORT_LINK_STATE_DISABLED;
+    } else {
+        portStatus.PortLinkState = PORT_LINK_STATE_DISABLED;
+    }
     WdfSpinLockRelease(gSlotLock);
     *Status = portStatus.AsUshort16;
+    *Change = portChange.AsUshort16;
+}
+
+static VOID VhcdRecordInvalidRootHubRequest(
+    _In_opt_ PURB Urb,
+    _In_ ULONG Setup,
+    _In_ ULONG ValueIndex,
+    _In_ USHORT SetupLength,
+    _In_ ULONG TransferLength,
+    _In_ ULONG UsbStatus,
+    _In_ BOOLEAN IsUsb30)
+{
+    WdfSpinLockAcquire(gSlotLock);
+    gUcxState.RootHubLastInvalidUrbFunction = Urb != NULL ? Urb->UrbHeader.Function : MAXULONG;
+    gUcxState.RootHubLastInvalidSetup = Setup;
+    gUcxState.RootHubLastInvalidValueIndex = ValueIndex;
+    gUcxState.RootHubLastInvalidSetupLength = SetupLength;
+    gUcxState.RootHubLastInvalidTransferLength = TransferLength;
+    gUcxState.RootHubLastInvalidUsbStatus = UsbStatus;
+    gUcxState.RootHubLastInvalidIsUsb30 = IsUsb30;
+    InterlockedIncrement((volatile LONG*)&gUcxState.RootHubInvalidRequestCount);
+    WdfSpinLockRelease(gSlotLock);
 }
 
 static BOOLEAN VhcdIsUsb30ControlRequest(_In_ PURB Urb)
@@ -910,6 +1115,7 @@ C_ASSERT(FIELD_OFFSET(URB, UrbControlTransfer.TransferBufferLength) == FIELD_OFF
 C_ASSERT(FIELD_OFFSET(URB, UrbControlTransfer.TransferBuffer) == FIELD_OFFSET(URB, UrbControlTransferEx.TransferBuffer));
 C_ASSERT(FIELD_OFFSET(URB, UrbControlTransfer.TransferBufferMDL) == FIELD_OFFSET(URB, UrbControlTransferEx.TransferBufferMDL));
 C_ASSERT(FIELD_OFFSET(URB, UrbControlTransfer.SetupPacket) == FIELD_OFFSET(URB, UrbControlTransferEx.SetupPacket));
+C_ASSERT(sizeof(USB_30_HUB_DESCRIPTOR) == 12);
 
 VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
 {
@@ -917,7 +1123,7 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
     UCHAR* setup;
     PUCHAR data;
     ULONG length;
-    USHORT value, index, statusWord, changeWord;
+    USHORT value, index, rawIndex, statusWord, changeWord, setupLength;
     BOOLEAN isUsb30Control;
     UNREFERENCED_PARAMETER(H);
     InterlockedIncrement((volatile LONG*)&gUcxState.RootHubControlCount);
@@ -926,18 +1132,24 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
         urb->UrbHeader.Function != URB_FUNCTION_CONTROL_TRANSFER_EX)) {
         if (urb != NULL) urb->UrbHeader.Status = USBD_STATUS_INVALID_URB_FUNCTION;
         gUcxState.RootHubLastUsbStatus = (ULONG)USBD_STATUS_INVALID_URB_FUNCTION;
+        VhcdRecordInvalidRootHubRequest(urb, 0, 0, 0, 0,
+            (ULONG)USBD_STATUS_INVALID_URB_FUNCTION, FALSE);
         WdfRequestComplete(R, STATUS_SUCCESS);
         return;
     }
     if (urb->UrbHeader.Length < sizeof(urb->UrbControlTransfer)) {
         urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
         gUcxState.RootHubLastUsbStatus = (ULONG)USBD_STATUS_INVALID_PARAMETER;
+        VhcdRecordInvalidRootHubRequest(urb, 0, 0, 0, 0,
+            (ULONG)USBD_STATUS_INVALID_PARAMETER, FALSE);
         WdfRequestComplete(R, STATUS_SUCCESS);
         return;
     }
     setup = urb->UrbControlTransfer.SetupPacket;
     value = (USHORT)(setup[2] | ((USHORT)setup[3] << 8));
     index = (USHORT)(setup[4] | ((USHORT)setup[5] << 8));
+    setupLength = (USHORT)(setup[6] | ((USHORT)setup[7] << 8));
+    rawIndex = index;
     gUcxState.RootHubLastSetup = setup[0] | ((ULONG)setup[1] << 8);
     gUcxState.RootHubLastValueIndex = value | ((ULONG)index << 16);
     if ((setup[0] & 0x1f) == 3) index &= 0xff;
@@ -955,17 +1167,17 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
     data = VhcdTransferBuffer(length, urb->UrbControlTransfer.TransferBuffer, urb->UrbControlTransfer.TransferBufferMDL);
     urb->UrbHeader.Status = USBD_STATUS_SUCCESS;
 
-    if (setup[1] == USB_REQUEST_GET_DESCRIPTOR && (setup[0] & 0x60) == 0x20 &&
+    if (setup[0] == 0xa0 && setup[1] == USB_REQUEST_GET_DESCRIPTOR &&
         (value >> 8) == USB_20_HUB_DESCRIPTOR_TYPE && (value & 0xff) == 0 && index == 0) {
         UCHAR hub[13] = { 13, USB_20_HUB_DESCRIPTOR_TYPE, VHCD_MAX_PORTS, 0x19, 0x00, 0x01, 0x00,
                           0x00, 0x00, 0x00, 0xfe, 0xff, 0x01 };
         ULONG copyLength;
         /* 16 ports need three bytes per bitmap (hub bit plus 16 port bits). */
-        copyLength = min(length, (ULONG)sizeof(hub));
+        copyLength = min(length, min((ULONG)setupLength, (ULONG)sizeof(hub)));
         if (copyLength != 0 && data == NULL) urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
         else if (copyLength != 0) RtlCopyMemory(data, hub, copyLength);
         urb->UrbControlTransfer.TransferBufferLength = copyLength;
-    } else if (setup[1] == USB_REQUEST_GET_DESCRIPTOR && (setup[0] & 0x60) == 0x20 &&
+    } else if (setup[0] == 0xa0 && setup[1] == USB_REQUEST_GET_DESCRIPTOR &&
         (value >> 8) == USB_30_HUB_DESCRIPTOR_TYPE && (value & 0xff) == 0 && index == 0) {
         USB_30_HUB_DESCRIPTOR hub;
         ULONG copyLength;
@@ -973,51 +1185,110 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
         hub.bLength = sizeof(hub);
         hub.bDescriptorType = USB_30_HUB_DESCRIPTOR_TYPE;
         hub.bNumberOfPorts = VHCD_MAX_USB30_PORTS;
-        hub.wHubCharacteristics = 0x0009;
+        /* Individual port power; no over-current source is modeled. */
+        hub.wHubCharacteristics = 0x0011;
         hub.bPowerOnToPowerGood = 1;
-        copyLength = min(length, (ULONG)sizeof(hub));
+        copyLength = min(length, min((ULONG)setupLength, (ULONG)sizeof(hub)));
         if (copyLength != 0 && data == NULL) urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
         else if (copyLength != 0) RtlCopyMemory(data, &hub, copyLength);
         urb->UrbControlTransfer.TransferBufferLength = copyLength;
-    } else if (setup[1] == USB_REQUEST_GET_STATUS && (setup[0] & 0x60) == 0x20) {
-        if ((setup[0] & 0x1f) == 0) {
+    } else if (setup[1] == USB_REQUEST_GET_STATUS &&
+               (setup[0] == 0xa0 || setup[0] == 0xa3)) {
+        if (setup[0] == 0xa0) {
             ULONG hubStatus = 0;
-            if (length < sizeof(hubStatus) || data == NULL) urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
+            if (value != 0 || rawIndex != 0 || setupLength != sizeof(hubStatus) ||
+                length < sizeof(hubStatus) || data == NULL)
+                urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
             else { RtlCopyMemory(data, &hubStatus, sizeof(hubStatus)); urb->UrbControlTransfer.TransferBufferLength = sizeof(hubStatus); }
-        } else if ((setup[0] & 0x1f) == 3 && VhcdIsUsb30ControlRequest(urb) &&
+        } else if (VhcdIsUsb30ControlRequest(urb) &&
                    VhcdUsb30SlotFromPort(index) >= 0) {
-            VhcdReadUsb30Port(index, &statusWord, &changeWord);
-            if (length < sizeof(ULONG) || data == NULL) urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
-            else { ULONG portStatus = statusWord | ((ULONG)changeWord << 16); RtlCopyMemory(data, &portStatus, sizeof(portStatus)); urb->UrbControlTransfer.TransferBufferLength = sizeof(portStatus); }
-        } else if ((setup[0] & 0x1f) == 3 && index != 0 && index <= VHCD_MAX_PORTS) {
-            VhcdReadPort(index, &statusWord, &changeWord);
-            if (length < sizeof(ULONG) || data == NULL) urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
-            else { ULONG portStatus = statusWord | ((ULONG)changeWord << 16); RtlCopyMemory(data, &portStatus, sizeof(portStatus)); urb->UrbControlTransfer.TransferBufferLength = sizeof(portStatus); }
+            if (value == USB_STATUS_EXT_PORT_STATUS) {
+                ULONG extendedStatus[2] = { 0, 0 };
+                if (rawIndex != index || setupLength != sizeof(extendedStatus) ||
+                    length < sizeof(extendedStatus) || data == NULL) {
+                    urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
+                } else {
+                    VhcdReadUsb30Port(index, &statusWord, &changeWord);
+                    extendedStatus[0] = statusWord | ((ULONG)changeWord << 16);
+                    /* This software root port models baseline 5-Gbit/s USB 3.x.
+                     * It has no SuperSpeedPlus sublink details to report. */
+                    RtlCopyMemory(data, extendedStatus, sizeof(extendedStatus));
+                    urb->UrbControlTransfer.TransferBufferLength = sizeof(extendedStatus);
+                }
+            } else if (value == USB_STATUS_PORT_STATUS && rawIndex == index &&
+                       setupLength == sizeof(ULONG) && length >= sizeof(ULONG) && data != NULL) {
+                ULONG portStatus;
+                VhcdReadUsb30Port(index, &statusWord, &changeWord);
+                portStatus = statusWord | ((ULONG)changeWord << 16);
+                RtlCopyMemory(data, &portStatus, sizeof(portStatus));
+                urb->UrbControlTransfer.TransferBufferLength = sizeof(portStatus);
+            } else {
+                urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
+            }
+        } else if (index != 0 && index <= VHCD_MAX_PORTS) {
+            if (value != 0 || rawIndex != index || setupLength != sizeof(ULONG) ||
+                length < sizeof(ULONG) || data == NULL) {
+                urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
+            } else {
+                ULONG portStatus;
+                VhcdReadPort(index, &statusWord, &changeWord);
+                portStatus = statusWord | ((ULONG)changeWord << 16);
+                RtlCopyMemory(data, &portStatus, sizeof(portStatus));
+                urb->UrbControlTransfer.TransferBufferLength = sizeof(portStatus);
+            }
         } else {
             urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
         }
-    } else if ((setup[1] == USB_REQUEST_SET_FEATURE || setup[1] == USB_REQUEST_CLEAR_FEATURE) && (setup[0] & 0x60) == 0x20 && (setup[0] & 0x1f) == 0) {
+    } else if (setup[1] == USB_REQUEST_GET_PORT_ERR_COUNT && setup[0] == 0xa3 &&
+               VhcdIsUsb30ControlRequest(urb) && VhcdUsb30SlotFromPort(index) >= 0) {
+        if (value != 0 || rawIndex != index || setupLength != sizeof(USHORT) ||
+            length < sizeof(USHORT) || data == NULL) {
+            urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
+        } else {
+            USHORT errorCount = 0;
+            RtlCopyMemory(data, &errorCount, sizeof(errorCount));
+            urb->UrbControlTransfer.TransferBufferLength = sizeof(errorCount);
+        }
+    } else if ((setup[1] == USB_REQUEST_SET_FEATURE || setup[1] == USB_REQUEST_CLEAR_FEATURE) &&
+               setup[0] == 0x20 && index == 0 && rawIndex == 0 &&
+               setupLength == 0 && length == 0 && value <= 1) {
         /* The virtual root hub has no hub-wide power or over-current state. */
         urb->UrbControlTransfer.TransferBufferLength = 0;
-    } else if (setup[1] == USB_REQUEST_SET_HUB_DEPTH && (setup[0] & 0x60) == 0x20 &&
-               (setup[0] & 0x1f) == 0 && index == 0 && value <= 5) {
+    } else if (setup[1] == USB_REQUEST_SET_HUB_DEPTH && setup[0] == 0x20 &&
+               rawIndex == 0 && setupLength == 0 && length == 0 && value == 0) {
         /* The virtual SuperSpeed root hub is at depth zero. */
         urb->UrbControlTransfer.TransferBufferLength = 0;
     } else if ((setup[1] == USB_REQUEST_SET_FEATURE || setup[1] == USB_REQUEST_CLEAR_FEATURE) &&
-               (setup[0] & 0x1f) == 3 && VhcdIsUsb30ControlRequest(urb) &&
+               setup[0] == 0x23 && setupLength == 0 && length == 0 &&
+               VhcdIsUsb30ControlRequest(urb) &&
                VhcdUsb30SlotFromPort(index) >= 0) {
         LONG slot = VhcdUsb30SlotFromPort(index);
         ULONG portIndex = (ULONG)(slot - VHCD_USB30_FIRST_SLOT_INDEX);
         BOOLEAN supported = TRUE;
         BOOLEAN changed = FALSE;
         BOOLEAN resetRequested = FALSE;
+        BOOLEAN cancelPortTransactions = FALSE;
+        BOOLEAN reattachRequested = FALSE;
         ULONGLONG generation;
         WdfSpinLockAcquire(gSlotLock);
         generation = gSlots[slot].Generation;
         if (value == 8 && setup[1] == USB_REQUEST_CLEAR_FEATURE) {
-            if (!gUsb30PortPowerOff[portIndex]) {
+            if (rawIndex != index) {
+                supported = FALSE;
+            } else if (!gUsb30PortPowerOff[portIndex]) {
                 gUsb30PortPowerOff[portIndex] = TRUE;
+                if (gSlots[slot].LinkState != PORT_LINK_STATE_DISABLED)
+                    gSlots[slot].LinkStateChanged = TRUE;
+                gSlots[slot].LinkState = PORT_LINK_STATE_DISABLED;
                 gSlots[slot].Enabled = FALSE;
+                gSlots[slot].Suspended = FALSE;
+                gSlots[slot].ResetInProgress = FALSE;
+                gSlots[slot].U1TimeoutValue = 0;
+                gSlots[slot].U2TimeoutValue = 0;
+                gSlots[slot].RemoteWakeMask = 0;
+                gSlots[slot].ForceLinkPmAccept = FALSE;
+                cancelPortTransactions = TRUE;
+                changed = TRUE;
                 if (gSlots[slot].Allocated && gSlots[slot].Present) {
                     gSlots[slot].ConnectionChanged = TRUE;
                     changed = TRUE;
@@ -1025,48 +1296,135 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
                 }
             }
         } else if (value == 8 && setup[1] == USB_REQUEST_SET_FEATURE) {
-            if (gUsb30PortPowerOff[portIndex]) {
+            if (rawIndex != index) {
+                supported = FALSE;
+            } else if (gUsb30PortPowerOff[portIndex]) {
                 gUsb30PortPowerOff[portIndex] = FALSE;
+                gSlots[slot].LinkState = PORT_LINK_STATE_U0;
+                gSlots[slot].LinkStateChanged = TRUE;
+                gSlots[slot].U1TimeoutValue = 0;
+                gSlots[slot].U2TimeoutValue = 0;
+                gSlots[slot].RemoteWakeMask = 0;
+                gSlots[slot].ForceLinkPmAccept = FALSE;
+                changed = TRUE;
                 if (gSlots[slot].Allocated && gSlots[slot].Present) {
                     gSlots[slot].ConnectionChanged = TRUE;
                     changed = TRUE;
                 }
             }
+        } else if (value == 5 && setup[1] == USB_REQUEST_SET_FEATURE) {
+            UCHAR requestedLinkState = (UCHAR)(rawIndex >> 8);
+            PVHCD_SLOT port = &gSlots[slot];
+            BOOLEAN currentStateIsU = port->LinkState <= PORT_LINK_STATE_U3;
+            if (requestedLinkState == PORT_LINK_STATE_U3 && !port->Enabled) {
+                /* USB 3.2 §10.16.2.10 requires U3 on a non-enabled port to
+                 * complete as a functional no-op. */
+            } else if (gUsb30PortPowerOff[portIndex] || (requestedLinkState <= PORT_LINK_STATE_U3 &&
+                (!port->Enabled || !currentStateIsU ||
+                 ((requestedLinkState == PORT_LINK_STATE_U1 || requestedLinkState == PORT_LINK_STATE_U2) &&
+                  port->LinkState != PORT_LINK_STATE_U0)))) {
+                supported = FALSE;
+            } else if (requestedLinkState <= PORT_LINK_STATE_U3) {
+                if (port->LinkState != requestedLinkState) {
+                    port->LinkState = requestedLinkState;
+                    port->Suspended = requestedLinkState == PORT_LINK_STATE_U3;
+                    port->LinkStateChanged = TRUE;
+                    changed = TRUE;
+                }
+            } else if (requestedLinkState == PORT_LINK_STATE_DISABLED) {
+                if (port->LinkState != PORT_LINK_STATE_DISABLED || port->Enabled) {
+                    port->LinkState = PORT_LINK_STATE_DISABLED;
+                    port->Enabled = FALSE;
+                    port->Suspended = FALSE;
+                    port->ResetInProgress = FALSE;
+                    port->ConnectionChanged = TRUE;
+                    port->LinkStateChanged = TRUE;
+                    changed = TRUE;
+                }
+            } else if (requestedLinkState == PORT_LINK_STATE_RX_DETECT) {
+                if (port->LinkState != PORT_LINK_STATE_DISABLED || port->Enabled) {
+                    supported = FALSE;
+                } else {
+                    port->LinkState = PORT_LINK_STATE_RX_DETECT;
+                    port->LinkStateChanged = TRUE;
+                    port->ConnectionChanged = TRUE;
+                    reattachRequested = port->Present;
+                    changed = TRUE;
+                }
+            } else if (requestedLinkState == PORT_LINK_STATE_COMPLIANCE_MODE) {
+                /* The software HCD has no PHY compliance transmitter. */
+                supported = FALSE;
+            } else {
+                supported = FALSE;
+            }
         } else if ((value == 4 || value == 28) && setup[1] == USB_REQUEST_SET_FEATURE) {
-            resetRequested = TRUE;
+            if (rawIndex != index) supported = FALSE;
+            else resetRequested = TRUE;
+        } else if ((value == 23 || value == 24 || value == 27) &&
+                   setup[1] == USB_REQUEST_SET_FEATURE) {
+            UCHAR parameter = (UCHAR)(rawIndex >> 8);
+            if (gUsb30PortPowerOff[portIndex] ||
+                (value == 23 && parameter > 0x7f && parameter != 0xff) ||
+                (value == 27 && (parameter & 0xf8) != 0)) {
+                supported = FALSE;
+            } else if (value == 23) {
+                gSlots[slot].U1TimeoutValue = parameter;
+            } else if (value == 24) {
+                gSlots[slot].U2TimeoutValue = parameter;
+            } else {
+                gSlots[slot].RemoteWakeMask = parameter;
+            }
+        } else if (value == 30 && setup[1] == USB_REQUEST_SET_FEATURE) {
+            if (rawIndex != index || gUsb30PortPowerOff[portIndex]) supported = FALSE;
+            else if (gSlots[slot].Enabled) gSlots[slot].ForceLinkPmAccept = TRUE;
         } else if (value == 16 && setup[1] == USB_REQUEST_CLEAR_FEATURE) {
-            gSlots[slot].ConnectionChanged = FALSE;
-        } else if ((value == 20 || value == 29) && setup[1] == USB_REQUEST_CLEAR_FEATURE) {
-            gSlots[slot].ResetChanged = FALSE;
-        } else if (value != 5 && value != 17 &&
-                   value != 23 && value != 24 && value != 25 && value != 26 && value != 27 &&
-                   value != 30) {
+            if (rawIndex != index) supported = FALSE;
+            else gSlots[slot].ConnectionChanged = FALSE;
+        } else if (value == 20 && setup[1] == USB_REQUEST_CLEAR_FEATURE) {
+            if (rawIndex != index) supported = FALSE;
+            else gSlots[slot].ResetChanged = FALSE;
+        } else if (value == 29 && setup[1] == USB_REQUEST_CLEAR_FEATURE) {
+            if (rawIndex != index) supported = FALSE;
+            else gSlots[slot].BHResetChanged = FALSE;
+        } else if (value == 25 && setup[1] == USB_REQUEST_CLEAR_FEATURE) {
+            if (rawIndex != index) supported = FALSE;
+            else gSlots[slot].LinkStateChanged = FALSE;
+        } else if (value == 26 && setup[1] == USB_REQUEST_CLEAR_FEATURE) {
+            if (rawIndex != index) supported = FALSE;
+            else gSlots[slot].ConfigErrorChanged = FALSE;
+        } else if (value == 30 && setup[1] == USB_REQUEST_CLEAR_FEATURE) {
+            if (rawIndex != index) supported = FALSE;
+            else gSlots[slot].ForceLinkPmAccept = FALSE;
+        } else if (value == 17 || value == 18 || value == 19) {
+            supported = FALSE;
+        } else {
             supported = FALSE;
         }
         WdfSpinLockRelease(gSlotLock);
-        if (resetRequested && value != 8) {
-            NTSTATUS resetStatus = VhcdQueuePortResetNotification(slot, generation, 1, FALSE);
-            if (NT_SUCCESS(resetStatus)) {
-                WdfSpinLockAcquire(gSlotLock);
-                if (VhcdSlotMatches(slot, generation) && gSlots[slot].Present && !gUsb30PortPowerOff[portIndex]) {
-                    gSlots[slot].Enabled = TRUE;
-                    gSlots[slot].ResetChanged = TRUE;
-                    changed = TRUE;
-                } else {
-                    resetStatus = STATUS_DEVICE_NOT_CONNECTED;
-                }
-                WdfSpinLockRelease(gSlotLock);
+        if (cancelPortTransactions)
+            VhcdCancelSlotTransactions(slot, generation, 0, TRUE, TRUE);
+        if (reattachRequested) {
+            NTSTATUS reattachStatus = VhcdQueuePortResetNotification(
+                slot, generation, 2, FALSE, FALSE, FALSE);
+            if (!NT_SUCCESS(reattachStatus)) {
+                supported = FALSE;
+                urb->UrbHeader.Status = reattachStatus == STATUS_DEVICE_NOT_CONNECTED
+                    ? USBD_STATUS_DEVICE_GONE
+                    : USBD_STATUS_INSUFFICIENT_RESOURCES;
             }
+        }
+        if (resetRequested && value != 8) {
+            NTSTATUS resetStatus = VhcdQueuePortResetNotification(
+                slot, generation, 1, FALSE, TRUE, value == 28);
             if (!NT_SUCCESS(resetStatus)) {
                 supported = FALSE;
                 urb->UrbHeader.Status = resetStatus == STATUS_DEVICE_NOT_CONNECTED
                     ? USBD_STATUS_DEVICE_GONE
                     : USBD_STATUS_INSUFFICIENT_RESOURCES;
-            }
+            } else changed = TRUE;
         }
         if (resetRequested && value == 8) {
-            VhcdCancelSlotTransactions(slot, generation, 0, TRUE);
-            NTSTATUS resetStatus = VhcdQueuePortResetNotification(slot, generation, 1, TRUE);
+            NTSTATUS resetStatus = VhcdQueuePortResetNotification(slot, generation, 1, TRUE, FALSE, FALSE);
             if (!NT_SUCCESS(resetStatus)) {
                 supported = FALSE;
                 urb->UrbHeader.Status = resetStatus == STATUS_DEVICE_NOT_CONNECTED
@@ -1080,7 +1438,9 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
         urb->UrbControlTransfer.TransferBufferLength = 0;
         if (!supported && urb->UrbHeader.Status == USBD_STATUS_SUCCESS)
             urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
-    } else if ((setup[1] == USB_REQUEST_SET_FEATURE || setup[1] == USB_REQUEST_CLEAR_FEATURE) && (setup[0] & 0x1f) == 3 && index > 0 && index <= VHCD_MAX_PORTS) {
+    } else if ((setup[1] == USB_REQUEST_SET_FEATURE || setup[1] == USB_REQUEST_CLEAR_FEATURE) &&
+               setup[0] == 0x23 && index > 0 && index <= VHCD_MAX_PORTS &&
+               setupLength == 0 && length == 0 && rawIndex == index) {
         LONG i = (LONG)index - 1;
         BOOLEAN changed = FALSE;
         BOOLEAN supported = TRUE;
@@ -1096,6 +1456,7 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
                 gSlots[i].Suspended = FALSE;
                 gSlots[i].SuspendChanged = FALSE;
                 gSlots[i].ResetChanged = FALSE;
+                gSlots[i].ResetInProgress = FALSE;
                 if (gSlots[i].Allocated && gSlots[i].Present) {
                     gSlots[i].ConnectionChanged = TRUE;
                     changed = TRUE;
@@ -1139,26 +1500,13 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
         else supported = FALSE;
         WdfSpinLockRelease(gSlotLock);
         if (resetRequested && value == 4) {
-            NTSTATUS resetStatus = VhcdQueuePortResetNotification(i, generation, 1, FALSE);
-            if (NT_SUCCESS(resetStatus)) {
-                WdfSpinLockAcquire(gSlotLock);
-                if (VhcdSlotMatches(i, generation) && gSlots[i].Present && !gPortPowerOff[i]) {
-                    if (!gSlots[i].Enabled) gSlots[i].EnableChanged = TRUE;
-                    gSlots[i].Enabled = TRUE;
-                    gSlots[i].Suspended = FALSE;
-                    gSlots[i].ResetChanged = TRUE;
-                    changed = TRUE;
-                } else {
-                    resetStatus = STATUS_DEVICE_NOT_CONNECTED;
-                }
-                WdfSpinLockRelease(gSlotLock);
-            }
+            NTSTATUS resetStatus = VhcdQueuePortResetNotification(i, generation, 1, FALSE, TRUE, FALSE);
             if (!NT_SUCCESS(resetStatus)) {
                 supported = FALSE;
                 urb->UrbHeader.Status = resetStatus == STATUS_DEVICE_NOT_CONNECTED
                     ? USBD_STATUS_DEVICE_GONE
                     : USBD_STATUS_INSUFFICIENT_RESOURCES;
-            }
+            } else changed = TRUE;
         }
         if (value == 16 && setup[1] == USB_REQUEST_CLEAR_FEATURE) VhcdFinalizeSlotIfQuiescent(i, generation);
         if (changed && gRootHub != WDF_NO_HANDLE) UcxRootHubPortChanged(gRootHub);
@@ -1167,8 +1515,8 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
             urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
         if (resetRequested && value == 8) {
             NTSTATUS notificationStatus;
-            VhcdCancelSlotTransactions(i, generation, 0, TRUE);
-            notificationStatus = VhcdQueuePortResetNotification(i, generation, 1, TRUE);
+            VhcdCancelSlotTransactions(i, generation, 0, TRUE, TRUE);
+            notificationStatus = VhcdQueuePortResetNotification(i, generation, 1, TRUE, FALSE, FALSE);
             if (!NT_SUCCESS(notificationStatus))
                 urb->UrbHeader.Status = notificationStatus == STATUS_DEVICE_NOT_CONNECTED
                     ? USBD_STATUS_DEVICE_GONE
@@ -1177,7 +1525,15 @@ VOID VhcdEvtRootHubControlUrb(UCXROOTHUB H, WDFREQUEST R)
     } else {
         urb->UrbHeader.Status = USBD_STATUS_INVALID_URB_FUNCTION;
     }
+    if (urb->UrbHeader.Status != USBD_STATUS_SUCCESS)
+        urb->UrbControlTransfer.TransferBufferLength = 0;
     gUcxState.RootHubLastUsbStatus = urb->UrbHeader.Status;
+    if (urb->UrbHeader.Status != USBD_STATUS_SUCCESS) {
+        VhcdRecordInvalidRootHubRequest(urb,
+            setup[0] | ((ULONG)setup[1] << 8),
+            value | ((ULONG)rawIndex << 16),
+            setupLength, length, urb->UrbHeader.Status, isUsb30Control);
+    }
     WdfRequestComplete(R, STATUS_SUCCESS);
 }
 
@@ -1196,6 +1552,14 @@ VOID VhcdEvtRootHubInterruptTx(UCXROOTHUB H, WDFREQUEST R)
         WdfRequestComplete(R, STATUS_SUCCESS);
         return;
     }
+    if (urb->UrbHeader.Length < sizeof(urb->UrbBulkOrInterruptTransfer)) {
+        urb->UrbHeader.Status = USBD_STATUS_INVALID_PARAMETER;
+        gUcxState.RootHubLastUsbStatus = (ULONG)USBD_STATUS_INVALID_PARAMETER;
+        VhcdRecordInvalidRootHubRequest(urb, 0, 0, 0, 0,
+            (ULONG)USBD_STATUS_INVALID_PARAMETER, FALSE);
+        WdfRequestComplete(R, STATUS_SUCCESS);
+        return;
+    }
     length = urb->UrbBulkOrInterruptTransfer.TransferBufferLength;
     data = VhcdTransferBuffer(length, urb->UrbBulkOrInterruptTransfer.TransferBuffer, urb->UrbBulkOrInterruptTransfer.TransferBufferMDL);
     bytes = VHCD_USB20_PORT_BITMAP_BYTES;
@@ -1208,7 +1572,8 @@ VOID VhcdEvtRootHubInterruptTx(UCXROOTHUB H, WDFREQUEST R)
             WdfSpinLockAcquire(gSlotLock);
             for (ssPort = 0; ssPort < VHCD_MAX_USB30_PORTS; ++ssPort) {
                 PVHCD_SLOT slot = &gSlots[VHCD_USB30_FIRST_SLOT_INDEX + ssPort];
-                if (slot->ConnectionChanged || slot->ResetChanged)
+                if (slot->ConnectionChanged || slot->ResetChanged ||
+                    slot->BHResetChanged || slot->LinkStateChanged || slot->ConfigErrorChanged)
                     superSpeedBitmap |= 1u << (ssPort + 1);
             }
             WdfSpinLockRelease(gSlotLock);
@@ -1227,9 +1592,13 @@ VOID VhcdEvtRootHubInterruptTx(UCXROOTHUB H, WDFREQUEST R)
             gSlots[i].ResetChanged || gSlots[i].SuspendChanged)
             bitmap |= 1u << (i + 1);
     }
+    /* UCX has one root-hub object per controller and assigns USB 3 ports the
+     * disjoint global numbers 17..23. Preserve those bits in the three-byte
+     * aggregate bitmap; a one-byte USB 3-local bitmap is handled above. */
     for (ssPort = 0; ssPort < VHCD_MAX_USB30_PORTS; ++ssPort) {
         PVHCD_SLOT slot = &gSlots[VHCD_USB30_FIRST_SLOT_INDEX + ssPort];
-        if (slot->ConnectionChanged || slot->ResetChanged)
+        if (slot->ConnectionChanged || slot->ResetChanged ||
+            slot->BHResetChanged || slot->LinkStateChanged || slot->ConfigErrorChanged)
             bitmap |= 1u << (VHCD_USB30_FIRST_PORT_NUMBER + ssPort);
     }
     WdfSpinLockRelease(gSlotLock);
@@ -1334,13 +1703,73 @@ static VOID VhcdTxRelease(PVHCD_TRANSACTION Transaction)
         ExFreePoolWithTag(Transaction, VHCD_TX_SIGNATURE);
 }
 
+/* Caller holds gSlotLock. Remember the ABI identity because user mode sends
+ * END after processing BEGIN even when the underlying URB was cancelled. */
+static VOID VhcdRememberCancelledEndLocked(_Inout_ PVHCD_TRANSACTION Transaction)
+{
+    PVHCD_CANCELLED_END entry;
+    if (!Transaction->Begun || Transaction->EndAcknowledged || Transaction->CancellationRecorded)
+        return;
+    entry = &gCancelledEnds[gCancelledEndCursor];
+    entry->Valid = TRUE;
+    entry->SlotIndex = (ULONG)Transaction->SlotIndex;
+    entry->Generation = Transaction->Generation;
+    entry->Id = Transaction->Id;
+    entry->Sequence = Transaction->Sequence;
+    gCancelledEndCursor = (gCancelledEndCursor + 1) % RTL_NUMBER_OF(gCancelledEnds);
+    Transaction->CancellationRecorded = TRUE;
+}
+
+/* Caller holds gSlotLock. */
+static BOOLEAN VhcdConsumeCancelledEndLocked(_In_ LONG SlotIndex, _In_ ULONGLONG Generation,
+                                             _In_ ULONGLONG Id, _In_ LONG Sequence)
+{
+    ULONG index;
+    for (index = 0; index < RTL_NUMBER_OF(gCancelledEnds); ++index) {
+        PVHCD_CANCELLED_END entry = &gCancelledEnds[index];
+        if (entry->Valid && entry->SlotIndex == (ULONG)SlotIndex &&
+            entry->Generation == Generation && entry->Id == Id && entry->Sequence == Sequence) {
+            entry->Valid = FALSE;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 static VOID VhcdFinishTransfer(PVHCD_TRANSACTION Transaction, NTSTATUS Status, USBD_STATUS UsbStatus)
 {
     LONG slot = Transaction->SlotIndex;
+    BOOLEAN rootHubChanged = FALSE;
     if (InterlockedExchange(&Transaction->OwnerFinished, 1) != 0) return;
     if (Transaction->Urb != NULL) Transaction->Urb->UrbHeader.Status = UsbStatus;
     if (Transaction->Request != NULL) WdfRequestComplete(Transaction->Request, Status);
     WdfSpinLockAcquire(gSlotLock);
+    if (Status == STATUS_CANCELLED)
+        VhcdRememberCancelledEndLocked(Transaction);
+    if (VhcdSlotMatches(slot, Transaction->Generation) && Transaction->IsPortReset &&
+        gSlots[slot].ResetInProgress) {
+        PVHCD_SLOT port = &gSlots[slot];
+        port->ResetInProgress = FALSE;
+        if (port->Present && !VhcdSlotPowerOff(slot)) {
+            if (NT_SUCCESS(Status)) {
+                if (!port->Enabled && slot < VHCD_MAX_PORTS) port->EnableChanged = TRUE;
+                port->Enabled = TRUE;
+                port->Suspended = FALSE;
+            }
+            if (slot >= VHCD_USB30_FIRST_SLOT_INDEX) {
+                UCHAR linkState = NT_SUCCESS(Status) ? PORT_LINK_STATE_U0 : PORT_LINK_STATE_INACTIVE;
+                if (port->LinkState != linkState) {
+                    port->LinkState = linkState;
+                    port->LinkStateChanged = TRUE;
+                }
+                if (Transaction->IsWarmReset) port->BHResetChanged = TRUE;
+                else port->ResetChanged = TRUE;
+            } else {
+                port->ResetChanged = TRUE;
+            }
+            rootHubChanged = TRUE;
+        }
+    }
     if (VhcdSlotMatches(slot, Transaction->Generation) && gSlots[slot].TransferRefs > 0)
         --gSlots[slot].TransferRefs;
     if (VhcdSlotMatches(slot, Transaction->Generation) && gSlots[slot].TransactionBytes >= Transaction->AllocationBytes)
@@ -1351,6 +1780,8 @@ static VOID VhcdFinishTransfer(PVHCD_TRANSACTION Transaction, NTSTATUS Status, U
     if (gTransactionCount > 0) --gTransactionCount;
     if (gTransactionCount == 0) KeSetEvent(&gTransactionsDrained, IO_NO_INCREMENT, FALSE);
     WdfSpinLockRelease(gSlotLock);
+    if (rootHubChanged && !gStopping && gRootHub != WDF_NO_HANDLE)
+        UcxRootHubPortChanged(gRootHub);
     VhcdFinalizeSlotIfQuiescent(slot, Transaction->Generation);
     VhcdTxRelease(Transaction); /* Release the pending USB request's ownership. */
 }
@@ -1438,8 +1869,25 @@ static ULONGLONG VhcdReserveInterruptDeadline(_Inout_ PVHCD_QUEUE_CONTEXT QueueC
     }
 }
 
+/* Caller holds gSlotLock. */
+static VOID VhcdMarkPortResetStartedLocked(_Inout_ PVHCD_SLOT Port, _In_ LONG SlotIndex)
+{
+    if (Port->Enabled && SlotIndex < VHCD_MAX_PORTS) Port->EnableChanged = TRUE;
+    if (Port->Suspended && SlotIndex < VHCD_MAX_PORTS) Port->SuspendChanged = TRUE;
+    Port->Enabled = FALSE;
+    Port->Suspended = FALSE;
+    Port->ResetInProgress = TRUE;
+    if (SlotIndex >= VHCD_USB30_FIRST_SLOT_INDEX) {
+        if (Port->LinkState != PORT_LINK_STATE_HOT_RESET)
+            Port->LinkStateChanged = TRUE;
+        Port->LinkState = PORT_LINK_STATE_HOT_RESET;
+    }
+}
+
 static NTSTATUS VhcdQueuePortResetNotification(_In_ LONG SlotIndex, _In_ ULONGLONG Generation, _In_ LONG ResetType,
-                                               _In_ BOOLEAN AllowPoweredOffPort)
+                                               _In_ BOOLEAN AllowPoweredOffPort,
+                                               _In_ BOOLEAN ChangesPortState,
+                                               _In_ BOOLEAN IsWarmReset)
 {
     PVHCD_TRANSACTION transaction;
     PKSEMAPHORE semaphore;
@@ -1458,6 +1906,10 @@ static NTSTATUS VhcdQueuePortResetNotification(_In_ LONG SlotIndex, _In_ ULONGLO
     transaction->PayloadCapacity = 0;
     transaction->Ready = TRUE;
     transaction->References = 1; /* Owned until END or port teardown. */
+    transaction->IsResetNotification = TRUE;
+    transaction->IsPortReset = ChangesPortState;
+    transaction->IsWarmReset = IsWarmReset;
+    transaction->ResetType = ResetType;
     outer = (ioctl_usbtx_header_t*)transaction->Buffer;
     inner = (PVHCD_WIRE_REQUEST)((PUCHAR)transaction->Buffer + FIELD_OFFSET(ioctl_usbtx_header_t, type));
     outer->data_length = 0;
@@ -1474,6 +1926,27 @@ static NTSTATUS VhcdQueuePortResetNotification(_In_ LONG SlotIndex, _In_ ULONGLO
         ExFreePoolWithTag(transaction, VHCD_TX_SIGNATURE);
         return STATUS_DEVICE_NOT_CONNECTED;
     }
+    for (PLIST_ENTRY entry = gSlots[SlotIndex].Transactions.Flink;
+         entry != &gSlots[SlotIndex].Transactions; entry = entry->Flink) {
+        PVHCD_TRANSACTION existing = CONTAINING_RECORD(entry, VHCD_TRANSACTION, Link);
+        if (existing->IsResetNotification && !existing->Ending && existing->ResetType == ResetType) {
+            if (ChangesPortState) {
+                if (!gSlots[SlotIndex].ResetInProgress)
+                    VhcdMarkPortResetStartedLocked(&gSlots[SlotIndex], SlotIndex);
+                existing->IsPortReset = TRUE;
+                existing->IsWarmReset = IsWarmReset;
+            }
+            WdfSpinLockRelease(gSlotLock);
+            ExFreePoolWithTag(transaction, VHCD_TX_SIGNATURE);
+            return STATUS_SUCCESS;
+        }
+    }
+    if (ChangesPortState && gSlots[SlotIndex].ResetInProgress) {
+        /* Make repeated SET_FEATURE(PORT_RESET) requests idempotent. */
+        WdfSpinLockRelease(gSlotLock);
+        ExFreePoolWithTag(transaction, VHCD_TX_SIGNATURE);
+        return STATUS_SUCCESS;
+    }
     if (gSlots[SlotIndex].TransactionCount >= VHCD_MAX_SLOT_TRANSACTIONS ||
         gSlots[SlotIndex].TransactionBytes > VHCD_MAX_SLOT_TRANSACTION_BYTES ||
         allocationBytes > VHCD_MAX_SLOT_TRANSACTION_BYTES - gSlots[SlotIndex].TransactionBytes ||
@@ -1483,6 +1956,9 @@ static NTSTATUS VhcdQueuePortResetNotification(_In_ LONG SlotIndex, _In_ ULONGLO
         WdfSpinLockRelease(gSlotLock);
         ExFreePoolWithTag(transaction, VHCD_TX_SIGNATURE);
         return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    if (ChangesPortState) {
+        VhcdMarkPortResetStartedLocked(&gSlots[SlotIndex], SlotIndex);
     }
     transaction->Id = ++gSlots[SlotIndex].NextTransactionId;
     transaction->Sequence = ++gSlots[SlotIndex].NextSequence;
@@ -1510,6 +1986,8 @@ VOID VhcdEvtTransferCanceled(WDFREQUEST Request)
     PVHCD_TRANSACTION transaction = (PVHCD_TRANSACTION)context->Transaction;
     if (transaction == NULL) return;
     WdfSpinLockAcquire(gSlotLock);
+    if (!transaction->EndAcknowledged)
+        VhcdRememberCancelledEndLocked(transaction);
     if (transaction->Linked) {
         RemoveEntryList(&transaction->Link);
         transaction->Linked = FALSE;
@@ -1522,7 +2000,8 @@ VOID VhcdEvtTransferCanceled(WDFREQUEST Request)
 }
 
 static VOID VhcdCancelSlotTransactions(_In_ LONG SlotIndex, _In_ ULONGLONG Generation,
-                                      _In_ UCHAR EndpointAddress, _In_ BOOLEAN AllEndpoints)
+                                      _In_ UCHAR EndpointAddress, _In_ BOOLEAN AllEndpoints,
+                                      _In_ BOOLEAN PreserveResetNotifications)
 {
     if (SlotIndex < 0 || SlotIndex >= VHCD_MAX_SLOTS) return;
     for (;;) {
@@ -1532,7 +2011,10 @@ static VOID VhcdCancelSlotTransactions(_In_ LONG SlotIndex, _In_ ULONGLONG Gener
         if (VhcdSlotMatches(SlotIndex, Generation)) {
             for (PLIST_ENTRY entry = gSlots[SlotIndex].Transactions.Flink; entry != &gSlots[SlotIndex].Transactions; entry = entry->Flink) {
                 PVHCD_TRANSACTION candidate = CONTAINING_RECORD(entry, VHCD_TRANSACTION, Link);
-                if (!candidate->Ending && (AllEndpoints || candidate->EndpointAddress == EndpointAddress)) {
+                if (!candidate->Ending &&
+                    !(PreserveResetNotifications && candidate->IsResetNotification) &&
+                    (AllEndpoints || candidate->EndpointAddress == EndpointAddress)) {
+                    VhcdRememberCancelledEndLocked(candidate);
                     candidate->Ending = TRUE;
                     candidate->Linked = FALSE;
                     RemoveEntryList(&candidate->Link);
@@ -1559,7 +2041,8 @@ static VOID VhcdCancelSlotTransactions(_In_ LONG SlotIndex, _In_ ULONGLONG Gener
 static VOID VhcdCancelEndpointTransfers(_In_ UCXENDPOINT Endpoint)
 {
     PVHCD_ENDPOINT_CONTEXT context = VhcdGetEndpointContext(Endpoint);
-    if (context != NULL) VhcdCancelSlotTransactions((LONG)context->SlotIndex, context->Generation, context->EndpointAddress, FALSE);
+    if (context != NULL) VhcdCancelSlotTransactions(
+        (LONG)context->SlotIndex, context->Generation, context->EndpointAddress, FALSE, TRUE);
 }
 
 NTSTATUS VhcdEvtControllerQueryUsbCapability(UCXCONTROLLER Controller, PGUID CapabilityType,
@@ -1704,11 +2187,17 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
     case URB_FUNCTION_CLEAR_FEATURE_TO_ENDPOINT:
     case URB_FUNCTION_CLEAR_FEATURE_TO_OTHER:
         if (Urb->UrbHeader.Length < sizeof(Urb->UrbControlFeatureRequest) || queueContext->PipeType != UsbdPipeTypeControl) return STATUS_INVALID_PARAMETER;
+        if ((function == URB_FUNCTION_SET_FEATURE_TO_DEVICE ||
+            function == URB_FUNCTION_SET_FEATURE_TO_OTHER ||
+            function == URB_FUNCTION_CLEAR_FEATURE_TO_DEVICE ||
+            function == URB_FUNCTION_CLEAR_FEATURE_TO_OTHER) &&
+            Urb->UrbControlFeatureRequest.Index != 0) return STATUS_INVALID_PARAMETER;
         break;
     case URB_FUNCTION_ABORT_PIPE:
     case URB_FUNCTION_SYNC_RESET_PIPE_AND_CLEAR_STALL:
         if (Urb->UrbHeader.Length < sizeof(Urb->UrbPipeRequest) || queueContext->PipeType == UsbdPipeTypeControl) return STATUS_INVALID_PARAMETER;
-        VhcdCancelSlotTransactions(slot, queueContext->Generation, queueContext->EndpointAddress, FALSE);
+        VhcdCancelSlotTransactions(
+            slot, queueContext->Generation, queueContext->EndpointAddress, FALSE, TRUE);
         break;
     case URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER:
         if (Urb->UrbHeader.Length < sizeof(Urb->UrbBulkOrInterruptTransfer) || (queueContext->PipeType != UsbdPipeTypeBulk && queueContext->PipeType != UsbdPipeTypeInterrupt)) return STATUS_INVALID_PARAMETER;
@@ -1746,6 +2235,17 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
         function == URB_FUNCTION_CLASS_ENDPOINT || function == URB_FUNCTION_CLASS_OTHER ||
         function == URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER || function == URB_FUNCTION_ISOCH_TRANSFER)
         isRead = (transferFlags & USBD_TRANSFER_DIRECTION_IN) != 0;
+    if (function == URB_FUNCTION_CONTROL_TRANSFER || function == URB_FUNCTION_CONTROL_TRANSFER_EX) {
+        PUCHAR setup = function == URB_FUNCTION_CONTROL_TRANSFER
+            ? Urb->UrbControlTransfer.SetupPacket : Urb->UrbControlTransferEx.SetupPacket;
+        const BOOLEAN setupIsRead = (setup[0] & 0x80) != 0;
+        const ULONG setupLength = (ULONG)setup[6] | ((ULONG)setup[7] << 8);
+        if (setupIsRead != isRead || (!isRead && transferLength != setupLength))
+            return STATUS_INVALID_PARAMETER;
+        /* wLength bounds the USB data stage even when the caller allocated a
+         * larger IN buffer. Report only the bytes the setup packet requested. */
+        if (isRead && transferLength > setupLength) transferLength = setupLength;
+    }
     if (function == URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER &&
         (((queueContext->EndpointAddress & 0x80) != 0) != (isRead != FALSE)))
         return STATUS_INVALID_PARAMETER;
@@ -1838,6 +2338,9 @@ static NTSTATUS VhcdMapUrb(_In_ WDFQUEUE Queue, _In_ WDFREQUEST Request, _In_ PU
             inner->Data.Transfer.Type = 2;
             inner->Data.Transfer.EpAddress = queueContext->EndpointAddress;
             inner->Data.Transfer.IsRead = isRead ? 1 : 0;
+            /* The frozen ABI reserves this word for non-iso transfers. Carry
+             * the endpoint type so a responder can distinguish bulk/interrupt. */
+            inner->Data.Transfer.Reserved0 = (LONG)queueContext->PipeType;
             break;
         case URB_FUNCTION_GET_DESCRIPTOR_FROM_DEVICE:
         case URB_FUNCTION_SET_DESCRIPTOR_TO_DEVICE:
@@ -2421,6 +2924,7 @@ static VOID VhcdEndTransaction(WDFREQUEST Request, size_t InputLength)
     size_t bufferSize = 0;
     ULONG responseBytes = 0;
     BOOLEAN malformedResponse = FALSE;
+    BOOLEAN cancelledEndAcknowledged = FALSE;
     NTSTATUS status = STATUS_NOT_FOUND;
     LONG slot;
     if (fileContext == NULL || fileContext->Signature != VHCD_FILE_SIGNATURE || fileContext->SlotIndex < 0 || ioContext->InputMemory == NULL || InputLength < sizeof(header)) { WdfRequestComplete(Request, STATUS_INVALID_DEVICE_STATE); return; }
@@ -2434,6 +2938,7 @@ static VOID VhcdEndTransaction(WDFREQUEST Request, size_t InputLength)
             PVHCD_TRANSACTION candidate = CONTAINING_RECORD(entry, VHCD_TRANSACTION, Link);
             if (candidate->Id == header.inter_handle && candidate->Sequence == header.inter_seqno && candidate->Begun && !candidate->Ending) {
                 candidate->Ending = TRUE;
+                candidate->EndAcknowledged = TRUE;
                 VhcdTxAddRef(candidate);
                 RemoveEntryList(&candidate->Link);
                 candidate->Linked = FALSE;
@@ -2447,13 +2952,42 @@ static VOID VhcdEndTransaction(WDFREQUEST Request, size_t InputLength)
                 break;
             }
         }
+        if (transaction == NULL) {
+            cancelledEndAcknowledged = VhcdConsumeCancelledEndLocked(
+                slot, fileContext->Generation, header.inter_handle, header.inter_seqno);
+        }
     }
     WdfSpinLockRelease(gSlotLock);
-    if (transaction == NULL) { WdfRequestComplete(Request, STATUS_NOT_FOUND); return; }
+    if (transaction == NULL) {
+        if (!cancelledEndAcknowledged) {
+            WdfRequestComplete(Request, STATUS_NOT_FOUND);
+            return;
+        }
+        if (bufferSize < InputLength || header.data_length < 0 ||
+            (ULONG)header.data_length > VHCD_MAX_TRANSACTION_BYTES ||
+            (ULONG)header.data_length > InputLength - sizeof(header) ||
+            InputLength != sizeof(header) + (ULONG)header.data_length) {
+            WdfRequestComplete(Request, STATUS_INVALID_PARAMETER);
+            return;
+        }
+        {
+            PVHCD_WIRE_REQUEST copiedInner = (PVHCD_WIRE_REQUEST)(
+                (PUCHAR)&header + FIELD_OFFSET(ioctl_usbtx_header_t, type));
+            if (header.result != copiedInner->Result ||
+                header.data_length != copiedInner->DataLength || copiedInner->DataLength < 0) {
+                WdfRequestComplete(Request, STATUS_INVALID_PARAMETER);
+                return;
+            }
+        }
+        /* The cancelled URB is already completed; acknowledge its END so the
+         * serialized user-mode transport can continue with the next request. */
+        WdfRequestComplete(Request, STATUS_SUCCESS);
+        return;
+    }
     if (status == STATUS_CANCELLED) {
-        /* Cancellation owns the USB request; only finish this userspace END. */
+        /* Cancellation owns the USB request; END still consumes its wire ID. */
         VhcdTxRelease(transaction);
-        WdfRequestComplete(Request, STATUS_CANCELLED);
+        WdfRequestComplete(Request, STATUS_SUCCESS);
         return;
     }
     if (!NT_SUCCESS(status)) {
@@ -2586,6 +3120,7 @@ VOID VhcdEvtIoDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, size_t OutputLen
             gSlots[slot].Enabled = FALSE;
             gSlots[slot].EnableChanged = FALSE;
             gSlots[slot].DeviceSpeed = deviceSpeed;
+            gSlots[slot].LinkState = PORT_LINK_STATE_U0;
             gSlots[slot].ConnectionChanged = TRUE;
             gSlots[slot].BusAddress = suggested;
             gSlots[slot].Semaphore = semaphore;
@@ -2640,9 +3175,11 @@ VOID VhcdEvtIoDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, size_t OutputLen
         const size_t baseSize = FIELD_OFFSET(xusb_ucx_state_t, RootHubGet20PortInfoCount);
         const size_t previousExtendedSize = FIELD_OFFSET(xusb_ucx_state_t, RootHubGet30PortInfoStatus);
         const size_t portInfoSize = FIELD_OFFSET(xusb_ucx_state_t, ReleaseHardwareCount);
+        const size_t lifecycleSize = FIELD_OFFSET(xusb_ucx_state_t, RootHubInvalidRequestCount);
         size_t responseSize = OutputLength >= sizeof(*info) ? sizeof(*info) :
+            (OutputLength >= lifecycleSize ? lifecycleSize :
             (OutputLength >= portInfoSize ? portInfoSize :
-            (OutputLength >= previousExtendedSize ? previousExtendedSize : baseSize));
+            (OutputLength >= previousExtendedSize ? previousExtendedSize : baseSize)));
         status = WdfRequestRetrieveOutputBuffer(Request, responseSize, (PVOID*)&info, NULL);
         if (!NT_SUCCESS(status)) { WdfRequestComplete(Request, status); return; }
         WdfSpinLockAcquire(gSlotLock);
@@ -2651,7 +3188,8 @@ VOID VhcdEvtIoDeviceControl(WDFQUEUE Queue, WDFREQUEST Request, size_t OutputLen
         gUcxState.PendingRemovalWorkItems = (ULONG)gPendingRemovalWorkItems;
         RtlCopyMemory(info, &gUcxState, responseSize);
         WdfSpinLockRelease(gSlotLock);
-        if (responseSize == sizeof(*info)) info->UserQueueState = (ULONG)WdfIoQueueGetState(Queue, NULL, NULL);
+        if (responseSize >= FIELD_OFFSET(xusb_ucx_state_t, UserQueueState) + sizeof(info->UserQueueState))
+            info->UserQueueState = (ULONG)WdfIoQueueGetState(Queue, NULL, NULL);
         info->StructureSize = (ULONG)responseSize;
         info->ControllerHandlePresent = gController != WDF_NO_HANDLE;
         info->RootHubHandlePresent = gRootHub != WDF_NO_HANDLE;
@@ -2724,16 +3262,14 @@ NTSTATUS VhcdEvtDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT DeviceInit)
     gUcxState.ControllerStatus = status;
     if (!NT_SUCCESS(status)) return status;
     gUcxState.StageFlags |= XUSB_UCX_STAGE_CONTROLLER;
-    /* UCX dispatches standard hub/port class requests through their specific
-     * callbacks. Keep every standard entry wired to the common decoder, and
-     * retain the generic callback for other control requests. */
+    /* Use the request-specific callback form for the standard root-hub
+     * controls. Do not set the generic control-URB handler at the same time. */
     UCX_ROOTHUB_CONFIG_INIT(&rootHubConfig,
         VhcdEvtRootHubControlUrb, VhcdEvtRootHubControlUrb,
         VhcdEvtRootHubControlUrb, VhcdEvtRootHubControlUrb,
         VhcdEvtRootHubControlUrb, VhcdEvtRootHubControlUrb,
         VhcdEvtRootHubControlUrb, VhcdEvtRootHubInterruptTx,
         VhcdEvtRootHubGetInfo, VhcdEvtRootHubGet20PortInfo, VhcdEvtRootHubGet30PortInfo);
-    rootHubConfig.EvtRootHubControlUrb = VhcdEvtRootHubControlUrb;
     status = UcxRootHubCreate(gController, &rootHubConfig, WDF_NO_OBJECT_ATTRIBUTES, &gRootHub);
     gUcxState.RootHubStatus = status;
     if (NT_SUCCESS(status)) gUcxState.StageFlags |= XUSB_UCX_STAGE_ROOT_HUB;
@@ -2826,6 +3362,9 @@ NTSTATUS VhcdEvtDeviceReleaseHardware(_In_ WDFDEVICE Device,
         gSlots[slot].SuspendChanged = FALSE;
         gSlots[slot].ConnectionChanged = FALSE;
         gSlots[slot].ResetChanged = FALSE;
+        gSlots[slot].ResetInProgress = FALSE;
+        gSlots[slot].BHResetChanged = FALSE;
+        gSlots[slot].LinkStateChanged = FALSE;
         if (gSlots[slot].Allocated) gSlots[slot].RemoveRequested = TRUE;
         if (slot < VHCD_MAX_PORTS) gPortPowerOff[slot] = FALSE;
     }
@@ -2839,7 +3378,7 @@ NTSTATUS VhcdEvtDeviceReleaseHardware(_In_ WDFDEVICE Device,
         WdfSpinLockAcquire(gSlotLock);
         generation = gSlots[slot].Generation;
         WdfSpinLockRelease(gSlotLock);
-        VhcdCancelSlotTransactions(slot, generation, 0, TRUE);
+        VhcdCancelSlotTransactions(slot, generation, 0, TRUE, FALSE);
     }
     (VOID)KeWaitForSingleObject(&gTransactionsDrained, Executive, KernelMode, FALSE, NULL);
     /* The final transaction can signal the event from its completion DPC. */

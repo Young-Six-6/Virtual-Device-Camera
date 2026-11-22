@@ -716,7 +716,15 @@ void UvcDevice::handle(usbtx_header_t& request, size_t payload_capacity) {
         }
         break;
     }
-    case 6: request.result = request.data_length = 0; break;
+    case 6:
+        /* The SuperSpeed BOS advertises U1/U2 exit latency and no LTM or
+         * remote-wakeup capability. Accept only the corresponding device
+         * link-power feature selectors; unsupported selectors must STALL. */
+        if (super_speed_ && request.feature.subtype == 1 && request.feature.index == 0 &&
+            (request.feature.type == 1 || request.feature.type == 2) &&
+            (request.feature.value == 48 || request.feature.value == 49))
+            request.result = request.data_length = 0;
+        break;
     }
     if (request.result < 0) request.data_length = 0;
 }

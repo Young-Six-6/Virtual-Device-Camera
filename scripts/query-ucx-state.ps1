@@ -56,6 +56,14 @@ public static class UcxStateQuery
         public uint PendingTransactions;
         public uint PendingRemovalWorkItems;
         public uint UserQueueState;
+        public uint RootHubInvalidRequestCount;
+        public uint RootHubLastInvalidUrbFunction;
+        public uint RootHubLastInvalidSetup;
+        public uint RootHubLastInvalidValueIndex;
+        public uint RootHubLastInvalidSetupLength;
+        public uint RootHubLastInvalidTransferLength;
+        public uint RootHubLastInvalidUsbStatus;
+        public uint RootHubLastInvalidIsUsb30;
     }
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -77,7 +85,7 @@ public static class UcxStateQuery
             if (!DeviceIoControl(device, 0x22602c, IntPtr.Zero, 0, out state,
                 (uint)Marshal.SizeOf(typeof(State)), out returned, IntPtr.Zero))
                 throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-            if ((returned != 64 && returned != 104 && returned != 132 && returned != Marshal.SizeOf(typeof(State))) ||
+            if ((returned != 64 && returned != 104 && returned != 132 && returned != 168 && returned != Marshal.SizeOf(typeof(State))) ||
                 state.StructureSize != returned || state.Signature != 0x53554358)
                 throw new InvalidOperationException("UCX state response has an unexpected signature or size.");
             return state;
@@ -164,4 +172,12 @@ $completed = @($stageNames | Where-Object { ($state.StageFlags -band $_.Mask) -n
     PendingTransactions = if ($state.StructureSize -ge 168) { $state.PendingTransactions } else { $null }
     PendingRemovalWorkItems = if ($state.StructureSize -ge 168) { $state.PendingRemovalWorkItems } else { $null }
     UserQueueState = if ($state.StructureSize -ge 168) { '0x{0:X8}' -f $state.UserQueueState } else { $null }
+    RootHubInvalidRequestCount = if ($state.StructureSize -ge 200) { $state.RootHubInvalidRequestCount } else { $null }
+    RootHubLastInvalidUrbFunction = if ($state.StructureSize -ge 200) { '0x{0:X4}' -f $state.RootHubLastInvalidUrbFunction } else { $null }
+    RootHubLastInvalidSetup = if ($state.StructureSize -ge 200) { '0x{0:X4}' -f $state.RootHubLastInvalidSetup } else { $null }
+    RootHubLastInvalidValueIndex = if ($state.StructureSize -ge 200) { '0x{0:X8}' -f $state.RootHubLastInvalidValueIndex } else { $null }
+    RootHubLastInvalidSetupLength = if ($state.StructureSize -ge 200) { $state.RootHubLastInvalidSetupLength } else { $null }
+    RootHubLastInvalidTransferLength = if ($state.StructureSize -ge 200) { $state.RootHubLastInvalidTransferLength } else { $null }
+    RootHubLastInvalidUsbStatus = if ($state.StructureSize -ge 200) { '0x{0:X8}' -f $state.RootHubLastInvalidUsbStatus } else { $null }
+    RootHubLastInvalidIsUsb30 = if ($state.StructureSize -ge 200) { [bool]$state.RootHubLastInvalidIsUsb30 } else { $null }
 } | Format-List

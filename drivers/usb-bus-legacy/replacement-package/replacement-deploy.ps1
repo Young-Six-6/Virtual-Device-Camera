@@ -61,7 +61,7 @@ function Get-TargetDevices {
 function Assert-CameraAppClosed {
     $running = Get-Process -Name 'virtual-device-camera' -ErrorAction SilentlyContinue
     if ($running) {
-        throw 'Close virtual-device-camera before changing the virtual USB device tree. The application selects the first openable GUID_XUSB_VIRT_INTERFACE.'
+        throw 'Close virtual-device-camera before changing the virtual USB device tree. The application prefers the reconstructed UCX HCD interface but can fall back to another openable GUID_XUSB_VIRT_INTERFACE.'
     }
 }
 
@@ -627,7 +627,7 @@ if ($devices.PreviousControlProviders.Count -gt 0) {
     } 'old USB-only/Root Hub GUID_XUSB_VIRT_INTERFACE providers to be removed'
 }
 if ((Get-TargetDevices).PreviousControlProviders.Count -gt 0) {
-    throw 'A previous GUID_XUSB_VIRT_INTERFACE provider became present during installation; the application could select the wrong device.'
+    throw 'A previous GUID_XUSB_VIRT_INTERFACE provider became present during installation; the application could fall back to it if the candidate HCD interface is unavailable.'
 }
 
 Write-Output "role-3 tree device present: $($tree.InstanceId)"

@@ -265,8 +265,6 @@ std::string sha256_base64(const std::string& input) {
         BCryptCloseAlgorithmProvider(algorithm, 0);
         throw;
     }
-    if (hash) BCryptDestroyHash(hash);
-    BCryptCloseAlgorithmProvider(algorithm, 0);
 }
 
 struct HttpHandle {

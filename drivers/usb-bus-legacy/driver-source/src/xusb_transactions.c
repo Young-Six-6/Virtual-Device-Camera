@@ -769,7 +769,7 @@ static NTSTATUS XusbBuildTransaction(
         }
         if (Urb->UrbOSFeatureDescriptorRequest.Recipient > 2 ||
             (Urb->UrbOSFeatureDescriptorRequest.Recipient == 0 &&
-                Urb->UrbOSFeatureDescriptorRequest.InterfaceNumber != 0) ||
+             Urb->UrbOSFeatureDescriptorRequest.InterfaceNumber != 0) ||
             Urb->UrbOSFeatureDescriptorRequest.MS_PageIndex != 0) {
             return STATUS_INVALID_PARAMETER;
         }
@@ -803,6 +803,13 @@ static NTSTATUS XusbBuildTransaction(
     case URB_FUNCTION_CLEAR_FEATURE_TO_ENDPOINT:
     case URB_FUNCTION_CLEAR_FEATURE_TO_OTHER:
         if (Urb->UrbHeader.Length < sizeof(Urb->UrbControlFeatureRequest)) {
+            return STATUS_INVALID_PARAMETER;
+        }
+        if ((function == URB_FUNCTION_SET_FEATURE_TO_DEVICE ||
+            function == URB_FUNCTION_SET_FEATURE_TO_OTHER ||
+            function == URB_FUNCTION_CLEAR_FEATURE_TO_DEVICE ||
+            function == URB_FUNCTION_CLEAR_FEATURE_TO_OTHER) &&
+            Urb->UrbControlFeatureRequest.Index != 0) {
             return STATUS_INVALID_PARAMETER;
         }
         break;
@@ -1121,6 +1128,10 @@ static NTSTATUS XusbBuildTransaction(
                         transaction->IsoPacketCapacity);
                     targetPacket->status = 0;
                 }
+            } else if (function == URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER) {
+                /* Reserved in the frozen wire layout; keep the layout while
+                 * exposing the selected pipe type to capable responders. */
+                request->Transfer.Reserved0 = (LONG)pipe.PipeType;
             }
         }
         if (!transaction->IsRead && length != 0) {
@@ -1578,6 +1589,7 @@ NTSTATUS XusbEndUsbTransaction(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Ir
         ioctl_usbtx_header_t copiedHeader;
         PXUSB_USER_TRANSACTION response;
         ULONG actualLength;
+        ULONG completedLength;
         inputLength = sizeof(header) + dataLength;
         if (inputLength < sizeof(copiedHeader)) {
             status = STATUS_INVALID_PARAMETER;
@@ -1614,6 +1626,12 @@ NTSTATUS XusbEndUsbTransaction(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Ir
             status = STATUS_INVALID_PARAMETER;
             goto CompleteTransaction;
         }
+        /* END carries response bytes only for IN. A successful OUT request
+         * already sent its complete payload in BEGIN, so complete it using the
+         * original transfer length rather than the empty END response length. */
+        completedLength = transaction->IsRead
+            ? actualLength
+            : transaction->TransferLength;
         if (transaction->PortIoControlCode != 0) {
             status = dataLength == 0 && actualLength == 0
                 ? STATUS_SUCCESS
@@ -1779,13 +1797,13 @@ NTSTATUS XusbEndUsbTransaction(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Ir
             if (NT_SUCCESS(status)) {
                 switch (transaction->UrbFunction) {
                 case URB_FUNCTION_CONTROL_TRANSFER:
-                    transaction->Urb->UrbControlTransfer.TransferBufferLength = actualLength;
+                    transaction->Urb->UrbControlTransfer.TransferBufferLength = completedLength;
                     break;
                 case URB_FUNCTION_CONTROL_TRANSFER_EX:
-                    transaction->Urb->UrbControlTransferEx.TransferBufferLength = actualLength;
+                    transaction->Urb->UrbControlTransferEx.TransferBufferLength = completedLength;
                     break;
                 case URB_FUNCTION_BULK_OR_INTERRUPT_TRANSFER:
-                    transaction->Urb->UrbBulkOrInterruptTransfer.TransferBufferLength = actualLength;
+                    transaction->Urb->UrbBulkOrInterruptTransfer.TransferBufferLength = completedLength;
                     break;
                 case URB_FUNCTION_GET_DESCRIPTOR_FROM_DEVICE:
                 case URB_FUNCTION_GET_DESCRIPTOR_FROM_ENDPOINT:
@@ -1793,7 +1811,7 @@ NTSTATUS XusbEndUsbTransaction(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Ir
                 case URB_FUNCTION_SET_DESCRIPTOR_TO_DEVICE:
                 case URB_FUNCTION_SET_DESCRIPTOR_TO_ENDPOINT:
                 case URB_FUNCTION_SET_DESCRIPTOR_TO_INTERFACE:
-                    transaction->Urb->UrbControlDescriptorRequest.TransferBufferLength = actualLength;
+                    transaction->Urb->UrbControlDescriptorRequest.TransferBufferLength = completedLength;
                     break;
                 case URB_FUNCTION_VENDOR_DEVICE:
                 case URB_FUNCTION_VENDOR_INTERFACE:
@@ -1803,7 +1821,7 @@ NTSTATUS XusbEndUsbTransaction(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Ir
                 case URB_FUNCTION_CLASS_INTERFACE:
                 case URB_FUNCTION_CLASS_ENDPOINT:
                 case URB_FUNCTION_CLASS_OTHER:
-                    transaction->Urb->UrbControlVendorClassRequest.TransferBufferLength = actualLength;
+                    transaction->Urb->UrbControlVendorClassRequest.TransferBufferLength = completedLength;
                     break;
                 case URB_FUNCTION_GET_STATUS_FROM_DEVICE:
                 case URB_FUNCTION_GET_STATUS_FROM_INTERFACE:

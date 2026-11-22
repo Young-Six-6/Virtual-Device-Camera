@@ -4,13 +4,23 @@
 
 此项目不是纯用户态虚拟摄像头。`src/usb/virt_dev.cpp` 通过 SetupAPI 查找 `GUID_XUSB_VIRT_INTERFACE`，再向虚拟 USB 总线发送 IOCTL；没有提供该接口的内核驱动时，程序会在启动阶段报 `not found virtual usb path`。
 
-## 当前运行验证（2026-11-21）
+## 当前运行验证（2026-11-22）
 
-测试机当前运行 role-3 USB tree `1.0.0.22` 和 UCX HCD `2.0.0.41`，控制器、tree 与 USB 3 Root Hub 均为 `OK`，根集线器报告 7 个端口。两包以本机测试证书签名，在同一次 Windows 启动周期内安装和绑定成功；无需重启。此前 `.36` 转储中的 `0x3B` 是延迟完成路径缺少请求上下文；`.37` 增加按需分配，`.38` 修正 bulk OUT 完成长度，`.39` 增加 USB 2.0 enable-change 状态并收紧 URB 校验。
+测试机当前运行 role-3 USB tree `1.0.0.25` 和 UCX HCD `2.0.0.49`。本机测试证书签名包通过提权部署脚本安装；USB-tree、控制器、HCD 服务和 USB 3 Root Hub 均为 `OK`，UCX 初始化状态全为 0，根集线器报告 7 个端口且 `RootHubInvalidRequestCount=0`。安装、应用启动、抓流和退出都在同一 Windows 启动周期完成，启动时间未变化；没有要求或自动执行整机重启。
 
-`.41` 上 DirectShow 以 1280×720 YUY2、30fps 抓取 120 帧，用时 3.95 秒；同一应用进程通过控制管道从 1280×720 热切换到 640×480、再切回 1280×720，状态均为 `RUNNING`，两种分辨率各抓取 30 帧成功。退出应用后摄像头 PDO 消失，HCD 的 `PendingTransactions` 与 `PendingRemovalWorkItems` 均为 0。低速与全速 HID 夹具均枚举为 `HIDClass`、持续收到 interrupt-IN 并干净移除；WinUSB 夹具完成一次 512 字节 bulk IN 与 16 字节 bulk OUT，两个用户态事务均收到 END（这些合成设备探针是在 `.39` 上执行）。该 bulk 检查是短事务，不是吞吐或长时间压力测试；现有生产摄像头 responder 也不实现任意 bulk/interrupt 设备类处理。
+Release 摄像头以 1280×720 YUY2/30fps 通过 DirectShow 抓取 60 帧，用时 1.99 秒。设备以 `USB\VID_BB10&PID_CC10` 枚举为 Windows Camera/UVC 节点并报告 `OK`。应用有序退出后摄像头 PDO 消失，HCD 的 `PendingTransactions` 和 `PendingRemovalWorkItems` 均为 0。此次抓流验证当前 `.49/.25` 的摄像头枚举、SuperSpeed ISO 传输与移除回收；它不是物理 USB 3 链路测速。
 
-此前 `0x144/3` 蓝屏的栈归属测试客户端：它注册 `USBD_CLIENT_CONTRACT_VERSION_602` 却使用栈分配 URB。客户端现改用 `WdfUsbTargetDeviceCreateUrb`，修正版探针取得 40 字节和 10 字节的 Microsoft OS 1.0 描述符并干净移除。Windows USB 栈在到达 HCD 前把 feature URB 转成 vendor-control 传输；未观察到 HCD 收到 direct feature URB。该事故不能据此认定生产 HCD 导致蓝屏。当前系统最近一次 BugCheck 1001 仍是该测试客户端事故；`.41/.22` 安装及采集后没有新的 BugCheck，系统启动时间保持不变。
+当前 Release x64 驱动包由 WDK `10.0.28000.0` 构建，InfVerif/Inf2Cat 无 errors/warnings；两个 catalog 由本机测试证书签名，SignTool 验证 catalog 与 SYS 匹配。`scripts/test-all.ps1 -Configurations Release` 全部通过，包含部署脚本模拟、分辨率/OBS、USB 描述符和协议、20,000 条畸形请求、真实控制管道、Web UI/Python 测试，以及 callback 抛异常时先 END 再停止 worker 的回归项。
+
+低/全速 HID、WinUSB 512 字节 bulk IN/16 字节 bulk OUT 与 Microsoft OS 1.0 描述符探针在前一版 `.48/.24` 上运行通过；bulk 是短事务，不是吞吐或长时间压力测试。Windows 将已观察到的 MS feature descriptor URB 转成 vendor-control 后再送至 HCD，HCD 边界上的直接 URB 表示仍未观察到。默认程序只实现 UVC 摄像头；`vcam_create_ex` 可让库使用者为自定义描述符声明的 control、bulk/interrupt 请求注册 responder，但自定义设备类尚无实机测试。所有 Root Hub 电源/链路状态、AbortPipe 与 active-transfer 移除压力、其他 URB 家族和生产签名包仍需额外覆盖。
+
+此前一次 `0x144/3` 蓝屏的栈归属测试客户端：它注册 `USBD_CLIENT_CONTRACT_VERSION_602` 却使用栈分配 URB。客户端现改用 `WdfUsbTargetDeviceCreateUrb`，修正版探针取得 40 字节和 10 字节的 Microsoft OS 1.0 描述符并干净移除。Windows USB 栈在到达 HCD 前把 feature URB 转成 vendor-control 传输；未观察到 HCD 收到 direct feature URB。该事故不能据此认定生产 HCD 导致蓝屏。
+
+2026-11-20 22:40，系统另记录一次 BugCheck `0x144`，参数为 `(3, 0xffffe78eae103010, 0xfffff88e2c8a0310, 0x480f894154244c8b)`，转储路径为 `C:\Windows\Minidump\112026-9812-01.dmp`。按 [Microsoft 对 `BUGCODE_USB3_DRIVER` 参数 1 值 3 的定义](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/bug-check-0x144--bugcode-usb3-driver)，USB 核心检测到客户端提交的 URB 已损坏。该小型转储现已通过提权 WinDbg 完成 `!analyze -v`：转储时间是 22:39:57.200；调用栈从 `UcxMsFeatureTestClient+0x1799` 的 `WdfUsbTargetDeviceSendUrbSynchronously` 进入 USB Hub/UCX，最终由 UCX Root Hub 的 IRP 前处理路径检测到损坏 URB；`MODULE_NAME` 和 `IMAGE_NAME` 均为测试客户端，栈中没有本项目 HCD 的调用帧。结论是这次损坏 URB 来自测试客户端路径，目前证据不支持归因于生产 HCD；因测试客户端没有可用私有符号，无法仅凭转储还原具体源代码行。
+
+SetupAPI 显示事故时加载的 HCD 是 `.39`、role-3 tree 是 `.20`，早于现在运行的 `.49/.25`。22:39:15 移除合成设备、22:39:25 卸载测试包后，22:39:42 又暂存测试客户端包；设备于 22:39:55 再次选择该驱动并启动。首次安装时记录的 `CM_PROB_FAILED_ADD`（`0xC0000079`）及测试包重新暂存是背景线索；真正定位坏 URB 发起方的是转储调用栈。工作区修正版客户端 `.sys` 时间戳为 22:52，晚于本次事故，不能把后续修复二进制当成崩溃时加载版本。原始系统转储受 ACL 保护，但本次已由提权调试器读取；分析日志保存在忽略的本地 `build/` 目录中，不属于发布资料。事故后恢复时系统仍使用 `.41/.22`；截至 2026-11-22，系统没有新的 BugCheck 1001。
+
+HCD `.44` 与 tree `.23` 是已被后续版本取代的候选构建记录。其 Root Hub reset/link 状态、请求长度校验、迟到 END 取消、endpoint 移除取消以及有限次设备重建路径已进入后续 `.48/.49`；其中 `.49/.25` 的当前 UVC 枚举、抓流和移除回收结果见本节顶部。它不代表全部 Root Hub 电源状态或 URB 家族已覆盖。WDM role-3 现在合并已有 `BusRelations`、按速度报告连接信息并提供 USB 2 低/全速 PDO 添加接口；旧 `IOCTL_PDO_ADD` 仍保持高速兼容行为。
 
 `.40` 候选曾错误地把 `USBD_ISO_PACKET_DESCRIPTOR.Length` 当作 IN 请求容量，导致 DirectShow 采集不能完成。该字段由主控制器写入实际收到的长度；`.41` 改为按相邻包偏移计算可写缓冲区，再受端点每服务间隔上限约束，并校验设备端响应长度。该语义符合 [Microsoft 等时传输文档](https://learn.microsoft.com/windows-hardware/drivers/usbcon/transfer-data-to-isochronous-endpoints)。`.41` Release 构建、协议测试和安装包校验通过；实际 720p 采集与热分辨率往返也已通过。完整覆盖边界见[UCX HCD runtime probes](../drivers/usb-bus-legacy/ucx-driver/tests/README.md)。
 
@@ -30,7 +40,7 @@ HCD `2.0.0.34` 还按 USB 端点 `bInterval` 为低/全速中断请求设置最�
 
 2026-11-19 又以 `pnputil /restart-device "ROOT\SYSTEM\0003"` 重启虚拟设备树，未使用 `/reboot`，PnPUtil 报告成功。树驱动 `1.0.0.18`、HCD `2.0.0.34` 与其 `ROOT_HUB30` 均重新达到 `OK`。随后重新启动 Release 用户态程序，DirectShow 再次枚举 `Pipe HD Camera 1`，以 1280×720 YUY2 30fps 抓取 60 帧耗时 1.98 秒（约 30fps）。停止程序后虚拟摄像头 PDO 消失，HCD 挂起事务和移除工作项为 0；两台物理摄像头保持正常。该结果覆盖一次树设备 PnP 重启后的重枚举与抓流，不代表 Windows 睡眠/唤醒或所有 D3/D0 转换均已验证。
 
-此验证证明的是重建软件 HCD 上的虚拟 USB 摄像头完整枚举和抓帧链路，不是物理 USB 3 控制器带宽测量。它也不证明所有原版驱动角色、URB 家族或生产签名包完全可替代。HCD catalog 尚未完成生产签名，不能作为面向公众的正式签名包发布。更多使用命令见[运行说明](usage.md)。
+此验证证明的是重建软件 HCD 上的虚拟 USB 摄像头完整枚举和抓帧链路，不是物理 USB 3 控制器带宽测量。它也不证明所有原版驱动角色、URB 家族或生产签名包完全可替代。候选 `.44` catalog 使用本地测试证书签名，未完成生产签名，不能作为面向公众的正式签名包发布。更多使用命令见[运行说明](usage.md)。
 
 目录 `drivers/usb-bus-legacy/` 保留了上游仓库提供的 x86/x64 包。x64 目录实际包含 `xusb_bus.inf`、`xusb_ctrl.inf`、`xusb_virt.cat` 和 `xusb_virt.sys`；这些文件没有在重构中丢失。它们是旧版二进制包，不是当前构建的一部分。
 
@@ -54,9 +64,9 @@ x64 `xusb_virt.sys` 大小为 51,368 字节；其 Git blob SHA-1 为 `fb62e68217
 - 配置/接口选择会校验当前配置。Pipe 和 interface 句柄带有代际信息，避免 alternate setting 切换后旧句柄误指向新端点。每个父设备最多创建 256 个子 PDO；每个子 PDO 最多允许 256 个事务和 64 MiB 事务预算，父设备总上限为 1024 个事务和 256 MiB。
 - 子 PDO 使用从旧二进制恢复的 `IoCreateDeviceSecure` 默认 SDDL 和 class GUID：SY 完全访问，BA/WD/RC 读写执行；相同 class GUID 保留 Windows 类注册表安全覆盖机制。子 PDO 处理基础 query/set power IRP。父 FDO 已实现 WMI provider 注册和 8 字节数据块回调。
 
-当前已在目标 Windows 上通过虚拟根集线器运行用户态摄像头，Windows UVC 驱动可协商并抓取 YUY2 与 MJPEG 等时流。HCD `2.0.0.41` 保留端点 `bInterval` 周期中断调度、USB 2.0 低/全速 PDO 添加 IOCTL 及按速度校验 EP0/端点参数；相关 ABI 有静态断言并通过 Release 构建。低速和全速 HID 夹具已枚举为 HIDClass，验证 interrupt-IN 与移除清理；合成 WinUSB 夹具也完成了一次短 bulk IN 和 bulk OUT 往返（该组探针在 `.39` 上运行）。夹具发送零填充键盘报告，不代表真实键盘输入或所有 HID 兼容性。低速仅允许控制与中断端点，全速支持控制、bulk、中断与等时端点。尚未覆盖的边界包括生产摄像头用户态程序对 bulk/interrupt 类设备的数据处理、HCD 直接 Microsoft OS feature URB 映射、所有多端口/电源/链路行为、所有 Host Controller URB 家族和生产签名发布。重建版实现 USB bus type 查询，并在 Root Hub FDO 本地响应 Hub name、节点描述符/能力、连接信息、设备描述符转发、DriverKeyName 与 `IOCTL_INTERNAL_USB_GET_HUB_COUNT`；descriptor proxy 等待用户态最多 5 秒后取消。Host Controller 返回 Root Hub PDO/栈顶，子 PDO 根据 present 状态响应 `IOCTL_INTERNAL_USB_GET_PORT_STATUS`。USBDI 查询按原版提供 V0–V3 接口槽和回调返回值；PDO 处理设备文本和 usage notification，明确不支持 Eject，并复用用户态建议的 BusAddress（分配限制在 USB 1–127 地址范围）。子 PDO 的 PnP STOP/START 与 D3/D0 暂停/恢复事务队列并清理停止状态下的 pipe 配置。WMI MOF schema/resource 已嵌入镜像并通过 `mofcomp -WMI` 检查，WMI 消费者是否能发现 class 尚未在目标系统验证。常规 USB 用户态事务仍无单请求超时；完整 Host Controller 兼容性仍需逐项验证。
+当前已在目标 Windows 上通过虚拟根集线器运行用户态摄像头，Windows UVC 驱动可协商并抓取 YUY2 等时流。当前 HCD `2.0.0.49` / tree `1.0.0.25` 的实机验证覆盖摄像头枚举、720p YUY2/30fps 抓取和有序移除；安装与验证无需整机重启。HCD 代码还保留端点 `bInterval` 周期中断调度、USB 2.0 低/全速 PDO 添加 IOCTL 及按速度校验 EP0/端点参数，相关 ABI 有静态断言并通过 Release 构建。低速和全速 HID、WinUSB 短 bulk IN/OUT 与 Microsoft OS 1.0 描述符探针曾在 `.48/.24` 或更早版本通过，尚未在 `.49/.25` 同版本复测。夹具发送零填充键盘报告，不代表真实键盘输入或所有 HID 兼容性。低速仅允许控制与中断端点，全速支持控制、bulk、中断与等时端点。驱动已实现 Microsoft OS feature URB 到既有事务 ABI 的映射；已观察到的 Windows 请求在到达 HCD 前被 USB 栈转换为 vendor-control，因此 direct feature URB 回调尚未实机验证。默认内置 UVC responder 不声明 bulk/interrupt 端点，也没有 Microsoft OS descriptor 服务。新增的 `vcam_create_ex` 提供可选 responder 回调，支持应用为其已声明端点处理请求；该扩展有协议单元测试，但没有自定义设备运行验证。其他未覆盖边界包括所有多端口/电源/链路行为、所有 Host Controller URB 家族和生产签名发布。重建版实现 USB bus type 查询，并在 Root Hub FDO 本地响应 Hub name、节点描述符/能力、连接信息、设备描述符转发、DriverKeyName 与 `IOCTL_INTERNAL_USB_GET_HUB_COUNT`；descriptor proxy 等待用户态最多 5 秒后取消。Host Controller 返回 Root Hub PDO/栈顶，子 PDO 根据 present 状态响应 `IOCTL_INTERNAL_USB_GET_PORT_STATUS`。USBDI 查询按原版提供 V0–V3 接口槽和回调返回值；PDO 处理设备文本和 usage notification，明确不支持 Eject，并复用用户态建议的 BusAddress（分配限制在 USB 1–127 地址范围）。子 PDO 的 PnP STOP/START 与 D3/D0 暂停/恢复事务队列并清理停止状态下的 pipe 配置。WMI MOF schema/resource 已嵌入镜像并通过 `mofcomp -WMI` 检查，WMI 消费者是否能发现 class 尚未在目标系统验证。常规 USB 用户态事务仍无单请求超时；完整 Host Controller 兼容性仍需逐项验证。
 
-当前 Release 驱动源码可构建；部署包通过 InfVerif/Inf2Cat 并生成 catalog。catalog 未完成生产签名，不能作为面向公众的正式签名包发布。新驱动最低要求 Windows 10 2004（build 19041）。构建脚本会自动选择具备 UCX 1.1/KMDF 1.31 的 WDK，也可显式指定版本。`replacement-package/replacement-deploy.ps1` 用于版本化 HCD 部署，`driver-source/deploy.ps1` 用于默认包设备创建/更新/移除；均需管理员权限并会阻止同名镜像冲突，不自动重启。测试机当前以本机测试证书运行 HCD `2.0.0.41` 与 role-3 `1.0.0.22`；Release 摄像头程序已完成单路 720p30 120 帧采集和 720p→480p→720p 热分辨率往返。HCD `.34` 上的单/双路 720p30 和 `.39` 上的 HID、bulk 合成夹具结果是先前版本验证，不能视为 `.41` 上的同版本复测。夹具只发送零填充报告或固定测试 payload。当前用户态程序仍只选择 USB 2.0 高速或 SuperSpeed。HCD 的 bulk/interrupt 桥接已用测试 responder 端到端验证，但生产用户态 handler 尚无对应设备类数据处理实现。重建驱动仍未覆盖原版所有角色、URB 和 Root Hub 行为。角色划分和限制见[重建驱动说明](../drivers/usb-bus-legacy/driver-source/README.md)。上游 `x86/`、`x64/` 二进制保持原样。反编译清单和函数分析保存在本机 `source-reconstruction/` 目录，由 `.gitignore` 排除，不属于项目源码。
+当前 Release 驱动源码可构建；`.49/.25` 部署包通过 InfVerif/Inf2Cat 并生成 catalog，目录由本机测试证书签名并通过匹配验证，但未完成生产签名，不能作为面向公众的正式签名包发布。新驱动最低要求 Windows 10 2004（build 19041）。构建脚本会自动选择具备 UCX 1.1/KMDF 1.31 的 WDK，也可显式指定版本。`replacement-package/replacement-deploy.ps1` 用于版本化 HCD 部署，`driver-source/deploy.ps1` 用于默认包设备创建/更新/移除；均需管理员权限并会阻止同名镜像冲突，不自动重启。测试机当前以本机测试证书运行 HCD `2.0.0.49` 与 role-3 `1.0.0.25`；Release 摄像头程序已完成单路 720p30 60 帧采集。有序退出后摄像头 PDO 消失且 HCD 挂起事务和移除工作项归零。HCD `.34` 上的单/双路 720p30 和 `.48/.24` 上的 HID、bulk 合成夹具结果是先前版本验证，不能视为 `.49/.25` 上的同版本复测。夹具只发送零填充报告或固定测试 payload。当前用户态程序仍只选择 USB 2.0 高速或 SuperSpeed。HCD bulk/interrupt 桥接已有短事务端到端证据；新增 `vcam_create_ex` 允许应用为自定义配置描述符声明的 bulk/interrupt 端点提供 responder；isochronous 仍由 UVC handler 管理。默认应用未注册该 callback。重建驱动仍未覆盖原版所有角色、URB 和 Root Hub 行为。角色划分和限制见[重建驱动说明](../drivers/usb-bus-legacy/driver-source/README.md)与[USB responder API](usb-responder.md)。上游 `x86/`、`x64/` 二进制保持原样。反编译清单和函数分析保存在本机 `source-reconstruction/` 目录，由 `.gitignore` 排除，不属于项目源码。
 
 `replacement-deploy.ps1 -Action Cleanup` 可在不重新安装驱动的情况下清理旧的重建 role-3/UCX 包。它要求当前树设备和控制器处于 `OK`，保留活动及更新的树版本、任何当前 PnP 节点正在使用的 INF，并且只用不带 `/uninstall`、`/force` 的 PnPUtil 删除旧包；删除前会先将包导出到 Git 忽略目录。若 Windows 拒绝删除，脚本保留该包并继续处理；若 PnPUtil 报告需重启，则立即停止，不会自动重启。
 
@@ -71,7 +81,7 @@ INF 的 `CopyFiles` 文件列表使用“目标文件名，源文件名”语法
 | `xusb_ctrl.inf` 的 Root HUB 安装项 | `xusb_roothub.sys` | `xusb_virt.sys` |
 | `xusb_ctrl.inf` 的 Host Controller 安装项 | `xusb_controller.sys` | `xusb_virt.sys` |
 
-本包为这些安装项提供了对应源文件，不能仅因目录中没有上述目标名称就判断包不完整。HCD `2.0.0.7` 重绑后曾重复触发 Code 38（`STATUS_DRIVER_FAILED_PRIOR_UNLOAD`，`0xC000038E`）；清理多个旧 INF 并重启后仍复现。为避免每次代码迭代都重启，打包器按 `DriverVer` 为每个 HCD 版本生成独立服务名和镜像名。HCD `2.0.0.10` 首次使用 `ucx_hcd_2_0_0_10` 与 `VirtualCameraUcxHcd_2_0_0_10.sys`，在同一启动周期替换失败的旧实例并启动成功。相同版本卸载/重绑仍可能遇到 Code 38，因此调试新版本时递增 `DriverVer` 并使用新服务。部署脚本按 INF 读取服务名、镜像和 catalog。2026-11-16 的 HCD `2.0.0.17` 曾枚举 `USB\\ROOT_HUB30` 但子设备报 Code 43；该历史故障已由当前 HCD `2.0.0.41` 运行状态取代，见本文顶部验证记录。该段末尾的 `.34`/`.18` 版本号是 2026-11-19 的旧快照。
+本包为这些安装项提供了对应源文件，不能仅因目录中没有上述目标名称就判断包不完整。HCD `2.0.0.7` 重绑后曾重复触发 Code 38（`STATUS_DRIVER_FAILED_PRIOR_UNLOAD`，`0xC000038E`）；清理多个旧 INF 并重启后仍复现。为避免每次代码迭代都重启，打包器按 `DriverVer` 为每个 HCD 版本生成独立服务名和镜像名。HCD `2.0.0.10` 首次使用 `ucx_hcd_2_0_0_10` 与 `VirtualCameraUcxHcd_2_0_0_10.sys`，在同一启动周期替换失败的旧实例并启动成功。相同版本卸载/重绑仍可能遇到 Code 38，因此调试新版本时递增 `DriverVer` 并使用新服务。部署脚本按 INF 读取服务名、镜像和 catalog。2026-11-16 的 HCD `2.0.0.17` 曾枚举 `USB\\ROOT_HUB30` 但子设备报 Code 43；该历史故障已由当前 HCD `2.0.0.49` 运行状态取代，见本文顶部验证记录。
 
 ## UCX 根集线器启动故障排查（2026-11-16）
 

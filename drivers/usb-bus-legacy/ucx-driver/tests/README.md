@@ -10,21 +10,28 @@ transactions with a test responder. `ms_feature_urb_probe.ps1` separately submit
 descriptors end to end. Each HID/bulk run uses a fresh VID/PID so Windows will not
 reuse a prior negative OS-string-descriptor result from the registry.
 
-Runtime status (2026-11-21): role-3 tree 1.0.0.22 and HCD 2.0.0.41 are installed and
-running without reboot. HCD `.41` fixes an `.40` isochronous capture regression: the
-IN packet descriptor's `Length` is an output field, so writable capacity is derived
-from packet offsets and the endpoint interval maximum. Release camera capture passed
-at 1280×720 YUY2/30fps for 120 frames in 3.95 seconds; hot updates to 640×480 and back
-also passed with 30 captured frames at each size. Camera removal drained pending
-transactions and removal work items to zero. Earlier HCD 2.0.0.36 once bugchecked
+Current runtime status (2026-11-22): role-3 tree 1.0.0.25 and HCD 2.0.0.49 are
+installed and running without reboot. The controller, tree and USB 3 root hub report
+`OK`; UCX initialization and root-hub invalid-request counters are zero. The current
+camera smoke test captured 60 frames at 1280×720 YUY2/30fps in 1.99 seconds. After
+orderly shutdown the camera PDO disappeared and pending transactions and removal work
+items were zero. This is the current UVC runtime result; the HID and bulk probes below
+are historical results from earlier versions.
+
+Historical isochronous fix (`.41`): HCD `.40` caused a capture regression by treating
+the IN packet descriptor's `Length` as input capacity. `.41` instead derives writable
+capacity from packet offsets and the endpoint interval maximum. On `.41/.22`, Release
+camera capture passed at 1280×720 YUY2/30fps for 120 frames in 3.95 seconds; hot
+updates to 640×480 and back also passed with 30 captured frames at each size. Camera
+removal drained pending transactions and removal work items to zero. Earlier HCD 2.0.0.36 once bugchecked
 with `0x3B` in deferred request completion because one UCX request lacked its transfer
 context. HCD 2.0.0.37 added on-demand request-context allocation; 2.0.0.38 corrected
 bulk-OUT completion length; 2.0.0.39 added USB 2.0 enable-change reporting and
 tightened URB validation. The Low and Full HID probes and WinUSB 512-byte bulk IN / 16-byte
 bulk OUT fixture were verified on `.39`.
 
-One `0x144/3` bugcheck occurred while testing the specialized OS feature URB. The
-minidump stack attributes the corrupt URB submission to the test-only
+An earlier `0x144/3` bugcheck occurred while testing the specialized OS feature URB.
+Its minidump stack attributes the corrupt URB submission to the test-only
 `UcxMsFeatureTestClient.sys`, not the production HCD: the fixture used a stack URB
 despite registering `USBD_CLIENT_CONTRACT_VERSION_602`. The client now allocates URBs
 with `WdfUsbTargetDeviceCreateUrb`. A rebuilt and test-signed client then retrieved
@@ -32,6 +39,15 @@ descriptor 4 (40 bytes) and descriptor 5 (10 bytes), both with successful NTSTAT
 USBD status, and removed cleanly. Windows translated each request to one vendor-control
 transfer before it reached the HCD; the direct HCD URB representation was not observed.
 The fixture was removed from PnP and its test package was deleted from DriverStore.
+A separate BugCheck `0x144/3` was logged on 2026-11-20 during a later test-client PnP
+start. The dump is now readable through elevated WinDbg: `!analyze -v` identifies
+`UcxMsFeatureTestClient.sys+0x1799` as the bad-URB caller; the synchronous send flows
+through UsbHub3 and UCX Root Hub before UCX detects the corruption. SetupAPI shows
+HCD `.39` and tree `.20` were loaded then. The evidence points to the test-client path,
+not the production HCD; missing private client symbols prevent mapping the fault to a
+source line. The corrected client uses `WdfUsbTargetDeviceCreateUrb` and completed its
+descriptor probe cleanly. No newer BugCheck 1001 is recorded as of 2026-11-22; see
+[driver crash notes](../../../../docs/driver.md).
 
 Run one speed at a time from PowerShell while `virtual-device-camera.exe` is
 stopped:

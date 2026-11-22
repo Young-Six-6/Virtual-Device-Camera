@@ -23,6 +23,15 @@ if (-not $removeNotify -or
     $removeNotify -notmatch 'if\s*\(RemoveEvent\s*!=\s*NULL\)\s*\{\s*KeSetEvent\(RemoveEvent,\s*IO_NO_INCREMENT,\s*FALSE\);\s*ObDereferenceObject\(RemoveEvent\);') {
     throw 'Failed removal-work-item allocation must still signal and release the client remove event.'
 }
+$interruptTxMatch = [regex]::Match($ucxText,
+    '(?s)VOID\s+VhcdEvtRootHubInterruptTx\s*\([^)]*\)\s*\{(?<body>.*?)\n\}')
+$interruptTxBody = if ($interruptTxMatch.Success) { $interruptTxMatch.Groups['body'].Value } else { '' }
+$interruptLengthCheck = $interruptTxBody.IndexOf('urb->UrbHeader.Length < sizeof(urb->UrbBulkOrInterruptTransfer)')
+$interruptLengthRead = $interruptTxBody.IndexOf('urb->UrbBulkOrInterruptTransfer.TransferBufferLength')
+if (-not $interruptTxMatch.Success -or $interruptLengthCheck -lt 0 -or
+    $interruptLengthRead -lt 0 -or $interruptLengthCheck -gt $interruptLengthRead) {
+    throw 'Root-hub interrupt URBs must validate their structure length before reading transfer fields.'
+}
 $firstPackageStage = $replacementText.IndexOf("Invoke-PnpUtil @('/add-driver', `$ucxInf)", [StringComparison]::Ordinal)
 if ($firstPackageStage -lt 0) { throw 'Replacement package staging call was not found.' }
 $cleanupAfterValidation = $replacementText.IndexOf('Remove-ObsoleteUcxDriverPackages', $firstPackageStage, [StringComparison]::Ordinal)

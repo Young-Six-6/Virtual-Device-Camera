@@ -68,7 +68,14 @@ std::string RuntimeController::status_json(unsigned short web_port) const {
     const PipeReaderStatus pipe = frame_source_pipe_status(source_);
     const FrameSourceStatus input = frame_source_input_status(source_);
     const uint64_t now = GetTickCount64();
-    const VirtUsbDriverKind driver = virt_usb_detect_driver();
+    CameraSessionStatus cameraStatus[2]{};
+    for (int index = 0; index < 2; ++index)
+        if (cameras_[index]) cameraStatus[index] = cameras_[index]->status_snapshot();
+    VirtUsbDriverKind driver = cameraStatus[0].driver_kind;
+    if (driver == VirtUsbDriverKind::unavailable)
+        driver = cameraStatus[1].driver_kind;
+    if (driver == VirtUsbDriverKind::unavailable && !cameras_[0] && !cameras_[1])
+        driver = virt_usb_detect_driver();
     std::ostringstream json;
     json << "{\"driverAvailable\":" << (driver != VirtUsbDriverKind::unavailable ? "true" : "false")
          << ",\"driverKind\":" << json_string(driver_kind_name(driver))
@@ -106,7 +113,7 @@ std::string RuntimeController::status_json(unsigned short web_port) const {
     for (int index = 0; index < 2; ++index) {
         if (index) json << ',';
         if (cameras_[index]) {
-            const CameraSessionStatus camera = cameras_[index]->status_snapshot();
+            const CameraSessionStatus& camera = cameraStatus[index];
             json << "{\"index\":" << index + 1 << ",\"present\":true,\"running\":"
                  << (camera.running ? "true" : "false") << ",\"width\":" << camera.size.width
                  << ",\"height\":" << camera.size.height

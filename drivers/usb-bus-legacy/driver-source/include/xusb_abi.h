@@ -21,5 +21,6 @@ C_ASSERT(sizeof(xusb_driver_info_t) == 16);
 C_ASSERT(FIELD_OFFSET(xusb_ucx_state_t, RootHubGet20PortInfoCount) == 64);
 C_ASSERT(FIELD_OFFSET(xusb_ucx_state_t, RootHubGet30PortInfoStatus) == 104);
 C_ASSERT(FIELD_OFFSET(xusb_ucx_state_t, ReleaseHardwareCount) == 132);
-C_ASSERT(sizeof(xusb_ucx_state_t) == 168);
+C_ASSERT(FIELD_OFFSET(xusb_ucx_state_t, RootHubInvalidRequestCount) == 168);
+C_ASSERT(sizeof(xusb_ucx_state_t) == 200);
 C_ASSERT(IOCTL_XUSB_QUERY_UCX_STATE == 0x22602c);

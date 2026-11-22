@@ -287,8 +287,9 @@ static NTSTATUS USB_BUSIFFN XusbUsbdQueryBusInformation(
 
 static BOOLEAN USB_BUSIFFN XusbUsbdIsDeviceHighSpeed(_In_opt_ PVOID BusContext)
 {
-    UNREFERENCED_PARAMETER(BusContext);
-    return TRUE;
+    PXUSB_CHILD_EXTENSION child = (PXUSB_CHILD_EXTENSION)BusContext;
+    return child != NULL && child->Signature == XUSB_CHILD_SIGNATURE &&
+        child->DeviceSpeed == UsbHighSpeed;
 }
 
 static NTSTATUS USB_BUSIFFN XusbUsbdEnumLogEntry(
@@ -1039,6 +1040,7 @@ static NTSTATUS XusbCreateChild(
     _In_ PDEVICE_OBJECT ParentDevice,
     _In_ PXUSB_FILE_CONTEXT FileContext,
     _In_ const ioctl_pdo_create_t* Request,
+    _In_ USB_DEVICE_SPEED DeviceSpeed,
     _Out_ PLONG BusAddress)
 {
     PXUSB_PARENT_EXTENSION parent = (PXUSB_PARENT_EXTENSION)ParentDevice->DeviceExtension;
@@ -1074,6 +1076,7 @@ static NTSTATUS XusbCreateChild(
     child->Self = childPdo;
     child->ParentDevice = ParentDevice;
     child->PhysicalDeviceObject = parent->PhysicalDeviceObject;
+    child->DeviceSpeed = DeviceSpeed;
     InitializeListHead(&child->RemovalLink);
     child->Present = TRUE;
     child->DevicePowerState = PowerDeviceD0;
@@ -1369,6 +1372,7 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
             ULONG index;
             BOOLEAN connected = FALSE;
             USHORT deviceAddress = 0;
+            USB_DEVICE_SPEED deviceSpeed = UsbLowSpeed;
             PXUSB_PIPE_ENTRY pipes = NULL;
             ULONG pipeCount = 0;
             USB_DEVICE_DESCRIPTOR descriptor = { 0 };
@@ -1407,6 +1411,7 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
                             }
                             configurationValue = child->CurrentConfigurationValue;
                             deviceAddress = (USHORT)child->BusAddress;
+                            deviceSpeed = child->DeviceSpeed;
                             {
                                 KIRQL oldIrql;
                                 KeAcquireSpinLock(&child->TransactionLock, &oldIrql);
@@ -1428,7 +1433,7 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
                             (PUSB_NODE_CONNECTION_INFORMATION)buffer;
                         connection->DeviceDescriptor = descriptor;
                         connection->CurrentConfigurationValue = configurationValue;
-                        connection->LowSpeed = FALSE;
+                        connection->LowSpeed = connected && deviceSpeed == UsbLowSpeed;
                         connection->DeviceIsHub = FALSE;
                         connection->DeviceAddress = deviceAddress;
                         connection->NumberOfOpenPipes = pipeCount;
@@ -1440,7 +1445,7 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
                             (PUSB_NODE_CONNECTION_INFORMATION_EX)buffer;
                         connection->DeviceDescriptor = descriptor;
                         connection->CurrentConfigurationValue = configurationValue;
-                        connection->Speed = connected ? UsbHighSpeed : UsbLowSpeed;
+                        connection->Speed = connected ? (UCHAR)deviceSpeed : UsbLowSpeed;
                         connection->DeviceIsHub = FALSE;
                         connection->DeviceAddress = deviceAddress;
                         connection->NumberOfOpenPipes = pipeCount;
@@ -1507,7 +1512,8 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
         XusbCompleteIrp(Irp, status, information);
         return status;
     }
-    if (code != IOCTL_PDO_ADD && code != IOCTL_PDO_REMOVE) {
+    if (code != IOCTL_PDO_ADD && code != IOCTL_PDO_ADD_WITH_USB_SPEED &&
+        code != IOCTL_PDO_ADD_SUPERSPEED && code != IOCTL_PDO_REMOVE) {
         if (code == IOCTL_BEGIN_TRANS_USB_DATA || code == IOCTL_END_TRANS_USB_DATA) {
             PDEVICE_OBJECT childPdo = NULL;
             ExAcquireFastMutex(&parent->ChildMutex);
@@ -1546,18 +1552,42 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
         return IoCallDriver(parent->LowerDevice, Irp);
     }
 
-    if (code == IOCTL_PDO_ADD) {
-        const ioctl_pdo_create_t* request;
-        LONG address = 0;
+    if (code == IOCTL_PDO_ADD_SUPERSPEED) {
+        /* This WDM Root Hub is USB 2.0; SuperSpeed requires the UCX HCD path. */
+        IoReleaseRemoveLock(&parent->RemoveLock, Irp);
+        XusbCompleteIrp(Irp, STATUS_NOT_SUPPORTED, 0);
+        return STATUS_NOT_SUPPORTED;
+    }
 
-        if (Irp->AssociatedIrp.SystemBuffer == NULL || inputBytes < sizeof(*request) ||
+    if (code == IOCTL_PDO_ADD || code == IOCTL_PDO_ADD_WITH_USB_SPEED) {
+        const ioctl_pdo_create_t* request;
+        USB_DEVICE_SPEED deviceSpeed = UsbHighSpeed;
+        LONG address = 0;
+        ULONG requiredInputBytes = code == IOCTL_PDO_ADD_WITH_USB_SPEED
+            ? sizeof(ioctl_pdo_create_with_speed_t)
+            : sizeof(ioctl_pdo_create_t);
+
+        if (Irp->AssociatedIrp.SystemBuffer == NULL || inputBytes < requiredInputBytes ||
             outputBytes < sizeof(address)) {
             IoReleaseRemoveLock(&parent->RemoveLock, Irp);
             XusbCompleteIrp(Irp, STATUS_BUFFER_TOO_SMALL, 0);
             return STATUS_BUFFER_TOO_SMALL;
         }
-        request = (const ioctl_pdo_create_t*)Irp->AssociatedIrp.SystemBuffer;
-        status = XusbCreateChild(DeviceObject, fileContext, request, &address);
+        if (code == IOCTL_PDO_ADD_WITH_USB_SPEED) {
+            const ioctl_pdo_create_with_speed_t* speedRequest =
+                (const ioctl_pdo_create_with_speed_t*)Irp->AssociatedIrp.SystemBuffer;
+            if (speedRequest->UsbSpeed != XUSB_USB_SPEED_LOW &&
+                speedRequest->UsbSpeed != XUSB_USB_SPEED_FULL) {
+                IoReleaseRemoveLock(&parent->RemoveLock, Irp);
+                XusbCompleteIrp(Irp, STATUS_INVALID_PARAMETER, 0);
+                return STATUS_INVALID_PARAMETER;
+            }
+            deviceSpeed = (USB_DEVICE_SPEED)speedRequest->UsbSpeed;
+            request = &speedRequest->Create;
+        } else {
+            request = (const ioctl_pdo_create_t*)Irp->AssociatedIrp.SystemBuffer;
+        }
+        status = XusbCreateChild(DeviceObject, fileContext, request, deviceSpeed, &address);
         if (NT_SUCCESS(status)) {
             RtlCopyMemory(Irp->AssociatedIrp.SystemBuffer, &address, sizeof(address));
             information = sizeof(address);
@@ -1579,50 +1609,103 @@ NTSTATUS XusbDispatchDeviceControl(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIR
 
 #pragma warning(push)
 #pragma warning(disable: 6014) // The PnP manager owns the returned DEVICE_RELATIONS allocation.
+_IRQL_requires_max_(APC_LEVEL)
+static BOOLEAN XusbRelationsContain(
+    _In_opt_ PDEVICE_RELATIONS Relations,
+    _In_ PDEVICE_OBJECT DeviceObject)
+{
+    ULONG index;
+
+    if (Relations == NULL) {
+        return FALSE;
+    }
+    for (index = 0; index < Relations->Count; ++index) {
+        if (Relations->Objects[index] == DeviceObject) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static VOID XusbFreeDeviceRelations(_In_opt_ PDEVICE_RELATIONS Relations)
+{
+    ULONG index;
+
+    if (Relations == NULL) {
+        return;
+    }
+    for (index = 0; index < Relations->Count; ++index) {
+        if (Relations->Objects[index] != NULL) {
+            ObDereferenceObject(Relations->Objects[index]);
+        }
+    }
+    ExFreePool(Relations);
+}
+
 _IRQL_requires_(PASSIVE_LEVEL)
 NTSTATUS XusbEnumerateChildren(_In_ PDEVICE_OBJECT DeviceObject, _Inout_ PIRP Irp)
 {
     PXUSB_PARENT_EXTENSION parent = (PXUSB_PARENT_EXTENSION)DeviceObject->DeviceExtension;
     PLIST_ENTRY entry;
-    ULONG count = 0;
-    ULONG index = 0;
+    PDEVICE_RELATIONS existing =
+        (PDEVICE_RELATIONS)Irp->IoStatus.Information;
+    ULONG existingCount = existing != NULL ? existing->Count : 0;
+    ULONG addedCount = 0;
+    ULONG totalCount;
     SIZE_T bytes;
     PDEVICE_RELATIONS relations;
 
     ExAcquireFastMutex(&parent->ChildMutex);
     for (entry = parent->Children.Flink; entry != &parent->Children; entry = entry->Flink) {
         PXUSB_CHILD_EXTENSION child = CONTAINING_RECORD(entry, XUSB_CHILD_EXTENSION, Link);
-        if (child->Present && !child->Removed) {
-            ++count;
+        if (child->Present && !child->Removed &&
+            !XusbRelationsContain(existing, child->Self)) {
+            ++addedCount;
         }
     }
-    if (count > (MAXULONG - FIELD_OFFSET(DEVICE_RELATIONS, Objects)) / sizeof(PDEVICE_OBJECT)) {
+    if (addedCount > MAXULONG - existingCount ||
+        existingCount + addedCount >
+            (MAXULONG - FIELD_OFFSET(DEVICE_RELATIONS, Objects)) / sizeof(PDEVICE_OBJECT)) {
         ExReleaseFastMutex(&parent->ChildMutex);
         IoReleaseRemoveLock(&parent->RemoveLock, Irp);
+        XusbFreeDeviceRelations(existing);
         XusbCompleteIrp(Irp, STATUS_INTEGER_OVERFLOW, 0);
         return STATUS_INTEGER_OVERFLOW;
     }
+    totalCount = existingCount + addedCount;
     bytes = FIELD_OFFSET(DEVICE_RELATIONS, Objects) +
-        ((SIZE_T)count * sizeof(PDEVICE_OBJECT));
+        ((SIZE_T)totalCount * sizeof(PDEVICE_OBJECT));
     relations = ExAllocatePool2(POOL_FLAG_PAGED, bytes, XUSB_POOL_TAG);
     if (relations == NULL) {
         ExReleaseFastMutex(&parent->ChildMutex);
         IoReleaseRemoveLock(&parent->RemoveLock, Irp);
+        XusbFreeDeviceRelations(existing);
         XusbCompleteIrp(Irp, STATUS_INSUFFICIENT_RESOURCES, 0);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    relations->Count = count;
+    relations->Count = existingCount;
+    if (existingCount != 0) {
+        RtlCopyMemory(
+            relations->Objects,
+            existing->Objects,
+            (SIZE_T)existingCount * sizeof(PDEVICE_OBJECT));
+    }
     for (entry = parent->Children.Flink; entry != &parent->Children; entry = entry->Flink) {
         PXUSB_CHILD_EXTENSION child = CONTAINING_RECORD(entry, XUSB_CHILD_EXTENSION, Link);
         if (child->Present && !child->Removed) {
-            ObReferenceObject(child->Self);
             child->Reported = TRUE;
-            relations->Objects[index++] = child->Self;
+            if (!XusbRelationsContain(relations, child->Self)) {
+                ObReferenceObject(child->Self);
+                relations->Objects[relations->Count++] = child->Self;
+            }
         }
     }
     ExReleaseFastMutex(&parent->ChildMutex);
 
-    /* Replace the parent bus list with the PDOs reported by this enumerator. */
+    /* Transfer existing PDO references into the combined relation list. */
+    if (existing != NULL) {
+        ExFreePool(existing);
+    }
     IoReleaseRemoveLock(&parent->RemoveLock, Irp);
     XusbCompleteIrp(Irp, STATUS_SUCCESS, (ULONG_PTR)relations);
     return STATUS_SUCCESS;

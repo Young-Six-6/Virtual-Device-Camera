@@ -45,6 +45,7 @@ flowchart LR
 
 - 应用创建帧源，再创建摄像头会话和控制服务；退出时先停止并等待控制线程，再停止摄像头工作线程，最后释放帧源。
 - 摄像头工作线程独占 USB 事务循环；停止事件和传输中断用于取消阻塞 I/O，线程 join 完成后才释放其访问的对象。
+- 外部 PnP 移除只在明确的设备断开状态下等待移除通知；其他传输错误退出为可恢复失败态。之后的 `start` 或设置更新会先 join 已退出的 worker，再清理并尝试重建设备。
 - 每个帧源的输入管道线程只发布完整 RGB 帧。停止时取消正在进行的重叠 I/O，并等待线程退出。
 - Win32 句柄用 move-only RAII 封装。驱动事务缓冲区在传输对象内持有，开始/结束事务期间地址保持稳定。
 - 分辨率变更先分配新描述符与帧缓冲，再停止旧会话、移除设备并重新枚举。若新设备启动失败，会尝试恢复旧描述符和设备状态。
@@ -53,6 +54,8 @@ flowchart LR
 
 ## USB 与驱动边界
 
-`src/usb/ioctl.h` 中原有接口 GUID、结构体布局和 IOCTL 是用户态与内核驱动之间的冻结二进制契约；`IOCTL_PDO_ADD_SUPERSPEED` 与 `IOCTL_PDO_ADD_WITH_USB_SPEED` 是只对 FOSS 驱动启用的新增扩展，旧驱动不支持时现有用户态继续使用原 USB 2.0 高速路径。目标 Windows 当前运行 HCD `2.0.0.41` 和 role-3 `1.0.0.22`。Release 摄像头程序以 720p YUY2 抓取 120 帧约为 30fps，控制管道 720p→480p→720p 热更新也通过 DirectShow 实测；低/全速 HID 的 PnP、周期 interrupt-IN 和移除清理、WinUSB bulk IN/OUT 事务均完成运行验证（这些合成设备探针曾在 `.39` 上验证）。KMDF 测试客户端发送 Microsoft OS feature descriptor URB 后取得了有效描述符，Windows USB 栈把请求转成 vendor-control 传输到 HCD；直接 URB 形式没有在 HCD 边界观察到。以上验证针对软件虚拟 SuperSpeed 总线，不是物理 USB 3 链路测速，也不覆盖原版驱动的所有 URB 行为。验证细节见[驱动文档](driver.md)。
+`src/usb/ioctl.h` 中原有接口 GUID、结构体布局和 IOCTL 是用户态与内核驱动之间的冻结二进制契约；`IOCTL_PDO_ADD_SUPERSPEED` 与 `IOCTL_PDO_ADD_WITH_USB_SPEED` 是只对 FOSS 驱动启用的新增扩展，旧驱动不支持时现有用户态继续使用原 USB 2.0 高速路径。目标 Windows 当前运行 HCD `2.0.0.49` 和 role-3 `1.0.0.25`。Release 摄像头程序在 1.99 秒内抓取 60 帧 720p YUY2/30fps；有序退出后设备 PDO 消失，挂起事务和移除工作项为 0。低/全速 HID 的 PnP、周期 interrupt-IN 和移除清理、WinUSB bulk IN/OUT 事务均完成运行验证（这些合成设备探针在 `.48` 上验证）。KMDF 测试客户端发送 Microsoft OS feature descriptor URB 后取得有效描述符，Windows USB 栈把请求转成 vendor-control 传输到 HCD；直接 URB 形式没有在 HCD 边界观察到。以上验证针对软件虚拟 SuperSpeed 总线，不是物理 USB 3 链路测速，也不覆盖原版驱动的所有 URB 行为。验证细节见[驱动文档](driver.md)。
+
+`vcam_create_ex` 可注册优先于 UVC handler 执行的 `USB_REQUEST_CALLBACK`，支持应用覆盖设备/配置描述符并处理 control、bulk/interrupt、vendor/class、status、feature 和 reset 请求；返回 passthrough 可保留内置 UVC 行为。Isochronous 请求仍由内置 UVC responder 处理。旧 `vcam_create` 与 `vcam_create_with_mjpeg` 接口保持不变。请求格式、描述符约束、OUT 完成语义和线程约束见 [USB responder API](usb-responder.md)。
 
 TCP 和本机帧管道使用相同的 RGB24 帧格式；控制管道是独立的文本命令通道。协议详见[运行与输入协议](usage.md)和[控制管道协议](control-protocol.md)。

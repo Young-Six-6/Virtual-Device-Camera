@@ -6,8 +6,10 @@
 #include "transport.h"
 #include "../common/pipe_io.h"
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstring>
+#include <cwchar>
 #include <vector>
 
 namespace {
@@ -20,11 +22,13 @@ static_assert(IOCTL_XUSB_QUERY_DRIVER_INFO == 0x226028 && sizeof(xusb_driver_inf
     "Driver identification query ABI changed");
 struct Device {
     vcam::unique_handle file, stop, semaphore, removed;
+    VirtUsbDriverKind driver_kind = VirtUsbDriverKind::unavailable;
     std::vector<unsigned char> buffer;
     vcam::DeviceIdentity identity;
     int address = 0;
     bool plugged = false, remove_pending = false, active = false;
     bool super_speed = false, speed_locked = false;
+    std::atomic<bool> externally_removed{false};
     size_t payload_capacity = 0;
 
     bool ioctl(DWORD code, void* input, DWORD input_bytes, void* output, DWORD output_bytes, DWORD& bytes) {
@@ -47,6 +51,30 @@ struct Device {
         return false;
     }
 };
+void finish_removed(Device* device) {
+    device->plugged = false;
+    device->remove_pending = false;
+    device->active = false;
+    device->semaphore.reset();
+    device->removed.reset();
+}
+bool is_device_removal_error(DWORD error) {
+    return error == ERROR_DEVICE_NOT_CONNECTED || error == ERROR_DEV_NOT_EXIST ||
+        error == ERROR_NO_SUCH_DEVICE || error == ERROR_DEVICE_REMOVED;
+}
+bool wait_for_external_removal(Device* device, DWORD error) {
+    if (!is_device_removal_error(error)) return false;
+    HANDLE events[] = {device->stop.get(), device->removed.get()};
+    /* These statuses mean the PDO is disconnecting. Its removal event can
+     * arrive after the pending IOCTL completes, so wait for that PnP signal;
+     * stop still interrupts the wait during normal shutdown. Other IOCTL
+     * failures must not leave the camera worker blocked indefinitely. */
+    const DWORD wait = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+    if (wait != WAIT_OBJECT_0 + 1) return false;
+    device->externally_removed.store(true, std::memory_order_release);
+    finish_removed(device);
+    return true;
+}
 bool copy_id(WCHAR* output, const std::string& text, bool multi) {
     std::fill(output, output + HW_IDS_COUNT, wchar_t(0));
     if (text.empty()) return true;
@@ -54,11 +82,32 @@ bool copy_id(WCHAR* output, const std::string& text, bool multi) {
     if (multi) for (int i = 0; i < HW_IDS_COUNT; ++i) if (output[i] == L'\n') output[i] = L'\0';
     return true;
 }
-vcam::unique_handle open_driver() {
+struct OpenDriverResult {
+    vcam::unique_handle file;
+    VirtUsbDriverKind kind = VirtUsbDriverKind::unavailable;
+};
+
+VirtUsbDriverKind query_driver_kind(HANDLE file);
+
+bool is_ucx_hcd_interface(HDEVINFO list, PSP_DEVINFO_DATA deviceInfo) {
+    DWORD required = 0;
+    SetupDiGetDeviceInstanceIdW(list, deviceInfo, nullptr, 0, &required);
+    if (required == 0 || required > 4096) return false;
+    std::vector<WCHAR> instanceId(required);
+    if (!SetupDiGetDeviceInstanceIdW(list, deviceInfo, instanceId.data(), required, nullptr))
+        return false;
+    static constexpr WCHAR hcdInstancePrefix[] =
+        L"PCI\\VEN_37FA&DEV_FE09&SUBSYS_9976A077&REV_88";
+    return _wcsnicmp(instanceId.data(), hcdInstancePrefix,
+        _countof(hcdInstancePrefix) - 1) == 0;
+}
+
+OpenDriverResult open_driver() {
     HDEVINFO list = SetupDiGetClassDevsW(&GUID_XUSB_VIRT_INTERFACE, NULL, NULL,
         DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
     if (list == INVALID_HANDLE_VALUE) return {};
     struct ListOwner { HDEVINFO value; ~ListOwner() { SetupDiDestroyDeviceInfoList(value); } } owner{list};
+    OpenDriverResult fallback;
     for (DWORD index = 0;; ++index) {
         SP_DEVICE_INTERFACE_DATA entry{sizeof(entry)};
         if (!SetupDiEnumDeviceInterfaces(list, NULL, &GUID_XUSB_VIRT_INTERFACE, index, &entry)) break;
@@ -68,12 +117,23 @@ vcam::unique_handle open_driver() {
         std::vector<unsigned char> storage(needed);
         auto* detail = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(storage.data());
         detail->cbSize = sizeof(*detail);
-        if (!SetupDiGetDeviceInterfaceDetailW(list, &entry, detail, needed, NULL, NULL)) continue;
+        SP_DEVINFO_DATA deviceInfo{sizeof(deviceInfo)};
+        if (!SetupDiGetDeviceInterfaceDetailW(list, &entry, detail, needed, NULL, &deviceInfo)) continue;
         vcam::unique_handle file(CreateFileW(detail->DevicePath, GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL));
-        if (file) return file;
+        if (!file) continue;
+        const VirtUsbDriverKind kind = query_driver_kind(file.get());
+        OpenDriverResult candidate{std::move(file), kind};
+        /* The UCX HCD exposes the same legacy interface as USB-only providers.
+         * Prefer its controller PDO when it is present so camera PDOs enter the
+         * root hub whose traffic this session services. */
+        if (is_ucx_hcd_interface(list, &deviceInfo)) return candidate;
+        if (!fallback.file ||
+            (kind == VirtUsbDriverKind::foss_reconstructed &&
+             fallback.kind != VirtUsbDriverKind::foss_reconstructed))
+            fallback = std::move(candidate);
     }
-    return {};
+    return fallback;
 }
 VirtUsbDriverKind classify_unsupported_driver_ioctl(DWORD error) {
     return error == ERROR_INVALID_FUNCTION || error == ERROR_NOT_SUPPORTED
@@ -131,24 +191,29 @@ bool is_device_read(const usbtx_header_t& request) {
 }
 
 bool virt_usb_driver_available() {
-    return static_cast<bool>(open_driver());
+    return static_cast<bool>(open_driver().file);
 }
 
 VirtUsbDriverKind virt_usb_detect_driver() {
-    vcam::unique_handle file = open_driver();
-    return file ? query_driver_kind(file.get()) : VirtUsbDriverKind::unavailable;
+    return open_driver().kind;
 }
 
 void* virt_usb_open() {
     try {
         auto device = std::make_unique<Device>();
-        device->file = open_driver();
+        auto opened = open_driver();
+        device->file = std::move(opened.file);
+        device->driver_kind = opened.kind;
         device->stop.reset(CreateEvent(NULL, TRUE, FALSE, NULL));
         if (!device->file || !device->stop) return nullptr;
         device->buffer.resize(initial_transaction_buffer_size);
         return device.release();
     }
     catch (...) { return nullptr; }
+}
+VirtUsbDriverKind virt_usb_get_driver_kind(void* handle) {
+    auto* device = static_cast<Device*>(handle);
+    return device ? device->driver_kind : VirtUsbDriverKind::unavailable;
 }
 void virt_usb_close(void* handle) {
     if (!handle) return;
@@ -208,6 +273,7 @@ int virt_usb_plugin(void* handle, const char* id, const char* hardware, const ch
         device->identity = std::move(identity);
         device->address = address;
         device->remove_pending = false;
+        device->externally_removed.store(false, std::memory_order_release);
         device->semaphore = std::move(semaphore);
         device->removed = std::move(removed);
         device->plugged = true;
@@ -223,19 +289,25 @@ int virt_usb_unplug(void* handle) {
     auto* device = static_cast<Device*>(handle);
     if (!device) return -1;
     if (!device->plugged) return 0;
+    if (WaitForSingleObject(device->removed.get(), 0) == WAIT_OBJECT_0) {
+        finish_removed(device);
+        return 0;
+    }
     DWORD bytes = 0;
     if (!device->remove_pending) {
-        if (!device->ioctl(IOCTL_PDO_REMOVE, NULL, 0, NULL, 0, bytes)) return -1;
+        if (!device->ioctl(IOCTL_PDO_REMOVE, NULL, 0, NULL, 0, bytes)) {
+            if (WaitForSingleObject(device->removed.get(), 0) == WAIT_OBJECT_0) {
+                finish_removed(device);
+                return 0;
+            }
+            return -1;
+        }
         device->remove_pending = true;
     }
     HANDLE events[] = {device->removed.get(), device->stop.get()};
     const DWORD result = WaitForMultipleObjects(2, events, FALSE, 5000);
     if (result != WAIT_OBJECT_0) return -1;
-    device->plugged = false;
-    device->remove_pending = false;
-    device->active = false;
-    device->semaphore.reset();
-    device->removed.reset();
+    finish_removed(device);
     return 0;
 }
 int virt_usb_replug(void* handle) {
@@ -252,8 +324,15 @@ usbtx_header_t* virt_usb_begin(void* handle) {
         // size through every IOCTL. Most USB transactions fit in the initial buffer.
         device->buffer.resize(initial_transaction_buffer_size);
         for (;;) {
-            HANDLE events[] = {device->stop.get(), device->semaphore.get()};
-            if (WaitForMultipleObjects(2, events, FALSE, INFINITE) != WAIT_OBJECT_0+1) return nullptr;
+            HANDLE events[] = {device->stop.get(), device->removed.get(), device->semaphore.get()};
+            const DWORD wait = WaitForMultipleObjects(3, events, FALSE, INFINITE);
+            if (wait == WAIT_OBJECT_0) return nullptr;
+            if (wait == WAIT_OBJECT_0 + 1) {
+                device->externally_removed.store(true, std::memory_order_release);
+                finish_removed(device);
+                return nullptr;
+            }
+            if (wait != WAIT_OBJECT_0 + 2) return nullptr;
             DWORD bytes = 0;
             bool complete = false;
             bool stale_signal = false;
@@ -266,7 +345,10 @@ usbtx_header_t* virt_usb_begin(void* handle) {
                     stale_signal = true;
                     break;
                 }
-                if (error != ERROR_MORE_DATA || bytes != sizeof(ioctl_usbtx_header_t)) return nullptr;
+                if (error != ERROR_MORE_DATA || bytes != sizeof(ioctl_usbtx_header_t)) {
+                    wait_for_external_removal(device, error);
+                    return nullptr;
+                }
                 const auto* header = reinterpret_cast<const ioctl_usbtx_header_t*>(device->buffer.data());
                 if (header->data_length < 0 || size_t(header->data_length) > maximum_payload) return nullptr;
                 device->buffer.resize(sizeof(*header) + size_t(header->data_length));
@@ -306,10 +388,12 @@ int virt_usb_end(void* handle, usbtx_header_t* request) {
     DWORD bytes = 0;
     if (device->ioctl(IOCTL_END_TRANS_USB_DATA, raw, static_cast<DWORD>(sizeof(*raw)+raw->data_length),
         NULL, 0, bytes)) return 0;
-    if (GetLastError() == ERROR_NOT_FOUND) {
+    const DWORD error = GetLastError();
+    if (error == ERROR_NOT_FOUND) {
         request->result = -1;
         return 1;
     }
+    wait_for_external_removal(device, error);
     return -1;
 }
 
@@ -330,6 +414,11 @@ public:
     }
     size_t capacity() const override { return virt_usb_capacity(device_); }
     bool is_superspeed() const override { return virt_usb_is_superspeed(device_); }
+    VirtUsbDriverKind driver_kind() const override { return virt_usb_get_driver_kind(device_); }
+    bool consume_removed() noexcept override {
+        auto* device = static_cast<Device*>(device_);
+        return device && device->externally_removed.exchange(false, std::memory_order_acq_rel);
+    }
     void interrupt() noexcept override { virt_usb_interrupt(device_); }
     void resume() noexcept override { virt_usb_resume(device_); }
 };
