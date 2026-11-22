@@ -1,4 +1,3 @@
-/// By fanxiushu 2016-04-06
 // Frozen user/kernel ABI declarations; keep field order, width, packing, and IOCTL values unchanged.
 #pragma once
 

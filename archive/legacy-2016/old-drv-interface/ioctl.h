@@ -1,5 +1,3 @@
-/// By fanxiushu 2016-04-06
-
 #pragma once
 
 

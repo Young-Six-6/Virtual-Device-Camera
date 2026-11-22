@@ -35,6 +35,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1 -FFmpegS
 - [Python 工具](docs/python-tools.md)
 - [本机 Web UI](docs/web-ui.md)
 - [驱动包与来源记录](docs/driver.md)
+- [第三方来源与许可声明](THIRD_PARTY_NOTICES.md)
 - [维护与交接](docs/maintenance.md)
 
 ## 运行前要知道
@@ -68,4 +69,4 @@ archive/legacy-2016/       历史原文和旧接口代码，仅作溯源参考
 
 ## 许可与驱动
 
-应用代码沿用仓库中的 MIT 许可文件。仓库保留了上游旧版驱动二进制，并新增了独立的 WDM 重建源码工程；重建源码不是原版驱动源码，也没有替换旧驱动包。驱动来源、签名、许可边界、重建范围和未完成的运行时验证见[驱动文档](docs/driver.md)。
+仓库主许可见 `LICENSE`；引用的 UVC 结构定义及其上游许可、历史 ABI 文件来源见[第三方声明](THIRD_PARTY_NOTICES.md)。仓库保留了上游旧版驱动二进制，并新增了独立的 WDM 重建源码工程；重建源码不是原版驱动源码，也没有替换旧驱动包。驱动来源、签名、许可边界、重建范围和未完成的运行时验证见[驱动文档](docs/driver.md)。

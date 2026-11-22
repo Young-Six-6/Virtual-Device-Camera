@@ -1,18 +1,6 @@
-/// by fanxiushu 2016-10-01
-/// UVC data structures adapted from the Linux kernel definitions.
-
 /*
-* USB Video Class definitions.
-*
-* Copyright (C) 2009 Laurent Pinchart <laurent.pinchart@skynet.be>
-*
-* This file holds USB constants and structures defined by the USB Device
-* Class Definition for Video Devices. Unless otherwise stated, comments
-* below reference relevant sections of the USB Video Class 1.1 specification
-* available at
-*
-* http://www.usb.org/developers/devclass_docs/USB_Video_Class_1_1.zip
-*/
+ * USB Video Class constants and structures based on UVC 1.1.
+ */
 
 #ifndef __LINUX_USB_VIDEO_H
 #define __LINUX_USB_VIDEO_H

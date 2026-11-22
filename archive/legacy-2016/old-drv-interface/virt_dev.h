@@ -1,5 +1,3 @@
-/// By Fanxiushu 2016-04-27
-
 #pragma once
 
 #pragma pack(1)
