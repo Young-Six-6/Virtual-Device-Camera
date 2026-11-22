@@ -1,8 +1,10 @@
 #include <Windows.h>
+#include <array>
 #include <cstdio>
 #include <filesystem>
 #include <memory>
 #include <sstream>
+#include <vector>
 #include "app_config.h"
 #include "control_server.h"
 #include "console_log.h"
@@ -114,26 +116,35 @@ int wmain(int argc, wchar_t** argv) {
         if (!vcam::valid_pipe_path(settings.rgb_pipe) || !vcam::valid_pipe_path(settings.control_pipe) ||
             settings.rgb_pipe == settings.control_pipe) throw std::invalid_argument("Invalid or duplicate pipe name");
         if (override_size) {
-            settings.cameras[0].resolution = size;
-            settings.cameras[1].resolution = size;
+            for (auto& camera : settings.cameras) camera.resolution = size;
         }
-        if (!settings.camera_name_configured[0])
-            settings.cameras[0].name = !files.empty() ? "MP4 HD Camera 1" :
-                settings.input_mode == "obs" ? "OBS HD Camera 1" : "Pipe HD Camera 1";
+        if (!files.empty()) {
+            for (auto& enabled : settings.camera_enabled) enabled = false;
+            settings.camera_enabled[0] = true;
+            if (files.size() == 2) settings.camera_enabled[1] = true;
+        }
+        for (size_t index = 0; index < vcam::max_virtual_cameras; ++index) {
+            if (!settings.camera_enabled[index] || settings.camera_name_configured[index]) continue;
+            const std::string number = std::to_string(index + 1);
+            settings.cameras[index].name = !files.empty() ? "MP4 HD Camera " + number :
+                settings.input_mode == "obs" ? "OBS HD Camera " + number : "Pipe HD Camera " + number;
+        }
         using Source = std::unique_ptr<frame_source, decltype(&frame_source_destroy)>;
-        using Camera = std::unique_ptr<void, decltype(&vcam_destroy)>;
         Source source1(files.empty() ? frame_source_create_pipe(settings.rgb_pipe.c_str()) : frame_source_create_file(files[0].c_str()), frame_source_destroy);
         Source source2(files.size() == 2 ? frame_source_create_file(files[1].c_str()) : nullptr, frame_source_destroy);
         if (!source1 || (files.size() == 2 && !source2)) throw std::runtime_error("Unable to allocate frame source");
         if (files.empty()) {
             std::string input_error;
+            size_t primary_camera = 0;
+            for (size_t index = 0; index < vcam::max_virtual_cameras; ++index)
+                if (settings.camera_enabled[index]) { primary_camera = index; break; }
             if (!frame_source_set_input(source1.get(), settings.input_mode, settings.obs,
-                settings.rgb_pipe.c_str(), settings.rgb_pipe_access, settings.cameras[0].resolution, input_error))
+                settings.rgb_pipe.c_str(), settings.rgb_pipe_access,
+                settings.cameras[primary_camera].resolution, input_error))
                 throw std::runtime_error("Unable to start input source: " + input_error);
             printf("Input source: %s\n", settings.input_mode == "obs" ? "OBS WebSocket" : "RGB named pipe");
         }
-        auto create = [&](frame_source* source, int number) {
-            const auto& camera_settings = settings.cameras[number - 1];
+        auto create = [](frame_source* source, const vcam::CameraSettings& camera_settings) {
             uvc_vcam_t config{};
             config.pid = camera_settings.pid;
             config.vid = camera_settings.vid;
@@ -148,26 +159,54 @@ int wmain(int argc, wchar_t** argv) {
             config.fps = camera_settings.fps;
             config.enable_yuy2 = camera_settings.yuy2;
             config.enable_mjpeg = camera_settings.mjpeg;
-            return Camera(vcam_create_with_mjpeg(&config, frame_source_encode_mjpeg), vcam_destroy);
+            return vcam::CameraHandle(vcam_create_with_mjpeg(&config, frame_source_encode_mjpeg));
         };
-        Camera camera1 = create(source1.get(), 1);
-        if (!camera1) throw std::runtime_error("Unable to create camera 1; check the virtual USB driver");
-        Camera camera2(source2 ? create(source2.get(), 2).release() : nullptr, vcam_destroy);
-        if (source2 && !camera2) fprintf(stderr, "Warning: camera 2 could not be created.\n");
-        auto actions = [](void* camera) -> vcam::CameraActions {
-            if (!camera) return {};
-            auto* session = static_cast<vcam::CameraSession*>(camera);
-            return {[session](vcam::Resolution value, std::string& error) { return session->resize(value, error); },
-                [session] { return session->resolution(); }, [session] { return session->running(); }};
+        vcam::CameraFactory camera_factory = [&](const vcam::CameraSettings& camera_settings,
+                                                  int number, std::string& error) {
+            frame_source* source = number == 2 && source2 ? source2.get() : source1.get();
+            auto camera = create(source, camera_settings);
+            if (!camera) error = "camera-create-failed";
+            return camera;
         };
-        vcam::ControlRouter router({actions(camera1.get()), actions(camera2.get())});
+        std::array<vcam::CameraHandle, vcam::max_virtual_cameras> cameras;
+        bool camera_settings_changed = false;
+        for (size_t index = 0; index < vcam::max_virtual_cameras; ++index) {
+            if (!settings.camera_enabled[index]) continue;
+            std::string create_error;
+            cameras[index] = camera_factory(settings.cameras[index], static_cast<int>(index + 1), create_error);
+            if (!cameras[index]) {
+                fprintf(stderr, "Warning: unable to create camera %zu (%s).\n", index + 1,
+                    create_error.empty() ? "unknown error" : create_error.c_str());
+                settings.camera_enabled[index] = false;
+                camera_settings_changed = true;
+            }
+        }
+        bool any_camera = false;
+        std::vector<vcam::CameraActions> actions(vcam::max_virtual_cameras);
+        for (size_t index = 0; index < vcam::max_virtual_cameras; ++index) {
+            if (!cameras[index]) continue;
+            any_camera = true;
+            auto* session = static_cast<vcam::CameraSession*>(cameras[index].get());
+            actions[index] = {
+                [session](vcam::Resolution value, std::string& error) { return session->resize(value, error); },
+                [session] { return session->resolution(); }, [session] { return session->running(); }
+            };
+        }
+        if (!any_camera) throw std::runtime_error("Unable to create any camera; check the virtual USB driver");
+        if (camera_settings_changed) {
+            std::string save_error;
+            if (!vcam::save_app_settings(config_path.u8string(), settings, save_error))
+                fprintf(stderr, "Warning: could not persist unavailable cameras: %s\n", save_error.c_str());
+        }
+        vcam::ControlRouter router(std::move(actions));
         vcam::ControlServer server;
         if (!server.start(settings.control_pipe, [&router](const std::string& command) {
             return router.execute(command);
         }, settings.control_pipe_access)) throw std::runtime_error("Unable to start camera control pipe");
         vcam::TrayController tray(application_stop.get());
         if (!tray.initialize()) throw std::runtime_error("Unable to initialize the system tray controller");
-        vcam::RuntimeController runtime(settings, config_path.u8string(), source1.get(), camera1.get(), camera2.get(), server, files.empty());
+        vcam::RuntimeController runtime(settings, config_path.u8string(), source1.get(), std::move(cameras),
+            std::move(camera_factory), router, server, files.empty());
         vcam::WebServer web;
         const std::string token = vcam::create_web_token();
         if (!web.start(static_cast<unsigned short>(settings.web_port), token,

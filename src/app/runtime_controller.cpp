@@ -1,6 +1,7 @@
 #include "runtime_controller.h"
 #include "../media/frame_source.h"
 #include "../usb/virt_dev.h"
+#include "../camera/uvc_vcam.h"
 #include <sstream>
 
 namespace vcam {
@@ -57,25 +58,52 @@ std::string obs_color(const ObsSettings& settings) {
 }
 }
 
+void CameraDeleter::operator()(void* camera) const noexcept {
+    if (camera) vcam_destroy(camera);
+}
+
 RuntimeController::RuntimeController(AppSettings settings, std::string config_path, frame_source* source,
-                                     void* camera1, void* camera2, ControlServer& control, bool input_mode_available)
+                                     std::array<CameraHandle, max_virtual_cameras> cameras,
+                                     CameraFactory camera_factory, ControlRouter& router,
+                                     ControlServer& control, bool input_mode_available)
     : settings_(std::move(settings)), config_path_(std::move(config_path)), source_(source),
-      cameras_{static_cast<CameraSession*>(camera1), static_cast<CameraSession*>(camera2)}, control_(&control),
-      input_mode_available_(input_mode_available) {}
+      cameras_(std::move(cameras)), camera_factory_(std::move(camera_factory)), router_(&router),
+      control_(&control), input_mode_available_(input_mode_available) {
+    for (size_t index = 0; index < max_virtual_cameras; ++index)
+        router_->set_camera(index, camera_actions(index));
+}
+
+RuntimeController::~RuntimeController() {
+    control_->stop();
+    for (size_t index = 0; index < max_virtual_cameras; ++index)
+        router_->set_camera(index, {});
+    for (auto& camera : cameras_) camera.reset();
+}
+
+CameraActions RuntimeController::camera_actions(size_t index) const {
+    if (index >= max_virtual_cameras || !cameras_[index]) return {};
+    auto* session = static_cast<CameraSession*>(cameras_[index].get());
+    return {
+        [session](Resolution value, std::string& error) { return session->resize(value, error); },
+        [session] { return session->resolution(); },
+        [session] { return session->running(); }
+    };
+}
 
 std::string RuntimeController::status_json(unsigned short web_port) const {
     std::lock_guard<std::mutex> lock(mutex_);
     const PipeReaderStatus pipe = frame_source_pipe_status(source_);
     const FrameSourceStatus input = frame_source_input_status(source_);
     const uint64_t now = GetTickCount64();
-    CameraSessionStatus cameraStatus[2]{};
-    for (int index = 0; index < 2; ++index)
-        if (cameras_[index]) cameraStatus[index] = cameras_[index]->status_snapshot();
-    VirtUsbDriverKind driver = cameraStatus[0].driver_kind;
-    if (driver == VirtUsbDriverKind::unavailable)
-        driver = cameraStatus[1].driver_kind;
-    if (driver == VirtUsbDriverKind::unavailable && !cameras_[0] && !cameras_[1])
-        driver = virt_usb_detect_driver();
+    std::array<CameraSessionStatus, max_virtual_cameras> cameraStatus{};
+    VirtUsbDriverKind driver = VirtUsbDriverKind::unavailable;
+    for (size_t index = 0; index < max_virtual_cameras; ++index) {
+        if (!cameras_[index]) continue;
+        cameraStatus[index] = static_cast<CameraSession*>(cameras_[index].get())->status_snapshot();
+        if (driver == VirtUsbDriverKind::unavailable)
+            driver = cameraStatus[index].driver_kind;
+    }
+    if (driver == VirtUsbDriverKind::unavailable) driver = virt_usb_detect_driver();
     std::ostringstream json;
     json << "{\"driverAvailable\":" << (driver != VirtUsbDriverKind::unavailable ? "true" : "false")
          << ",\"driverKind\":" << json_string(driver_kind_name(driver))
@@ -109,8 +137,8 @@ std::string RuntimeController::status_json(unsigned short web_port) const {
          << ",\"width\":" << pipe.frame_size.width << ",\"height\":" << pipe.frame_size.height << "}"
          << ",\"controlPipe\":{\"name\":" << json_string(settings_.control_pipe)
          << ",\"running\":" << (control_->running() ? "true" : "false") << "}"
-         << ",\"cameras\":[";
-    for (int index = 0; index < 2; ++index) {
+         << ",\"maxCameras\":" << max_virtual_cameras << ",\"cameras\":[";
+    for (size_t index = 0; index < max_virtual_cameras; ++index) {
         if (index) json << ',';
         if (cameras_[index]) {
             const CameraSessionStatus& camera = cameraStatus[index];
@@ -154,17 +182,22 @@ std::pair<std::string, std::string> RuntimeController::theme() const {
 }
 
 std::optional<CameraFrame> RuntimeController::frame(int camera) const {
-    if (camera < 1 || camera > 2 || !cameras_[camera - 1]) return std::nullopt;
-    return cameras_[camera - 1]->snapshot();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (camera < 1 || camera > static_cast<int>(max_virtual_cameras) || !cameras_[camera - 1])
+        return std::nullopt;
+    return static_cast<CameraSession*>(cameras_[camera - 1].get())->snapshot();
 }
 
 bool RuntimeController::apply(const WebUpdate& update, std::string& error) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (update.camera_operation == WebCameraOperation::add) return add_camera(update.camera, error);
+    if (update.camera_operation == WebCameraOperation::remove) return remove_camera(update.camera, error);
     if (update.has_input_settings && !input_mode_available_) {
         error = "input-mode-locked-by-file-argument";
         return false;
     }
-    if (update.camera < 1 || update.camera > 2 || !cameras_[update.camera - 1]) {
+    if (update.camera < 1 || update.camera > static_cast<int>(max_virtual_cameras) ||
+        !cameras_[update.camera - 1]) {
         error = "camera-not-found";
         return false;
     }
@@ -192,11 +225,13 @@ bool RuntimeController::apply(const WebUpdate& update, std::string& error) {
             replacement.obs_password_encrypted.clear();
             replacement.obs_password_needs_reentry = false;
         }
-        if (previous.input_mode != replacement.input_mode && !replacement.camera_name_configured[0])
-            replacement.cameras[0].name = replacement.input_mode == "obs" ? "OBS HD Camera 1" : "Pipe HD Camera 1";
+        if (previous.input_mode != replacement.input_mode && !replacement.camera_name_configured[update.camera - 1])
+            replacement.cameras[update.camera - 1].name = replacement.input_mode == "obs"
+                ? "OBS HD Camera " + std::to_string(update.camera)
+                : "Pipe HD Camera " + std::to_string(update.camera);
     }
 
-    CameraSession& camera = *cameras_[update.camera - 1];
+    CameraSession& camera = *static_cast<CameraSession*>(cameras_[update.camera - 1].get());
     const CameraSettings previous_camera_settings = settings_.cameras[update.camera - 1];
     const CameraSettings next_camera_settings = replacement.cameras[update.camera - 1];
     const bool camera_changed = previous_camera_settings.resolution != next_camera_settings.resolution ||
@@ -206,13 +241,20 @@ bool RuntimeController::apply(const WebUpdate& update, std::string& error) {
         previous_camera_settings.name != next_camera_settings.name || previous_camera_settings.yuy2 != next_camera_settings.yuy2 ||
         previous_camera_settings.mjpeg != next_camera_settings.mjpeg;
     if (camera_changed && !camera.reconfigure(next_camera_settings, error)) return false;
-    if (update.camera == 1 && camera_changed) frame_source_set_target(source_, next_camera_settings.resolution);
+    const auto primary_camera = [this](const AppSettings& value) {
+        for (size_t index = 0; index < max_virtual_cameras; ++index)
+            if (value.camera_enabled[index] && cameras_[index]) return static_cast<int>(index);
+        return -1;
+    };
+    const int primary_index = primary_camera(settings_);
+    if (update.camera - 1 == primary_index && camera_changed)
+        frame_source_set_target(source_, next_camera_settings.resolution);
 
     const bool control_changed = previous.control_pipe != replacement.control_pipe ||
         previous.control_pipe_access != replacement.control_pipe_access;
     if (control_changed && !control_->reconfigure(replacement.control_pipe, replacement.control_pipe_access)) {
         if (camera_changed) { std::string ignored; camera.reconfigure(previous_camera_settings, ignored); }
-        if (update.camera == 1 && camera_changed) frame_source_set_target(source_, previous_camera_settings.resolution);
+        if (update.camera - 1 == primary_index && camera_changed) frame_source_set_target(source_, previous_camera_settings.resolution);
         error = "control-pipe-reconfigure-failed";
         return false;
     }
@@ -223,7 +265,7 @@ bool RuntimeController::apply(const WebUpdate& update, std::string& error) {
     if (rgb_changed && !frame_source_reconfigure_pipe(source_, replacement.rgb_pipe.c_str(), replacement.rgb_pipe_access)) {
         if (control_changed) control_->reconfigure(previous.control_pipe, previous.control_pipe_access);
         if (camera_changed) { std::string ignored; camera.reconfigure(previous_camera_settings, ignored); }
-        if (update.camera == 1 && camera_changed) frame_source_set_target(source_, previous_camera_settings.resolution);
+        if (update.camera - 1 == primary_index && camera_changed) frame_source_set_target(source_, previous_camera_settings.resolution);
         error = "rgb-pipe-reconfigure-failed";
         return false;
     }
@@ -231,11 +273,12 @@ bool RuntimeController::apply(const WebUpdate& update, std::string& error) {
     const bool input_changed = previous.input_mode != replacement.input_mode ||
         (previous.input_mode == "obs" && !obs_settings_equal(previous.obs, replacement.obs));
     if (input_changed && !frame_source_set_input(source_, replacement.input_mode, replacement.obs,
-        replacement.rgb_pipe.c_str(), replacement.rgb_pipe_access, replacement.cameras[0].resolution, error)) {
+        replacement.rgb_pipe.c_str(), replacement.rgb_pipe_access,
+        replacement.cameras[primary_index >= 0 ? primary_index : 0].resolution, error)) {
         if (rgb_changed) frame_source_reconfigure_pipe(source_, previous.rgb_pipe.c_str(), previous.rgb_pipe_access);
         if (control_changed) control_->reconfigure(previous.control_pipe, previous.control_pipe_access);
         if (camera_changed) { std::string ignored; camera.reconfigure(previous_camera_settings, ignored); }
-        if (update.camera == 1 && camera_changed) frame_source_set_target(source_, previous_camera_settings.resolution);
+        if (update.camera - 1 == primary_index && camera_changed) frame_source_set_target(source_, previous_camera_settings.resolution);
         if (error.empty()) error = "input-reconfigure-failed";
         return false;
     }
@@ -244,14 +287,79 @@ bool RuntimeController::apply(const WebUpdate& update, std::string& error) {
         if (input_changed) {
             std::string ignored;
             frame_source_set_input(source_, previous.input_mode, previous.obs,
-                previous.rgb_pipe.c_str(), previous.rgb_pipe_access, previous.cameras[0].resolution, ignored);
+                previous.rgb_pipe.c_str(), previous.rgb_pipe_access,
+                previous.cameras[primary_index >= 0 ? primary_index : 0].resolution, ignored);
         } else if (rgb_changed) frame_source_reconfigure_pipe(source_, previous.rgb_pipe.c_str(), previous.rgb_pipe_access);
         if (control_changed) control_->reconfigure(previous.control_pipe, previous.control_pipe_access);
         if (camera_changed) { std::string ignored; camera.reconfigure(previous_camera_settings, ignored); }
-        if (update.camera == 1 && camera_changed) frame_source_set_target(source_, previous_camera_settings.resolution);
+        if (update.camera - 1 == primary_index && camera_changed) frame_source_set_target(source_, previous_camera_settings.resolution);
         return false;
     }
     settings_ = std::move(replacement);
+    return true;
+}
+
+bool RuntimeController::add_camera(int template_camera, std::string& error) {
+    if (template_camera < 1 || template_camera > static_cast<int>(max_virtual_cameras) ||
+        !cameras_[template_camera - 1]) {
+        error = "template-camera-not-found";
+        return false;
+    }
+    size_t slot = max_virtual_cameras;
+    for (size_t index = 0; index < max_virtual_cameras; ++index) {
+        if (!cameras_[index]) { slot = index; break; }
+    }
+    if (slot == max_virtual_cameras) {
+        error = "maximum-camera-count-reached";
+        return false;
+    }
+
+    AppSettings replacement = settings_;
+    CameraSettings added = settings_.cameras[template_camera - 1];
+    added.vid = static_cast<uint16_t>(0xbb10 + slot);
+    added.pid = static_cast<uint16_t>(0xcc10 + slot);
+    added.name = (input_mode_available_ && replacement.input_mode == "obs" ? "OBS HD Camera " :
+        input_mode_available_ ? "Pipe HD Camera " : "MP4 HD Camera ") + std::to_string(slot + 1);
+    replacement.cameras[slot] = added;
+    replacement.camera_enabled[slot] = true;
+    replacement.camera_name_configured[slot] = false;
+
+    CameraHandle created = camera_factory_(replacement.cameras[slot], static_cast<int>(slot + 1), error);
+    if (!created) {
+        if (error.empty()) error = "camera-create-failed";
+        return false;
+    }
+    if (!save_app_settings(config_path_, replacement, error)) return false;
+    cameras_[slot] = std::move(created);
+    settings_ = std::move(replacement);
+    router_->set_camera(slot, camera_actions(slot));
+    return true;
+}
+
+bool RuntimeController::remove_camera(int camera, std::string& error) {
+    if (camera < 1 || camera > static_cast<int>(max_virtual_cameras) || !cameras_[camera - 1]) {
+        error = "camera-not-found";
+        return false;
+    }
+    size_t active = 0;
+    for (const auto& item : cameras_) if (item) ++active;
+    if (active <= 1) {
+        error = "at-least-one-camera-required";
+        return false;
+    }
+
+    AppSettings replacement = settings_;
+    replacement.camera_enabled[camera - 1] = false;
+    if (!save_app_settings(config_path_, replacement, error)) return false;
+    router_->set_camera(static_cast<size_t>(camera - 1), {});
+    cameras_[camera - 1].reset();
+    settings_ = std::move(replacement);
+    for (size_t index = 0; index < max_virtual_cameras; ++index) {
+        if (cameras_[index]) {
+            frame_source_set_target(source_, settings_.cameras[index].resolution);
+            break;
+        }
+    }
     return true;
 }
 }

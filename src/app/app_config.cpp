@@ -242,9 +242,10 @@ AppSettings load_app_settings(const std::string& config_name) {
             settings.obs.password = unprotect_obs_password(settings.obs_password_encrypted,
                 settings.obs_password_needs_reentry);
         }
-        for (int i = 0; i < 2; ++i) {
+        for (size_t i = 0; i < max_virtual_cameras; ++i) {
             CameraSettings& camera = settings.cameras[i];
             const std::string prefix = "camera" + std::to_string(i + 1) + "_";
+            settings.camera_enabled[i] = bool_value(values, (prefix + "enabled").c_str(), i == 0);
             camera.resolution = {integer_value(values, (prefix + "width").c_str(), 0),
                 integer_value(values, (prefix + "height").c_str(), 0)};
             camera.fps = integer_value(values, (prefix + "fps").c_str(), camera.fps);
@@ -260,10 +261,16 @@ AppSettings load_app_settings(const std::string& config_name) {
         settings.custom_css = hex_decode(values, "custom_css_hex");
         settings.custom_js = hex_decode(values, "custom_js_hex");
     }
-    resolve_camera(settings.cameras[0].resolution, fallback);
-    resolve_camera(settings.cameras[1].resolution, fallback);
+    bool any_camera_enabled = false;
+    for (size_t i = 0; i < max_virtual_cameras; ++i) {
+        resolve_camera(settings.cameras[i].resolution, fallback);
+        any_camera_enabled = any_camera_enabled || settings.camera_enabled[i];
+        if (!valid_camera(settings.cameras[i]))
+            throw std::runtime_error("Invalid camera settings in camera.ini");
+    }
+    if (!any_camera_enabled)
+        throw std::runtime_error("At least one camera must be enabled in camera.ini");
     if ((settings.input_mode != "pipe" && settings.input_mode != "obs") || !valid_obs_settings(settings.obs) ||
-        !valid_camera(settings.cameras[0]) || !valid_camera(settings.cameras[1]) ||
         !valid_theme(settings.custom_css) || !valid_theme(settings.custom_js))
         throw std::runtime_error("Invalid camera or theme settings in camera.ini");
     if (!valid_pipe_path(settings.rgb_pipe) || !valid_pipe_path(settings.control_pipe) ||
@@ -275,9 +282,16 @@ AppSettings load_app_settings(const std::string& config_name) {
 }
 
 bool save_app_settings(const std::string& config_name, const AppSettings& settings, std::string& error) {
-    if (!valid_pipe_path(settings.rgb_pipe) || !valid_pipe_path(settings.control_pipe) ||
-        settings.rgb_pipe == settings.control_pipe || !valid_camera(settings.cameras[0]) ||
-        !valid_camera(settings.cameras[1]) || (settings.input_mode != "pipe" && settings.input_mode != "obs") ||
+    bool any_camera = false;
+    for (size_t i = 0; i < max_virtual_cameras; ++i) {
+        any_camera = any_camera || settings.camera_enabled[i];
+        if (!valid_camera(settings.cameras[i])) {
+            error = "invalid-settings";
+            return false;
+        }
+    }
+    if (!any_camera || !valid_pipe_path(settings.rgb_pipe) || !valid_pipe_path(settings.control_pipe) ||
+        settings.rgb_pipe == settings.control_pipe || (settings.input_mode != "pipe" && settings.input_mode != "obs") ||
         !valid_obs_settings(settings.obs) || settings.web_port < 1024 || settings.web_port > 65535 ||
         !valid_theme(settings.custom_css) || !valid_theme(settings.custom_js)) {
         error = "invalid-settings";
@@ -312,28 +326,23 @@ bool save_app_settings(const std::string& config_name, const AppSettings& settin
                << "obs_auto_size=" << (settings.obs.auto_size ? "true" : "false") << "\n"
                << "obs_test_color=" << (settings.obs.test_color ? "true" : "false") << "\n"
                << "obs_color=" << obs_color_hex(settings.obs.color) << "\n"
-               << "obs_password_dpapi_hex=" << protected_obs_password << "\n"
-               << "camera1_width=" << settings.cameras[0].resolution.width << "\n"
-               << "camera1_height=" << settings.cameras[0].resolution.height << "\n"
-               << "camera1_fps=" << settings.cameras[0].fps << "\n"
-               << "camera1_vid=" << std::hex << settings.cameras[0].vid << std::dec << "\n"
-               << "camera1_pid=" << std::hex << settings.cameras[0].pid << std::dec << "\n"
-               << "camera1_manufacturer=" << settings.cameras[0].manufacturer << "\n"
-               << "camera1_name=" << settings.cameras[0].name << "\n"
-               << "camera1_name_custom=" << (settings.camera_name_configured[0] ? "true" : "false") << "\n"
-               << "camera1_yuy2=" << (settings.cameras[0].yuy2 ? "true" : "false") << "\n"
-               << "camera1_mjpeg=" << (settings.cameras[0].mjpeg ? "true" : "false") << "\n"
-               << "camera2_width=" << settings.cameras[1].resolution.width << "\n"
-               << "camera2_height=" << settings.cameras[1].resolution.height << "\n"
-               << "camera2_fps=" << settings.cameras[1].fps << "\n"
-               << "camera2_vid=" << std::hex << settings.cameras[1].vid << std::dec << "\n"
-               << "camera2_pid=" << std::hex << settings.cameras[1].pid << std::dec << "\n"
-               << "camera2_manufacturer=" << settings.cameras[1].manufacturer << "\n"
-               << "camera2_name=" << settings.cameras[1].name << "\n"
-               << "camera2_name_custom=" << (settings.camera_name_configured[1] ? "true" : "false") << "\n"
-               << "camera2_yuy2=" << (settings.cameras[1].yuy2 ? "true" : "false") << "\n"
-               << "camera2_mjpeg=" << (settings.cameras[1].mjpeg ? "true" : "false") << "\n"
-               << "custom_css_hex=" << hex_encode(settings.custom_css) << "\n"
+               << "obs_password_dpapi_hex=" << protected_obs_password << "\n";
+        for (size_t i = 0; i < max_virtual_cameras; ++i) {
+            const CameraSettings& camera = settings.cameras[i];
+            const std::string prefix = "camera" + std::to_string(i + 1) + "_";
+            output << prefix << "enabled=" << (settings.camera_enabled[i] ? "true" : "false") << "\n"
+                   << prefix << "width=" << camera.resolution.width << "\n"
+                   << prefix << "height=" << camera.resolution.height << "\n"
+                   << prefix << "fps=" << camera.fps << "\n"
+                   << prefix << "vid=" << std::hex << camera.vid << std::dec << "\n"
+                   << prefix << "pid=" << std::hex << camera.pid << std::dec << "\n"
+                   << prefix << "manufacturer=" << camera.manufacturer << "\n"
+                   << prefix << "name=" << camera.name << "\n"
+                   << prefix << "name_custom=" << (settings.camera_name_configured[i] ? "true" : "false") << "\n"
+                   << prefix << "yuy2=" << (camera.yuy2 ? "true" : "false") << "\n"
+                   << prefix << "mjpeg=" << (camera.mjpeg ? "true" : "false") << "\n";
+        }
+        output << "custom_css_hex=" << hex_encode(settings.custom_css) << "\n"
                << "custom_js_hex=" << hex_encode(settings.custom_js) << "\n";
         output.flush();
         if (!output) { error = "config-write-failed"; return false; }

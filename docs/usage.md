@@ -11,7 +11,7 @@
 .\virtual-device-camera.exe --resolution 1280x720 --control-pipe '\\.\pipe\vcam_control'
 ```
 
-无视频参数时创建一个 RGB24 管道输入摄像头。指定一个或两个 MP4 路径时按顺序创建摄像头实例。相对视频路径相对于 EXE 所在目录；文件播放结束后循环。命令行支持 `--resolution 480|720|1080|WIDTHxHEIGHT`、`--pipe PATH`、`--control-pipe PATH` 和 `--help`。输入参数最多两个视频路径。
+无视频参数时，程序按 `camera.ini` 创建启用的 RGB24 管道/OBS 摄像头（默认一路）；Web UI 可在线增删设备，最多 7 路。指定一个或两个 MP4 路径时仍按路径数创建初始摄像头实例，之后也可通过 Web UI 增删虚拟设备。相对视频路径相对于 EXE 所在目录；文件播放结束后循环。命令行支持 `--resolution 480|720|1080|WIDTHxHEIGHT`、`--pipe PATH`、`--control-pipe PATH` 和 `--help`。输入参数最多两个视频路径。
 
 应用须能找到已安装的虚拟 USB 总线接口。只构建应用不会在 Windows 中注册摄像头。
 

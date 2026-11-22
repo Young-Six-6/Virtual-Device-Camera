@@ -12,8 +12,11 @@
 #include <thread>
 
 namespace vcam {
+enum class WebCameraOperation { none, add, remove };
+
 struct WebUpdate {
     int camera = 1;
+    WebCameraOperation camera_operation = WebCameraOperation::none;
     CameraSettings settings;
     std::string rgb_pipe;
     std::string control_pipe;

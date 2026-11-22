@@ -1,9 +1,13 @@
 #pragma once
 #include "resolution.h"
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
 namespace vcam {
+// The reconstructed USB root hub exposes seven downstream ports.
+inline constexpr size_t max_virtual_cameras = 7;
+
 struct CameraSettings {
     Resolution resolution{0, 0};
     int fps = 30;

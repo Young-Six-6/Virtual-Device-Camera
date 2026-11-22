@@ -3,7 +3,9 @@
 #include "../common/resolution.h"
 #include "../common/pipe_security.h"
 #include <atomic>
+#include <cstddef>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -16,9 +18,11 @@ struct CameraActions {
 };
 class ControlRouter {
     std::vector<CameraActions> cameras_;
+    mutable std::mutex mutex_;
 public:
     explicit ControlRouter(std::vector<CameraActions> cameras) : cameras_(std::move(cameras)) {}
     std::string execute(const std::string& command) const;
+    bool set_camera(size_t camera, CameraActions actions);
 };
 class ControlServer {
     unique_handle pipe_, stop_;

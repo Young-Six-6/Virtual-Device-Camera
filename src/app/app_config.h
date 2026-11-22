@@ -16,13 +16,18 @@ struct AppSettings {
     ObsSettings obs;
     std::string obs_password_encrypted;
     bool obs_password_needs_reentry = false;
-    CameraSettings cameras[2]{};
-    bool camera_name_configured[2]{};
+    CameraSettings cameras[max_virtual_cameras]{};
+    bool camera_enabled[max_virtual_cameras]{};
+    bool camera_name_configured[max_virtual_cameras]{};
     std::string custom_css;
     std::string custom_js;
     AppSettings() {
-        cameras[1].vid = 0xbb11;
-        cameras[1].pid = 0xcc11;
+        camera_enabled[0] = true;
+        for (size_t i = 0; i < max_virtual_cameras; ++i) {
+            cameras[i].vid = static_cast<uint16_t>(0xbb10 + i);
+            cameras[i].pid = static_cast<uint16_t>(0xcc10 + i);
+            cameras[i].name = "Pipe HD Camera " + std::to_string(i + 1);
+        }
         cameras[1].name = "MP4 HD Camera 2";
     }
 };

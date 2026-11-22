@@ -1,10 +1,12 @@
 #include "control_server.h"
+#include "../common/camera_settings.h"
 #include "../common/pipe_io.h"
 #include "../common/pipe_security.h"
 #include <sstream>
 
 namespace vcam {
 std::string ControlRouter::execute(const std::string& command) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::istringstream input(command);
     std::string verb, extra;
     int camera = 0;
@@ -26,6 +28,13 @@ std::string ControlRouter::execute(const std::string& command) const {
             " " + std::to_string(size.height) + (actions.running() ? " RUNNING" : " STOPPED");
     }
     return "ERR invalid-command";
+}
+bool ControlRouter::set_camera(size_t camera, CameraActions actions) {
+    if (camera >= max_virtual_cameras) return false;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (cameras_.size() < max_virtual_cameras) cameras_.resize(max_virtual_cameras);
+    cameras_[camera] = std::move(actions);
+    return true;
 }
 ControlServer::~ControlServer() { stop(); }
 bool ControlServer::start(const std::string& path, std::function<std::string(const std::string&)> handler,
